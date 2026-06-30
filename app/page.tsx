@@ -257,7 +257,7 @@ function initItinerary() {
         const wrap = document.createElement("div"); wrap.style.display = "contents";
         wrap.innerHTML = cardHtml(item, globalIdx);
         row.appendChild(wrap.firstElementChild!);
-        if (i < slice.length - 1) { const c = document.createElement("div"); c.className = "connector-h"; row.appendChild(c); }
+        if (i < slice.length - 1) { const c = document.createElement("div"); c.className = "connector-h " + (reverse ? "dir-left" : "dir-right"); row.appendChild(c); }
       });
       rows.appendChild(row);
       if ((r + 1) * PER_ROW < items.length) {
@@ -265,7 +265,7 @@ function initItinerary() {
         gap.style.justifyContent = reverse ? "flex-start" : "flex-end";
         gap.style.paddingRight = reverse ? "0" : "104px";
         gap.style.paddingLeft = reverse ? "104px" : "0";
-        const v = document.createElement("div"); v.className = "connector-v"; gap.appendChild(v);
+        const v = document.createElement("div"); v.className = "connector-v dir-down"; gap.appendChild(v);
         rows.appendChild(gap);
       }
     }

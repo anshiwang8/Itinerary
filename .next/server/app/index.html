@@ -1,0 +1,105 @@
+<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="stylesheet" href="/_next/static/css/0bdb4704b3a0924e.css" data-precedence="next"/><link rel="preload" as="script" fetchPriority="low" href="/_next/static/chunks/webpack-c8441f2d519541e3.js"/><script src="/_next/static/chunks/fd9d1056-4313c8a7022cf435.js" async=""></script><script src="/_next/static/chunks/117-e898375322b1824c.js" async=""></script><script src="/_next/static/chunks/main-app-9746001da647dc10.js" async=""></script><script src="/_next/static/chunks/app/page-05d326e338e88fc5.js" async=""></script><title>Itinerary — life moves simpler.</title><meta name="description" content="Plan your day, weather included."/><script src="/_next/static/chunks/polyfills-42372ed130431b0a.js" noModule=""></script></head><body><div>
+<div class="bg-base" id="bgBase"></div>
+<div class="bg-weather" id="bgWeather">
+  <div class="sun-big"></div>
+  <div class="cloud c1"></div>
+  <div class="cloud c2"></div>
+  <div class="cloud c3"></div>
+</div>
+
+<nav>
+  <div class="brand">Itinerary</div>
+  <div class="nav-links"><a href="#">Pricing</a><a href="#">About us</a></div>
+</nav>
+
+<div class="nav-search" id="navSearch">
+  <div class="seg"><label>Search</label><span class="val" id="navQ">—</span></div>
+  <div class="divline"></div>
+  <div class="seg"><label>Start</label><span class="val" id="navStart">—</span></div>
+  <div class="divline"></div>
+  <div class="seg"><label>End</label><span class="val" id="navEnd">—</span></div>
+  <button class="mini-btn"><svg viewBox="0 0 24 24"><path d="M21.7 20.3l-4.9-4.9A8.3 8.3 0 1 0 15.4 16.8l4.9 4.9a1 1 0 0 0 1.4-1.4zM10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13z"/></svg></button>
+</div>
+
+<main class="hero" id="hero">
+  <h1>Itinerary</h1>
+  <p class="tagline">life moves simpler.</p>
+  <div class="search-bar">
+    <div class="bar-section search-seg">
+      <label for="searchInput">Search</label>
+      <input type="text" id="searchInput" placeholder="what were you thinking?" />
+    </div>
+    <div class="bar-divider"></div>
+    <div class="bar-section" id="startSection" onclick="openPicker('start', event)">
+      <label>Start Time</label>
+      <div class="datetime-display" id="startDisplay">Add date</div>
+    </div>
+    <div class="bar-divider"></div>
+    <div class="bar-section" id="endSection" onclick="openPicker('end', event)">
+      <label>End Time</label>
+      <div class="datetime-display" id="endDisplay">Add date</div>
+    </div>
+    <button class="search-btn" onclick="runSearch()" aria-label="Search">
+      <svg viewBox="0 0 24 24"><path d="M21.7 20.3l-4.9-4.9A8.3 8.3 0 1 0 15.4 16.8l4.9 4.9a1 1 0 0 0 1.4-1.4zM10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13z"/></svg>
+    </button>
+  </div>
+</main>
+
+<div class="picker-overlay" id="pickerOverlay" onclick="overlayClick(event)">
+  <div class="picker-popup" id="pickerPopup">
+    <div class="picker-header">
+      <button onclick="changeMonth(-1)">&#8249;</button>
+      <span class="month-year" id="monthYear"></span>
+      <button onclick="changeMonth(1)">&#8250;</button>
+    </div>
+    <div class="calendar-grid" id="calendarGrid"></div>
+    <div class="time-section">
+      <label>Time</label>
+      <div class="time-inputs">
+        <input type="number" id="hourInput" min="1" max="12" placeholder="12" />
+        <span class="time-sep">:</span>
+        <input type="number" id="minInput" min="0" max="59" placeholder="00" />
+      </div>
+      <button class="ampm-btn" id="ampmBtn" onclick="toggleAmPm()">AM</button>
+    </div>
+    <div class="picker-footer">
+      <button class="btn-clear" onclick="clearPicker()">Clear</button>
+      <button class="btn-apply" onclick="applyPicker()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<section class="schedule-screen" id="schedule">
+  <div class="rows" id="rows"></div>
+  <div class="edit-zone">
+    <div class="edit-bar" id="editBar">
+      <span class="q">Switch out <b id="editTarget">this</b> for…</span>
+      <input type="text" placeholder="what would you prefer?" />
+      <button class="go"><svg viewBox="0 0 24 24"><path d="M21.7 20.3l-4.9-4.9A8.3 8.3 0 1 0 15.4 16.8l4.9 4.9a1 1 0 0 0 1.4-1.4zM10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13z"/></svg></button>
+    </div>
+  </div>
+</section>
+
+<div class="weather-box" id="weatherBox">
+  <svg class="w-icon" id="wIcon" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="24" cy="24" r="11" fill="#ffd24d"/>
+    <g stroke="#ffd24d" stroke-width="2.5" stroke-linecap="round">
+      <line x1="24" y1="6" x2="24" y2="11"/>
+      <line x1="24" y1="37" x2="24" y2="42"/>
+      <line x1="6" y1="24" x2="11" y2="24"/>
+      <line x1="9" y1="9" x2="13" y2="13"/>
+      <line x1="35" y1="13" x2="39" y2="9"/>
+    </g>
+    <path d="M30 44a9 9 0 0 1 17.6-2.6A8 8 0 1 1 49 57H32a6.5 6.5 0 0 1-2-12.7z" fill="#eef4f7" stroke="#cfe0e6" stroke-width="1.5"/>
+  </svg>
+  <div class="w-text">
+    <div class="cond" id="wCond">—</div>
+    <div class="w-temps">
+      <span class="hi"><span id="wHi">–</span>°<span class="deg"> H</span></span>
+      <span class="lo"><span id="wLo">–</span>°<span class="deg"> L</span></span>
+    </div>
+  </div>
+</div>
+
+<svg id="pointerSvg"></svg>
+</div><script src="/_next/static/chunks/webpack-c8441f2d519541e3.js" async=""></script><script>(self.__next_f=self.__next_f||[]).push([0]);self.__next_f.push([2,null])</script><script>self.__next_f.push([1,"1:HL[\"/_next/static/css/0bdb4704b3a0924e.css\",\"style\"]\n"])</script><script>self.__next_f.push([1,"2:I[2846,[],\"\"]\n4:I[9107,[],\"ClientPageRoot\"]\n5:I[7340,[\"931\",\"static/chunks/app/page-05d326e338e88fc5.js\"],\"default\",1]\n6:I[4707,[],\"\"]\n7:I[6423,[],\"\"]\n9:I[1060,[],\"\"]\na:[]\n0:[\"$\",\"$L2\",null,{\"buildId\":\"Z-ndrp7nCb0iKVWLJBuSk\",\"assetPrefix\":\"\",\"urlParts\":[\"\",\"\"],\"initialTree\":[\"\",{\"children\":[\"__PAGE__\",{}]},\"$undefined\",\"$undefined\",true],\"initialSeedData\":[\"\",{\"children\":[\"__PAGE__\",{},[[\"$L3\",[\"$\",\"$L4\",null,{\"props\":{\"params\":{},\"searchParams\":{}},\"Component\":\"$5\"}],null],null],null]},[[[[\"$\",\"link\",\"0\",{\"rel\":\"stylesheet\",\"href\":\"/_next/static/css/0bdb4704b3a0924e.css\",\"precedence\":\"next\",\"crossOrigin\":\"$undefined\"}]],[\"$\",\"html\",null,{\"lang\":\"en\",\"children\":[\"$\",\"body\",null,{\"children\":[\"$\",\"$L6\",null,{\"parallelRouterKey\":\"children\",\"segmentPath\":[\"children\"],\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"errorScripts\":\"$undefined\",\"template\":[\"$\",\"$L7\",null,{}],\"templateStyles\":\"$undefined\",\"templateScripts\":\"$undefined\",\"notFound\":[[\"$\",\"title\",null,{\"children\":\"404: This page could not be found.\"}],[\"$\",\"div\",null,{\"style\":{\"fontFamily\":\"system-ui,\\\"Segoe UI\\\",Roboto,Helvetica,Arial,sans-serif,\\\"Apple Color Emoji\\\",\\\"Segoe UI Emoji\\\"\",\"height\":\"100vh\",\"textAlign\":\"center\",\"display\":\"flex\",\"flexDirection\":\"column\",\"alignItems\":\"center\",\"justifyContent\":\"center\"},\"children\":[\"$\",\"div\",null,{\"children\":[[\"$\",\"style\",null,{\"dangerouslySetInnerHTML\":{\"__html\":\"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}\"}}],[\"$\",\"h1\",null,{\"className\":\"next-error-h1\",\"style\":{\"display\":\"inline-block\",\"margin\":\"0 20px 0 0\",\"padding\":\"0 23px 0 0\",\"fontSize\":24,\"fontWeight\":500,\"verticalAlign\":\"top\",\"lineHeight\":\"49px\"},\"children\":\"404\"}],[\"$\",\"div\",null,{\"style\":{\"display\":\"inline-block\"},\"children\":[\"$\",\"h2\",null,{\"style\":{\"fontSize\":14,\"fontWeight\":400,\"lineHeight\":\"49px\",\"margin\":0},\"children\":\"This page could not be found.\"}]}]]}]}]],\"notFoundStyl"])</script><script>self.__next_f.push([1,"es\":[]}]}]}]],null],null],\"couldBeIntercepted\":false,\"initialHead\":[null,\"$L8\"],\"globalErrorComponent\":\"$9\",\"missingSlots\":\"$Wa\"}]\n"])</script><script>self.__next_f.push([1,"8:[[\"$\",\"meta\",\"0\",{\"name\":\"viewport\",\"content\":\"width=device-width, initial-scale=1\"}],[\"$\",\"meta\",\"1\",{\"charSet\":\"utf-8\"}],[\"$\",\"title\",\"2\",{\"children\":\"Itinerary — life moves simpler.\"}],[\"$\",\"meta\",\"3\",{\"name\":\"description\",\"content\":\"Plan your day, weather included.\"}]]\n3:null\n"])</script></body></html>
