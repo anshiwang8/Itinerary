@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isOpenAt, parseTargetTime } from "./hours";
+import { filterPools, ParsedPrompt, Place } from "./filter";
 
 // Places API (New) — Text Search, driven by the parsed prompt from
 // /api/parse. One Text Search call per category signal, so downstream
 // steps get a separate candidate pool per stop type rather than one
-// mixed list. No filtering or LLM selection yet.
+// mixed list. Pools pass through the objective filter (filter.ts)
+// before the response. No LLM selection yet.
 const SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText";
 
 const FIELD_MASK = [
@@ -16,18 +17,6 @@ const FIELD_MASK = [
   "places.currentOpeningHours",
   "places.businessStatus",
 ].join(",");
-
-// Shape returned by /api/parse.
-interface ParsedPrompt {
-  time_window: string;
-  stop_count: number | null;
-  aesthetic: string;
-  category_signals: string[];
-  group_context: string;
-  budget: string | null;
-  constraints: string[];
-  location: string;
-}
 
 // e.g. aesthetic="lively night out", category="bar", location="Ossington"
 // → "lively night out bar Ossington Toronto"
@@ -96,48 +85,26 @@ export async function POST(request: NextRequest) {
   try {
     // Vague prompts can parse to zero category signals; run a single
     // aesthetic+location query so the caller still gets candidates.
+    const rawPools: Record<string, Place[]> = {};
     if (categories.length === 0) {
-      const query = buildQuery(parsed, "things to do");
-      const places = await searchText(apiKey, query);
-      return NextResponse.json({ general: places });
-    }
-
-    // One Text Search per category, in parallel.
-    const pools = await Promise.all(
-      categories.map((category) =>
-        searchText(apiKey, buildQuery(parsed, category))
-      )
-    );
-
-    const byCategory: Record<string, unknown[]> = {};
-    categories.forEach((category, i) => {
-      byCategory[category] = pools[i];
-    });
-
-    // ── DEBUG: hours-check diagnostics (no filtering applied yet). ──
-    // Logs target time + raw currentOpeningHours + isOpenAt verdict per
-    // venue so we can pin the failure mode (data vs comparison vs
-    // time_window format) before building the real objective filter.
-    const target = parseTargetTime(parsed.time_window);
-    console.log(`[hours-debug] time_window="${parsed.time_window}" → target=${JSON.stringify(target)}`);
-    const hoursDebug: Record<string, unknown[]> = {};
-    for (const [category, places] of Object.entries(byCategory)) {
-      hoursDebug[category] = (places as any[]).map((p) => {
-        const verdict = target ? isOpenAt(p.currentOpeningHours, target) : null;
-        const entry = {
-          name: p.displayName?.text ?? "(unnamed)",
-          target,
-          rawCurrentOpeningHours: p.currentOpeningHours ?? null,
-          openAtTarget: verdict,
-        };
-        console.log(
-          `[hours-debug] ${category} | ${entry.name} | target=${JSON.stringify(target)} | openAtTarget=${verdict} | periods=${JSON.stringify(p.currentOpeningHours?.periods ?? null)}`
-        );
-        return entry;
+      rawPools.general = await searchText(
+        apiKey,
+        buildQuery(parsed, "things to do")
+      );
+    } else {
+      // One Text Search per category, in parallel.
+      const results = await Promise.all(
+        categories.map((category) =>
+          searchText(apiKey, buildQuery(parsed, category))
+        )
+      );
+      categories.forEach((category, i) => {
+        rawPools[category] = results[i];
       });
     }
 
-    return NextResponse.json({ ...byCategory, _hoursDebug: hoursDebug });
+    const { pools, dropLog } = filterPools(rawPools, parsed);
+    return NextResponse.json({ ...pools, _dropLog: dropLog });
   } catch (err) {
     return NextResponse.json(
       {

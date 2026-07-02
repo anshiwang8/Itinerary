@@ -19,17 +19,40 @@ interface Place {
 
 type GroupedPlaces = Record<string, Place[]>;
 
+interface DropEntry {
+  category: string;
+  name: string;
+  id: string;
+  rule: string;
+  detail: string;
+}
+
+interface Selection {
+  category: string;
+  id: string | null;
+  reason: string;
+  fallback?: boolean;
+  name?: string;
+  rating?: number;
+}
+
 export default function PlacesTest() {
   const [prompt, setPrompt] = useState("");
   const [parsed, setParsed] = useState<string | null>(null);
   const [grouped, setGrouped] = useState<GroupedPlaces | null>(null);
+  const [dropLog, setDropLog] = useState<DropEntry[]>([]);
+  const [selections, setSelections] = useState<Selection[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [stage, setStage] = useState<"idle" | "parsing" | "searching">("idle");
+  const [stage, setStage] = useState<
+    "idle" | "parsing" | "searching" | "selecting"
+  >("idle");
 
   async function runPipeline() {
     setError(null);
     setParsed(null);
     setGrouped(null);
+    setDropLog([]);
+    setSelections(null);
     try {
       setStage("parsing");
       const parseRes = await fetch("/api/parse", {
@@ -59,10 +82,26 @@ export default function PlacesTest() {
             (placesData.details ? `\ndetails: ${placesData.details}` : "")
         );
       }
-      // Drop non-category keys (e.g. _hoursDebug) — only real category
-      // pools should render as venue sections.
-      const { _hoursDebug, ...categories } = placesData;
+      // Split the drop log off the response — only real category pools
+      // render as venue sections.
+      const { _dropLog, ...categories } = placesData;
+      setDropLog(Array.isArray(_dropLog) ? _dropLog : []);
       setGrouped(categories);
+
+      setStage("selecting");
+      const selectRes = await fetch("/api/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parsed: parseData, pools: categories }),
+      });
+      const selectData = await selectRes.json();
+      if (!selectRes.ok) {
+        throw new Error(
+          (selectData.error ?? `select HTTP ${selectRes.status}`) +
+            (selectData.raw ? `\nraw: ${selectData.raw}` : "")
+        );
+      }
+      setSelections(selectData.selections ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -100,8 +139,42 @@ export default function PlacesTest() {
           ? "Parsing…"
           : stage === "searching"
           ? "Searching places…"
-          : "Test Parse → Places"}
+          : stage === "selecting"
+          ? "Selecting venues…"
+          : "Test Parse → Places → Select"}
       </button>
+
+      {selections && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>Final picks</div>
+          {selections.map((s) => (
+            <div
+              key={s.category}
+              style={{
+                marginTop: 6,
+                padding: "8px 10px",
+                border: "1px solid #d5e5ea",
+                borderRadius: 8,
+                background: "#f6fbfc",
+              }}
+            >
+              <div style={{ fontSize: 11, textTransform: "uppercase", color: "#679" }}>
+                {s.category}
+                {s.fallback && " · fallback"}
+              </div>
+              {s.id === null ? (
+                <em>{s.reason}</em>
+              ) : (
+                <>
+                  <strong>{s.name}</strong>
+                  {s.rating != null && <> · {s.rating}★</>}
+                  <div style={{ color: "#557", marginTop: 2 }}>{s.reason}</div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {error && (
         <pre style={{ color: "#b00", whiteSpace: "pre-wrap", marginTop: 6 }}>
@@ -110,37 +183,52 @@ export default function PlacesTest() {
       )}
 
       {parsed && (
-        <>
-          <div style={{ marginTop: 8, fontWeight: 600 }}>Parsed</div>
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ fontWeight: 600 }}>Parsed</summary>
           <pre style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{parsed}</pre>
-        </>
+        </details>
       )}
 
       {grouped &&
-        Object.entries(grouped).map(([category, places]) => (
-          <div key={category} style={{ marginTop: 8 }}>
-            <div style={{ fontWeight: 600 }}>
-              {category} ({places.length})
+        Object.entries(grouped).map(([category, places]) => {
+          const drops = dropLog.filter((d) => d.category === category);
+          return (
+            <div key={category} style={{ marginTop: 8 }}>
+              <details>
+                <summary style={{ fontWeight: 600 }}>
+                  {category} — {places.length} surviving
+                </summary>
+                {places.length === 0 && <p>No places survived the filter.</p>}
+                <ul style={{ paddingLeft: 18, marginTop: 4 }}>
+                  {places.map((p) => (
+                    <li key={p.id} style={{ marginBottom: 6 }}>
+                      <strong>{p.displayName?.text ?? "(unnamed)"}</strong>
+                      <br />
+                      rating: {p.rating ?? "n/a"} · price: {p.priceLevel ?? "n/a"}
+                      <br />
+                      {p.currentOpeningHours?.openNow == null
+                        ? "open now: n/a"
+                        : p.currentOpeningHours.openNow
+                        ? "open now"
+                        : "closed now"}{" "}
+                      · {p.businessStatus ?? "status n/a"}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+              <details style={{ marginTop: 2, color: "#777" }}>
+                <summary>dropped ({drops.length})</summary>
+                <ul style={{ paddingLeft: 18, marginTop: 4 }}>
+                  {drops.map((d, i) => (
+                    <li key={`${d.id}-${i}`}>
+                      {d.name} — <em>{d.rule}</em> ({d.detail})
+                    </li>
+                  ))}
+                </ul>
+              </details>
             </div>
-            {places.length === 0 && <p>No places returned.</p>}
-            <ul style={{ paddingLeft: 18, marginTop: 4 }}>
-              {places.map((p) => (
-                <li key={p.id} style={{ marginBottom: 6 }}>
-                  <strong>{p.displayName?.text ?? "(unnamed)"}</strong>
-                  <br />
-                  rating: {p.rating ?? "n/a"} · price: {p.priceLevel ?? "n/a"}
-                  <br />
-                  {p.currentOpeningHours?.openNow == null
-                    ? "open now: n/a"
-                    : p.currentOpeningHours.openNow
-                    ? "open now"
-                    : "closed now"}{" "}
-                  · {p.businessStatus ?? "status n/a"}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
+          );
+        })}
     </div>
   );
 }
