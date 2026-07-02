@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isOpenAt, parseTargetTime } from "./hours";
 
 // Places API (New) — Text Search, driven by the parsed prompt from
 // /api/parse. One Text Search call per category signal, so downstream
@@ -113,7 +114,30 @@ export async function POST(request: NextRequest) {
       byCategory[category] = pools[i];
     });
 
-    return NextResponse.json(byCategory);
+    // ── DEBUG: hours-check diagnostics (no filtering applied yet). ──
+    // Logs target time + raw currentOpeningHours + isOpenAt verdict per
+    // venue so we can pin the failure mode (data vs comparison vs
+    // time_window format) before building the real objective filter.
+    const target = parseTargetTime(parsed.time_window);
+    console.log(`[hours-debug] time_window="${parsed.time_window}" → target=${JSON.stringify(target)}`);
+    const hoursDebug: Record<string, unknown[]> = {};
+    for (const [category, places] of Object.entries(byCategory)) {
+      hoursDebug[category] = (places as any[]).map((p) => {
+        const verdict = target ? isOpenAt(p.currentOpeningHours, target) : null;
+        const entry = {
+          name: p.displayName?.text ?? "(unnamed)",
+          target,
+          rawCurrentOpeningHours: p.currentOpeningHours ?? null,
+          openAtTarget: verdict,
+        };
+        console.log(
+          `[hours-debug] ${category} | ${entry.name} | target=${JSON.stringify(target)} | openAtTarget=${verdict} | periods=${JSON.stringify(p.currentOpeningHours?.periods ?? null)}`
+        );
+        return entry;
+      });
+    }
+
+    return NextResponse.json({ ...byCategory, _hoursDebug: hoursDebug });
   } catch (err) {
     return NextResponse.json(
       {
