@@ -59,7 +59,10 @@ export default function PlacesTest() {
             (placesData.details ? `\ndetails: ${placesData.details}` : "")
         );
       }
-      setGrouped(placesData);
+      // Drop non-category keys (e.g. _hoursDebug) — only real category
+      // pools should render as venue sections.
+      const { _hoursDebug, ...categories } = placesData;
+      setGrouped(categories);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
