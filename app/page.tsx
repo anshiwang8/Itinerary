@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import PlacesTest from "./PlacesTest";
 
 // The Itinerary prototype is a heavily imperative, DOM-driven UI (custom
 // date picker, hand-drawn pointer SVG, staggered reveal). Rather than
@@ -339,5 +340,11 @@ export default function Home() {
     initItinerary();
   }, []);
 
-  return <div ref={ref} dangerouslySetInnerHTML={{ __html: MARKUP }} />;
+  return (
+    <>
+      <div ref={ref} dangerouslySetInnerHTML={{ __html: MARKUP }} />
+      {/* Temporary Places API test harness — remove after verification. */}
+      <PlacesTest />
+    </>
+  );
 }
