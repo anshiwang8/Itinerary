@@ -1,10 +1,10 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-// Places API (New) — Text Search.
-// Hardcoded query for now: this route exists purely to prove the
-// Google Places connection works end to end.
+// Places API (New) — Text Search, driven by the parsed prompt from
+// /api/parse. One Text Search call per category signal, so downstream
+// steps get a separate candidate pool per stop type rather than one
+// mixed list. No filtering or LLM selection yet.
 const SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText";
-const HARDCODED_QUERY = "coffee shop Ossington Toronto";
 
 const FIELD_MASK = [
   "places.displayName",
@@ -16,7 +16,51 @@ const FIELD_MASK = [
   "places.businessStatus",
 ].join(",");
 
-export async function GET() {
+// Shape returned by /api/parse.
+interface ParsedPrompt {
+  time_window: string;
+  stop_count: number | null;
+  aesthetic: string;
+  category_signals: string[];
+  group_context: string;
+  budget: string | null;
+  constraints: string[];
+  location: string;
+}
+
+// e.g. aesthetic="lively night out", category="bar", location="Ossington"
+// → "lively night out bar Ossington Toronto"
+function buildQuery(parsed: ParsedPrompt, category: string): string {
+  const aesthetic =
+    parsed.aesthetic && parsed.aesthetic.toLowerCase() !== "unspecified"
+      ? parsed.aesthetic
+      : "";
+  return [aesthetic, category, parsed.location, "Toronto"]
+    .filter(Boolean)
+    .join(" ");
+}
+
+async function searchText(apiKey: string, textQuery: string) {
+  const res = await fetch(SEARCH_TEXT_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask": FIELD_MASK,
+    },
+    body: JSON.stringify({ textQuery }),
+    cache: "no-store",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(
+      data?.error?.message ?? `Places API request failed (${res.status}).`
+    );
+  }
+  return data.places ?? [];
+}
+
+export async function POST(request: NextRequest) {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
@@ -25,36 +69,55 @@ export async function GET() {
     );
   }
 
+  let parsed: ParsedPrompt;
   try {
-    const res = await fetch(SEARCH_TEXT_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": apiKey,
-        "X-Goog-FieldMask": FIELD_MASK,
-      },
-      body: JSON.stringify({ textQuery: HARDCODED_QUERY }),
-      // Don't cache while we're proving the connection works.
-      cache: "no-store",
-    });
+    const body = await request.json();
+    parsed = body?.parsed;
+  } catch {
+    return NextResponse.json(
+      { error: "Request body must be JSON." },
+      { status: 400 }
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || typeof parsed.location !== "string") {
+    return NextResponse.json(
+      { error: "`parsed` (the /api/parse output object) is required in the body." },
+      { status: 400 }
+    );
+  }
 
-    const data = await res.json();
+  const categories = Array.isArray(parsed.category_signals)
+    ? parsed.category_signals.filter(
+        (c): c is string => typeof c === "string" && c.trim() !== ""
+      )
+    : [];
 
-    if (!res.ok) {
-      return NextResponse.json(
-        {
-          error: `Places API request failed (${res.status}).`,
-          details: data?.error?.message ?? data,
-        },
-        { status: 500 }
-      );
+  try {
+    // Vague prompts can parse to zero category signals; run a single
+    // aesthetic+location query so the caller still gets candidates.
+    if (categories.length === 0) {
+      const query = buildQuery(parsed, "things to do");
+      const places = await searchText(apiKey, query);
+      return NextResponse.json({ general: places });
     }
 
-    return NextResponse.json(data);
+    // One Text Search per category, in parallel.
+    const pools = await Promise.all(
+      categories.map((category) =>
+        searchText(apiKey, buildQuery(parsed, category))
+      )
+    );
+
+    const byCategory: Record<string, unknown[]> = {};
+    categories.forEach((category, i) => {
+      byCategory[category] = pools[i];
+    });
+
+    return NextResponse.json(byCategory);
   } catch (err) {
     return NextResponse.json(
       {
-        error: "Failed to reach the Places API.",
+        error: "Places search failed.",
         details: err instanceof Error ? err.message : String(err),
       },
       { status: 500 }

@@ -2,8 +2,10 @@
 
 import { useState } from "react";
 
-// Throwaway harness proving the /api/places/search connection works.
-// Plain list, no styling polish — delete once real Places UI exists.
+// Throwaway harness proving the parse → places pipeline works end to
+// end: one button runs /api/parse, then feeds the result straight into
+// /api/places/search and renders the per-category candidate pools.
+// Plain list, no styling polish — delete once real UI exists.
 
 interface Place {
   id: string;
@@ -15,54 +17,53 @@ interface Place {
   businessStatus?: string;
 }
 
+type GroupedPlaces = Record<string, Place[]>;
+
 export default function PlacesTest() {
-  const [places, setPlaces] = useState<Place[] | null>(null);
+  const [prompt, setPrompt] = useState("");
+  const [parsed, setParsed] = useState<string | null>(null);
+  const [grouped, setGrouped] = useState<GroupedPlaces | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [stage, setStage] = useState<"idle" | "parsing" | "searching">("idle");
 
-  const [parsePrompt, setParsePrompt] = useState("");
-  const [parseResult, setParseResult] = useState<string | null>(null);
-  const [parseError, setParseError] = useState<string | null>(null);
-  const [parseLoading, setParseLoading] = useState(false);
-
-  async function runTest() {
-    setLoading(true);
+  async function runPipeline() {
     setError(null);
-    setPlaces(null);
+    setParsed(null);
+    setGrouped(null);
     try {
-      const res = await fetch("/api/places/search");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      setPlaces(data.places ?? []);
+      setStage("parsing");
+      const parseRes = await fetch("/api/parse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      const parseData = await parseRes.json();
+      if (!parseRes.ok) {
+        throw new Error(
+          (parseData.error ?? `parse HTTP ${parseRes.status}`) +
+            (parseData.raw ? `\nraw: ${parseData.raw}` : "")
+        );
+      }
+      setParsed(JSON.stringify(parseData, null, 2));
+
+      setStage("searching");
+      const placesRes = await fetch("/api/places/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parsed: parseData }),
+      });
+      const placesData = await placesRes.json();
+      if (!placesRes.ok) {
+        throw new Error(
+          (placesData.error ?? `places HTTP ${placesRes.status}`) +
+            (placesData.details ? `\ndetails: ${placesData.details}` : "")
+        );
+      }
+      setGrouped(placesData);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
-    }
-  }
-
-  async function runParse() {
-    setParseLoading(true);
-    setParseError(null);
-    setParseResult(null);
-    try {
-      const res = await fetch("/api/parse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: parsePrompt }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(
-          (data.error ?? `HTTP ${res.status}`) +
-            (data.raw ? `\nraw: ${data.raw}` : "")
-        );
-      }
-      setParseResult(JSON.stringify(data, null, 2));
-    } catch (err) {
-      setParseError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setParseLoading(false);
+      setStage("idle");
     }
   }
 
@@ -77,57 +78,66 @@ export default function PlacesTest() {
         border: "1px solid #ccc",
         borderRadius: 10,
         padding: 12,
-        maxWidth: 340,
-        maxHeight: "60vh",
+        maxWidth: 380,
+        maxHeight: "70vh",
         overflowY: "auto",
         fontSize: 13,
       }}
     >
-      <button onClick={runTest} disabled={loading}>
-        {loading ? "Loading…" : "Test Places API"}
-      </button>
-      {error && <p style={{ color: "#b00" }}>Error: {error}</p>}
-      {places && places.length === 0 && <p>No places returned.</p>}
-      {places && places.length > 0 && (
-        <ul style={{ paddingLeft: 18, marginTop: 8 }}>
-          {places.map((p) => (
-            <li key={p.id} style={{ marginBottom: 6 }}>
-              <strong>{p.displayName?.text ?? "(unnamed)"}</strong>
-              <br />
-              rating: {p.rating ?? "n/a"} · price: {p.priceLevel ?? "n/a"}
-              <br />
-              {p.currentOpeningHours?.openNow == null
-                ? "open now: n/a"
-                : p.currentOpeningHours.openNow
-                ? "open now"
-                : "closed now"}{" "}
-              · {p.businessStatus ?? "status n/a"}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <hr style={{ margin: "10px 0" }} />
-
       <input
         type="text"
-        value={parsePrompt}
-        onChange={(e) => setParsePrompt(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter") runParse(); }}
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") runPipeline(); }}
         placeholder="e.g. chill coffee afternoon for two"
         style={{ width: "100%", marginBottom: 6, padding: 4 }}
       />
-      <button onClick={runParse} disabled={parseLoading || !parsePrompt.trim()}>
-        {parseLoading ? "Parsing…" : "Test Parse"}
+      <button onClick={runPipeline} disabled={stage !== "idle" || !prompt.trim()}>
+        {stage === "parsing"
+          ? "Parsing…"
+          : stage === "searching"
+          ? "Searching places…"
+          : "Test Parse → Places"}
       </button>
-      {parseError && (
+
+      {error && (
         <pre style={{ color: "#b00", whiteSpace: "pre-wrap", marginTop: 6 }}>
-          Error: {parseError}
+          Error: {error}
         </pre>
       )}
-      {parseResult && (
-        <pre style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>{parseResult}</pre>
+
+      {parsed && (
+        <>
+          <div style={{ marginTop: 8, fontWeight: 600 }}>Parsed</div>
+          <pre style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{parsed}</pre>
+        </>
       )}
+
+      {grouped &&
+        Object.entries(grouped).map(([category, places]) => (
+          <div key={category} style={{ marginTop: 8 }}>
+            <div style={{ fontWeight: 600 }}>
+              {category} ({places.length})
+            </div>
+            {places.length === 0 && <p>No places returned.</p>}
+            <ul style={{ paddingLeft: 18, marginTop: 4 }}>
+              {places.map((p) => (
+                <li key={p.id} style={{ marginBottom: 6 }}>
+                  <strong>{p.displayName?.text ?? "(unnamed)"}</strong>
+                  <br />
+                  rating: {p.rating ?? "n/a"} · price: {p.priceLevel ?? "n/a"}
+                  <br />
+                  {p.currentOpeningHours?.openNow == null
+                    ? "open now: n/a"
+                    : p.currentOpeningHours.openNow
+                    ? "open now"
+                    : "closed now"}{" "}
+                  · {p.businessStatus ?? "status n/a"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
     </div>
   );
 }
