@@ -1,11 +1,15 @@
 // Unit tests for filterPools. Run with: npx tsx app/api/places/search/filter.test.ts
 import assert from "node:assert";
 import {
+  COLD_BLOCK_THRESHOLD_C,
   DropEntry,
   filterPools,
+  isOutdoorCategory,
   ParsedPrompt,
   Place,
+  PRECIP_BLOCK_THRESHOLD,
   RATING_FLOOR,
+  WeatherHour,
 } from "./filter";
 
 // ── fixtures ──
@@ -208,6 +212,124 @@ const cases: Array<[string, () => void]> = [
       );
       assert.strictEqual(pools.dinner.length, 0);
       assert.deepStrictEqual(pools.bars.map((p) => p.id), ["dup"]);
+    },
+  ],
+  // ── weather gate ──
+  // Fixed now: Fri 2026-07-03 13:20 → "afternoon" resolves to 14:00.
+  [
+    "outdoor matcher: parks/walks/patios/markets yes, indoor no",
+    () => {
+      for (const c of ["park", "walk in the park", "patio", "garden", "beach", "trail", "farmers market", "picnic", "hike"]) {
+        assert.strictEqual(isOutdoorCategory(c), true, `${c} should be outdoor`);
+      }
+      for (const c of ["museum", "coffee shop", "bar", "ramen", "bookstore"]) {
+        assert.strictEqual(isOutdoorCategory(c), false, `${c} should NOT be outdoor`);
+      }
+    },
+  ],
+  [
+    "rain above threshold blocks outdoor pool at category level",
+    () => {
+      const NOW = new Date(2026, 6, 3, 13, 20, 0);
+      const weather: WeatherHour[] = [
+        { hourISO: new Date(2026, 6, 3, 14, 0).toISOString(), tempC: 22, precipProbability: 80, condition: "Rain" },
+      ];
+      const { pools, weatherBlocked, dropLog } = filterPools(
+        { park: [mkPlace("p1"), mkPlace("p2")] },
+        mkParsed({ time_window: "afternoon" }),
+        weather,
+        NOW
+      );
+      assert.deepStrictEqual(pools.park, []);
+      assert.deepStrictEqual(weatherBlocked, [
+        { category: "park", weatherBlocked: true, reason: "rain likely at 2pm" },
+      ]);
+      // blocked at category level — no per-venue drop entries
+      assert.strictEqual(dropLog.length, 0);
+    },
+  ],
+  [
+    "precip exactly at threshold (50) does NOT block",
+    () => {
+      const NOW = new Date(2026, 6, 3, 13, 20, 0);
+      const weather: WeatherHour[] = [
+        { hourISO: new Date(2026, 6, 3, 14, 0).toISOString(), tempC: 22, precipProbability: PRECIP_BLOCK_THRESHOLD, condition: "Cloudy" },
+      ];
+      const { pools, weatherBlocked } = filterPools(
+        { park: [mkPlace("p1")] },
+        mkParsed({ time_window: "afternoon" }),
+        weather,
+        NOW
+      );
+      assert.deepStrictEqual(pools.park.map((p) => p.id), ["p1"]);
+      assert.deepStrictEqual(weatherBlocked, []);
+    },
+  ],
+  [
+    "cold below threshold blocks; exactly -5 does NOT",
+    () => {
+      const NOW = new Date(2026, 6, 3, 13, 20, 0);
+      const at = (tempC: number): WeatherHour[] => [
+        { hourISO: new Date(2026, 6, 3, 14, 0).toISOString(), tempC, precipProbability: 0, condition: "Clear" },
+      ];
+      const blocked = filterPools(
+        { trail: [mkPlace("t1")] },
+        mkParsed({ time_window: "afternoon" }),
+        at(-6),
+        NOW
+      );
+      assert.strictEqual(blocked.weatherBlocked.length, 1);
+      assert.match(blocked.weatherBlocked[0].reason, /too cold at 2pm \(-6°C\)/);
+
+      const boundary = filterPools(
+        { trail: [mkPlace("t1")] },
+        mkParsed({ time_window: "afternoon" }),
+        at(COLD_BLOCK_THRESHOLD_C),
+        NOW
+      );
+      assert.deepStrictEqual(boundary.weatherBlocked, []);
+    },
+  ],
+  [
+    "missing weather data → outdoor pool passes untouched",
+    () => {
+      const NOW = new Date(2026, 6, 3, 13, 20, 0);
+      const noWeather = filterPools(
+        { park: [mkPlace("p1")] },
+        mkParsed({ time_window: "afternoon" }),
+        null,
+        NOW
+      );
+      assert.deepStrictEqual(noWeather.pools.park.map((p) => p.id), ["p1"]);
+      // forecast horizon miss (target hour not in data) also passes
+      const wrongHour: WeatherHour[] = [
+        { hourISO: new Date(2026, 6, 3, 9, 0).toISOString(), tempC: 20, precipProbability: 99, condition: "Rain" },
+      ];
+      const horizonMiss = filterPools(
+        { park: [mkPlace("p1")] },
+        mkParsed({ time_window: "afternoon" }),
+        wrongHour,
+        NOW
+      );
+      assert.deepStrictEqual(horizonMiss.weatherBlocked, []);
+    },
+  ],
+  [
+    "indoor categories unaffected by a terrible forecast",
+    () => {
+      const NOW = new Date(2026, 6, 3, 13, 20, 0);
+      const weather: WeatherHour[] = [
+        { hourISO: new Date(2026, 6, 3, 14, 0).toISOString(), tempC: -20, precipProbability: 100, condition: "Blizzard" },
+      ];
+      const { pools, weatherBlocked } = filterPools(
+        { bar: [mkPlace("b1")], museum: [mkPlace("m1")] },
+        mkParsed({ time_window: "afternoon" }),
+        weather,
+        NOW
+      );
+      assert.deepStrictEqual(pools.bar.map((p) => p.id), ["b1"]);
+      assert.deepStrictEqual(pools.museum.map((p) => p.id), ["m1"]);
+      assert.deepStrictEqual(weatherBlocked, []);
     },
   ],
   [

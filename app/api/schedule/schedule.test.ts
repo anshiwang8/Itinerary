@@ -57,6 +57,21 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "day-part already past rolls to the NEXT day (morning asked at 13:20)",
+    () => {
+      // 10:00 today is already past at 13:20 → tomorrow 10:00
+      assert.strictEqual(
+        resolveStartTime("morning", NOW).toISOString(),
+        new Date(2026, 6, 4, 10, 0, 0).toISOString()
+      );
+      // clock time already past rolls too: "6am" asked at 13:20
+      assert.strictEqual(
+        resolveStartTime("6am", NOW).toISOString(),
+        new Date(2026, 6, 4, 6, 0, 0).toISOString()
+      );
+    },
+  ],
+  [
     "unspecified → next full hour from now (13:20 → 14:00)",
     () => {
       assert.strictEqual(
@@ -121,8 +136,9 @@ const cases: Array<[string, () => void]> = [
         "morning",
         NOW
       );
-      assert.strictEqual(stops[0].start_time, "2026-07-03T10:00:00-04:00");
-      assert.strictEqual(stops[0].end_time, "2026-07-03T11:00:00-04:00");
+      // "morning" at 13:20 rolls to tomorrow 10:00
+      assert.strictEqual(stops[0].start_time, "2026-07-04T10:00:00-04:00");
+      assert.strictEqual(stops[0].end_time, "2026-07-04T11:00:00-04:00");
       assert.strictEqual(stops[1].start_time, null);
       assert.strictEqual(stops[1].durationMinutes, null);
       // the only timed stop is also the last timed stop → no travel leg

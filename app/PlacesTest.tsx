@@ -37,11 +37,18 @@ interface Selection {
   rating?: number;
 }
 
+interface WeatherBlock {
+  category: string;
+  weatherBlocked: true;
+  reason: string;
+}
+
 export default function PlacesTest() {
   const [prompt, setPrompt] = useState("");
   const [parsed, setParsed] = useState<string | null>(null);
   const [grouped, setGrouped] = useState<GroupedPlaces | null>(null);
   const [dropLog, setDropLog] = useState<DropEntry[]>([]);
+  const [weatherBlocks, setWeatherBlocks] = useState<WeatherBlock[]>([]);
   const [selections, setSelections] = useState<Selection[] | null>(null);
   const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -54,6 +61,7 @@ export default function PlacesTest() {
     setParsed(null);
     setGrouped(null);
     setDropLog([]);
+    setWeatherBlocks([]);
     setSelections(null);
     setSchedule(null);
     try {
@@ -72,11 +80,20 @@ export default function PlacesTest() {
       }
       setParsed(JSON.stringify(parseData, null, 2));
 
+      // Weather is best-effort: failure just skips the weather gate.
+      let weather = null;
+      try {
+        const weatherRes = await fetch("/api/weather");
+        if (weatherRes.ok) weather = await weatherRes.json();
+      } catch {
+        weather = null;
+      }
+
       setStage("searching");
       const placesRes = await fetch("/api/places/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parsed: parseData }),
+        body: JSON.stringify({ parsed: parseData, weather }),
       });
       const placesData = await placesRes.json();
       if (!placesRes.ok) {
@@ -85,10 +102,11 @@ export default function PlacesTest() {
             (placesData.details ? `\ndetails: ${placesData.details}` : "")
         );
       }
-      // Split the drop log off the response — only real category pools
+      // Split meta keys off the response — only real category pools
       // render as venue sections.
-      const { _dropLog, ...categories } = placesData;
+      const { _dropLog, _weatherBlocked, ...categories } = placesData;
       setDropLog(Array.isArray(_dropLog) ? _dropLog : []);
+      setWeatherBlocks(Array.isArray(_weatherBlocked) ? _weatherBlocked : []);
       setGrouped(categories);
 
       setStage("selecting");
@@ -193,22 +211,27 @@ export default function PlacesTest() {
           {selections.map((s) => {
             const stop = schedule?.find((t) => t.category === s.category);
             const leg = stop?.travelToNext;
+            const block = weatherBlocks.find((b) => b.category === s.category);
             return (
               <div key={s.category}>
               <div
                 style={{
                   marginTop: 6,
                   padding: "8px 10px",
-                  border: "1px solid #d5e5ea",
+                  border: block ? "1px solid #e0d2b8" : "1px solid #d5e5ea",
                   borderRadius: 8,
-                  background: "#f6fbfc",
+                  background: block ? "#fdf9ef" : "#f6fbfc",
                 }}
               >
                 <div style={{ fontSize: 11, textTransform: "uppercase", color: "#679" }}>
                   {s.category}
                   {s.fallback && " · fallback"}
                 </div>
-                {s.id === null ? (
+                {block ? (
+                  <em style={{ color: "#96803e" }}>
+                    {s.category} skipped — {block.reason}
+                  </em>
+                ) : s.id === null ? (
                   <em>{s.reason}</em>
                 ) : (
                   <>

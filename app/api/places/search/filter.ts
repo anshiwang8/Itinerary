@@ -7,6 +7,7 @@ import {
   parseTargetTime,
   TargetTime,
 } from "./hours";
+import { resolveStartTime } from "../../schedule/schedule";
 
 export interface Place {
   id: string;
@@ -47,6 +48,51 @@ export interface DropEntry {
 
 export const RATING_FLOOR = 3.5;
 
+// ── Weather gate ──
+export interface WeatherHour {
+  hourISO: string;
+  tempC: number | null;
+  precipProbability: number | null;
+  condition: string | null;
+}
+
+export interface WeatherBlock {
+  category: string;
+  weatherBlocked: true;
+  reason: string;
+}
+
+// strictly greater / strictly less block; the boundary values pass
+export const PRECIP_BLOCK_THRESHOLD = 50;
+export const COLD_BLOCK_THRESHOLD_C = -5;
+
+const OUTDOOR_PATTERN =
+  /park|walk|stroll|patio|garden|beach|trail|market|picnic|hike|outdoor/i;
+
+/** Keyword matcher for weather-sensitive categories. */
+export function isOutdoorCategory(raw: string): boolean {
+  return OUTDOOR_PATTERN.test(raw ?? "");
+}
+
+function hourLabel(d: Date): string {
+  const h = d.getHours();
+  return `${h % 12 || 12}${h < 12 ? "am" : "pm"}`;
+}
+
+/** Forecast hour covering the target instant, if within the horizon. */
+function forecastAt(
+  weather: WeatherHour[],
+  target: Date
+): WeatherHour | null {
+  const t = target.getTime();
+  return (
+    weather.find((h) => {
+      const start = new Date(h.hourISO).getTime();
+      return !isNaN(start) && start <= t && t < start + 3_600_000;
+    }) ?? null
+  );
+}
+
 const DEAD_STATUSES = new Set(["CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"]);
 const EXPENSIVE_LEVELS = new Set([
   "PRICE_LEVEL_EXPENSIVE",
@@ -71,9 +117,16 @@ function fmtTarget(t: TargetTime): string {
 
 export function filterPools(
   pools: Record<string, Place[]>,
-  parsed: ParsedPrompt
-): { pools: Record<string, Place[]>; dropLog: DropEntry[] } {
+  parsed: ParsedPrompt,
+  weather: WeatherHour[] | null = null,
+  now: Date = new Date()
+): {
+  pools: Record<string, Place[]>;
+  dropLog: DropEntry[];
+  weatherBlocked: WeatherBlock[];
+} {
   const dropLog: DropEntry[] = [];
+  const weatherBlocked: WeatherBlock[] = [];
   // No clock time in time_window → hours check is skipped entirely.
   const target = parseTargetTime(parsed.time_window ?? "");
   const cheap = isCheapBudget(parsed.budget);
@@ -81,7 +134,38 @@ export function filterPools(
   const seen = new Set<string>();
   const out: Record<string, Place[]> = {};
 
+  // Weather gate target: resolveStartTime covers clock times AND
+  // day-part defaults ("afternoon" → 14:00), so a fuzzy time_window
+  // still gets a sensible forecast hour. No usable weather data →
+  // rule skipped entirely (same keep-on-missing policy as hours/price).
+  const weatherTarget =
+    weather && weather.length > 0
+      ? resolveStartTime(parsed.time_window ?? "", now)
+      : null;
+  const forecast = weatherTarget ? forecastAt(weather!, weatherTarget) : null;
+
   for (const [category, places] of Object.entries(pools)) {
+    // category-level weather block: outdoor + bad forecast at target
+    if (forecast && isOutdoorCategory(category)) {
+      let reason: string | null = null;
+      if (
+        forecast.precipProbability !== null &&
+        forecast.precipProbability > PRECIP_BLOCK_THRESHOLD
+      ) {
+        reason = `rain likely at ${hourLabel(weatherTarget!)}`;
+      } else if (
+        forecast.tempC !== null &&
+        forecast.tempC < COLD_BLOCK_THRESHOLD_C
+      ) {
+        reason = `too cold at ${hourLabel(weatherTarget!)} (${forecast.tempC}°C)`;
+      }
+      if (reason) {
+        out[category] = [];
+        weatherBlocked.push({ category, weatherBlocked: true, reason });
+        continue;
+      }
+    }
+
     const survivors: Place[] = [];
     for (const place of places) {
       const drop = (rule: DropRule, detail: string) =>
@@ -136,5 +220,5 @@ export function filterPools(
     out[category] = survivors;
   }
 
-  return { pools: out, dropLog };
+  return { pools: out, dropLog, weatherBlocked };
 }

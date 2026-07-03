@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { filterPools, ParsedPrompt, Place } from "./filter";
+import { filterPools, ParsedPrompt, Place, WeatherHour } from "./filter";
 
 // Places API (New) — Text Search, driven by the parsed prompt from
 // /api/parse. One Text Search call per category signal, so downstream
@@ -60,9 +60,12 @@ export async function POST(request: NextRequest) {
   }
 
   let parsed: ParsedPrompt;
+  let weather: WeatherHour[] | null;
   try {
     const body = await request.json();
     parsed = body?.parsed;
+    // optional; missing/invalid weather just skips the weather gate
+    weather = Array.isArray(body?.weather) ? body.weather : null;
   } catch {
     return NextResponse.json(
       { error: "Request body must be JSON." },
@@ -103,8 +106,16 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const { pools, dropLog } = filterPools(rawPools, parsed);
-    return NextResponse.json({ ...pools, _dropLog: dropLog });
+    const { pools, dropLog, weatherBlocked } = filterPools(
+      rawPools,
+      parsed,
+      weather
+    );
+    return NextResponse.json({
+      ...pools,
+      _dropLog: dropLog,
+      _weatherBlocked: weatherBlocked,
+    });
   } catch (err) {
     return NextResponse.json(
       {

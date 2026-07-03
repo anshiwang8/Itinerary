@@ -53,12 +53,19 @@ function toTorontoISO(d: Date): string {
 export function resolveStartTime(timeWindow: string, now: Date = new Date()): Date {
   const tw = (timeWindow ?? "").toLowerCase();
 
+  // A start in the past is never a valid plan: "this afternoon" asked at
+  // 6pm, or "6am" asked at noon, means the next occurrence.
+  const rollForward = (d: Date): Date => {
+    if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1);
+    return d;
+  };
+
   const target = parseTargetTime(tw, now);
   if (target) {
     const daysAhead = (target.day - now.getDay() + 7) % 7;
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysAhead);
     d.setHours(target.hour, target.minute, 0, 0);
-    return d;
+    return rollForward(d);
   }
 
   for (const [keyword, t] of Object.entries(DAY_PART_DEFAULTS)) {
@@ -66,7 +73,7 @@ export function resolveStartTime(timeWindow: string, now: Date = new Date()): Da
       const dayOffset = tw.includes("tomorrow") ? 1 : 0;
       const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset);
       d.setHours(t.hour, t.minute, 0, 0);
-      return d;
+      return rollForward(d);
     }
   }
 
