@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { buildSchedule, ScheduledStop } from "./api/schedule/schedule";
 
 // Throwaway harness proving the parse → places pipeline works end to
 // end: one button runs /api/parse, then feeds the result straight into
@@ -42,9 +43,10 @@ export default function PlacesTest() {
   const [grouped, setGrouped] = useState<GroupedPlaces | null>(null);
   const [dropLog, setDropLog] = useState<DropEntry[]>([]);
   const [selections, setSelections] = useState<Selection[] | null>(null);
+  const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stage, setStage] = useState<
-    "idle" | "parsing" | "searching" | "selecting"
+    "idle" | "parsing" | "searching" | "selecting" | "routing"
   >("idle");
 
   async function runPipeline() {
@@ -53,6 +55,7 @@ export default function PlacesTest() {
     setGrouped(null);
     setDropLog([]);
     setSelections(null);
+    setSchedule(null);
     try {
       setStage("parsing");
       const parseRes = await fetch("/api/parse", {
@@ -102,6 +105,44 @@ export default function PlacesTest() {
         );
       }
       setSelections(selectData.selections ?? []);
+
+      // Look up each pick's coordinates in its category pool (pools stay
+      // keyed by unique category — matching invariant), then fetch real
+      // transit/walk legs and build the timed schedule around them.
+      setStage("routing");
+      const sels: Selection[] = selectData.selections ?? [];
+      const points = sels
+        .filter((s) => s.id !== null)
+        .map((s) => {
+          const pool: Place[] = (categories as GroupedPlaces)[s.category] ?? [];
+          return pool.find((p) => p.id === s.id)?.location ?? null;
+        });
+
+      let legs = [];
+      if (points.length >= 2 && points.every(Boolean)) {
+        const { startISO } = buildSchedule(sels, parseData.time_window ?? "");
+        const travelRes = await fetch("/api/schedule/travel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ points, departureTime: startISO }),
+        });
+        const travelData = await travelRes.json();
+        if (!travelRes.ok) {
+          throw new Error(
+            (travelData.error ?? `travel HTTP ${travelRes.status}`) +
+              (travelData.details ? `\ndetails: ${travelData.details}` : "")
+          );
+        }
+        legs = travelData.legs ?? [];
+      }
+
+      const { stops } = buildSchedule(
+        sels,
+        parseData.time_window ?? "",
+        new Date(),
+        legs
+      );
+      setSchedule(stops);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -141,38 +182,76 @@ export default function PlacesTest() {
           ? "Searching places…"
           : stage === "selecting"
           ? "Selecting venues…"
+          : stage === "routing"
+          ? "Fetching travel times…"
           : "Test Parse → Places → Select"}
       </button>
 
       {selections && (
         <div style={{ marginTop: 10 }}>
           <div style={{ fontWeight: 700, fontSize: 14 }}>Final picks</div>
-          {selections.map((s) => (
-            <div
-              key={s.category}
-              style={{
-                marginTop: 6,
-                padding: "8px 10px",
-                border: "1px solid #d5e5ea",
-                borderRadius: 8,
-                background: "#f6fbfc",
-              }}
-            >
-              <div style={{ fontSize: 11, textTransform: "uppercase", color: "#679" }}>
-                {s.category}
-                {s.fallback && " · fallback"}
+          {selections.map((s) => {
+            const stop = schedule?.find((t) => t.category === s.category);
+            const leg = stop?.travelToNext;
+            return (
+              <div key={s.category}>
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: "8px 10px",
+                  border: "1px solid #d5e5ea",
+                  borderRadius: 8,
+                  background: "#f6fbfc",
+                }}
+              >
+                <div style={{ fontSize: 11, textTransform: "uppercase", color: "#679" }}>
+                  {s.category}
+                  {s.fallback && " · fallback"}
+                </div>
+                {s.id === null ? (
+                  <em>{s.reason}</em>
+                ) : (
+                  <>
+                    <strong>{s.name}</strong>
+                    {s.rating != null && <> · {s.rating}★</>}
+                    <div style={{ color: "#557", marginTop: 2 }}>{s.reason}</div>
+                    {stop?.start_time && stop?.end_time && (
+                      <div style={{ marginTop: 3, fontWeight: 600, color: "#367" }}>
+                        be here{" "}
+                        {new Date(stop.start_time).toLocaleTimeString([], {
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })}
+                        {" – "}
+                        {new Date(stop.end_time).toLocaleTimeString([], {
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
-              {s.id === null ? (
-                <em>{s.reason}</em>
-              ) : (
-                <>
-                  <strong>{s.name}</strong>
-                  {s.rating != null && <> · {s.rating}★</>}
-                  <div style={{ color: "#557", marginTop: 2 }}>{s.reason}</div>
-                </>
+              {leg && (
+                <div
+                  style={{
+                    margin: "4px 0 0 18px",
+                    fontSize: 12,
+                    color: "#688",
+                    borderLeft: "2px dotted #9cc4d0",
+                    paddingLeft: 8,
+                  }}
+                >
+                  {leg.mode === "transit"
+                    ? `transit · ${leg.totalMinutes} min incl. ${leg.marginMinutes} min buffer`
+                    : leg.mode === "walk"
+                    ? `walk · ${leg.totalMinutes} min`
+                    : "travel time unavailable"}
+                </div>
               )}
-            </div>
-          ))}
+              </div>
+            );
+          })}
         </div>
       )}
 
