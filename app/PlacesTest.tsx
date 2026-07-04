@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { buildSchedule, ScheduledStop } from "./api/schedule/schedule";
+import ItineraryMap, { MapStop } from "./ItineraryMap";
 
 // Throwaway harness proving the parse → places pipeline works end to
 // end: one button runs /api/parse, then feeds the result straight into
@@ -51,6 +52,7 @@ export default function PlacesTest() {
   const [weatherBlocks, setWeatherBlocks] = useState<WeatherBlock[]>([]);
   const [selections, setSelections] = useState<Selection[] | null>(null);
   const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
+  const [mapStops, setMapStops] = useState<MapStop[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [stage, setStage] = useState<
     "idle" | "parsing" | "searching" | "selecting" | "routing"
@@ -64,6 +66,7 @@ export default function PlacesTest() {
     setWeatherBlocks([]);
     setSelections(null);
     setSchedule(null);
+    setMapStops([]);
     try {
       setStage("parsing");
       const parseRes = await fetch("/api/parse", {
@@ -161,6 +164,29 @@ export default function PlacesTest() {
         legs
       );
       setSchedule(stops);
+
+      // Map input: timed stops with coords from their category pools.
+      // Null-id picks (blocked/empty pools) have no coords — skipped.
+      setMapStops(
+        stops
+          .filter((st) => st.id !== null)
+          .map((st): MapStop | null => {
+            const pool: Place[] = (categories as GroupedPlaces)[st.category] ?? [];
+            const loc = pool.find((p) => p.id === st.id)?.location;
+            if (!loc) return null;
+            return {
+              name: st.name ?? "(unnamed)",
+              lat: loc.latitude,
+              lng: loc.longitude,
+              category: st.category,
+              startTime: st.start_time,
+              endTime: st.end_time,
+              reason: st.reason,
+              legModeToNext: st.travelToNext?.mode,
+            };
+          })
+          .filter((x): x is MapStop => x !== null)
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -275,6 +301,7 @@ export default function PlacesTest() {
               </div>
             );
           })}
+          {mapStops.length > 0 && <ItineraryMap stops={mapStops} />}
         </div>
       )}
 

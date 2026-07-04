@@ -81,6 +81,51 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "category-aware default: brunch-unspecified → 10:30 (same day at 3 AM, rolled when past)",
+    () => {
+      const threeAM = new Date(2026, 6, 3, 3, 0, 0);
+      // at 3 AM, 10:30 is still ahead → today 10:30
+      assert.strictEqual(
+        resolveStartTime("unspecified", threeAM, ["brunch", "beach walk"]).toISOString(),
+        new Date(2026, 6, 3, 10, 30, 0).toISOString()
+      );
+      // at 13:20, 10:30 is past → rolls to tomorrow 10:30
+      assert.strictEqual(
+        resolveStartTime("unspecified", NOW, ["brunch"]).toISOString(),
+        new Date(2026, 6, 4, 10, 30, 0).toISOString()
+      );
+    },
+  ],
+  [
+    "category defaults: coffee 10:00, bar 20:00, club 22:00, comedy club 20:00 (show wins over club)",
+    () => {
+      const threeAM = new Date(2026, 6, 3, 3, 0, 0);
+      const at = (cats: string[]) =>
+        resolveStartTime("unspecified", threeAM, cats).toISOString();
+      assert.strictEqual(at(["coffee shop"]), new Date(2026, 6, 3, 10, 0, 0).toISOString());
+      assert.strictEqual(at(["cocktail bar"]), new Date(2026, 6, 3, 20, 0, 0).toISOString());
+      assert.strictEqual(at(["night club"]), new Date(2026, 6, 3, 22, 0, 0).toISOString());
+      assert.strictEqual(at(["comedy club"]), new Date(2026, 6, 3, 20, 0, 0).toISOString());
+      assert.strictEqual(at(["ramen"]), new Date(2026, 6, 3, 19, 0, 0).toISOString());
+      // unknown category → next full hour (3:00 → 4:00)
+      assert.strictEqual(at(["axe throwing"]), new Date(2026, 6, 3, 4, 0, 0).toISOString());
+    },
+  ],
+  [
+    "explicit clock time and day-part both override category defaults",
+    () => {
+      const threeAM = new Date(2026, 6, 3, 3, 0, 0);
+      assert.strictEqual(
+        resolveStartTime("7pm", threeAM, ["brunch"]).toISOString(),
+        new Date(2026, 6, 3, 19, 0, 0).toISOString()
+      );
+      assert.strictEqual(
+        resolveStartTime("evening", threeAM, ["brunch"]).toISOString(),
+        new Date(2026, 6, 3, 19, 0, 0).toISOString()
+      );
+    },
+  ],
+  [
     "clock-time path: 'tomorrow, 6am' → Saturday 06:00 via parseTargetTime",
     () => {
       assert.strictEqual(

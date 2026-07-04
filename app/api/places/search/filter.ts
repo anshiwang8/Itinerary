@@ -1,12 +1,7 @@
 // Objective (non-LLM) filter for Places candidate pools. Applies hard
 // rules per venue, in order, and records every drop so filter
 // aggressiveness stays visible. Weather gating is a later step.
-import {
-  CurrentOpeningHours,
-  isOpenAt,
-  parseTargetTime,
-  TargetTime,
-} from "./hours";
+import { CurrentOpeningHours, isOpenAt, TargetTime } from "./hours";
 import { resolveStartTime } from "../../schedule/schedule";
 
 export interface Place {
@@ -127,22 +122,29 @@ export function filterPools(
 } {
   const dropLog: DropEntry[] = [];
   const weatherBlocked: WeatherBlock[] = [];
-  // No clock time in time_window → hours check is skipped entirely.
-  const target = parseTargetTime(parsed.time_window ?? "");
   const cheap = isCheapBudget(parsed.budget);
   // Ids that already survived in an earlier category (original order).
   const seen = new Set<string>();
   const out: Record<string, Place[]> = {};
 
-  // Weather gate target: resolveStartTime covers clock times AND
-  // day-part defaults ("afternoon" → 14:00), so a fuzzy time_window
-  // still gets a sensible forecast hour. No usable weather data →
-  // rule skipped entirely (same keep-on-missing policy as hours/price).
-  const weatherTarget =
-    weather && weather.length > 0
-      ? resolveStartTime(parsed.time_window ?? "", now)
-      : null;
-  const forecast = weatherTarget ? forecastAt(weather!, weatherTarget) : null;
+  // THE resolved start instant — identical to what buildSchedule will
+  // book (same resolver, same category anchor). Hours filter and
+  // weather gate both check this instant, so the three pipeline stages
+  // can never disagree on the target time again.
+  const startInstant = resolveStartTime(
+    parsed.time_window ?? "",
+    now,
+    Object.keys(pools)
+  );
+  const target: TargetTime = {
+    day: startInstant.getDay(),
+    hour: startInstant.getHours(),
+    minute: startInstant.getMinutes(),
+  };
+  // No usable weather data → weather rule skipped entirely (same
+  // keep-on-missing policy as hours/price).
+  const forecast =
+    weather && weather.length > 0 ? forecastAt(weather, startInstant) : null;
 
   for (const [category, places] of Object.entries(pools)) {
     // category-level weather block: outdoor + bad forecast at target
@@ -152,12 +154,12 @@ export function filterPools(
         forecast.precipProbability !== null &&
         forecast.precipProbability > PRECIP_BLOCK_THRESHOLD
       ) {
-        reason = `rain likely at ${hourLabel(weatherTarget!)}`;
+        reason = `rain likely at ${hourLabel(startInstant)}`;
       } else if (
         forecast.tempC !== null &&
         forecast.tempC < COLD_BLOCK_THRESHOLD_C
       ) {
-        reason = `too cold at ${hourLabel(weatherTarget!)} (${forecast.tempC}°C)`;
+        reason = `too cold at ${hourLabel(startInstant)} (${forecast.tempC}°C)`;
       }
       if (reason) {
         out[category] = [];
@@ -183,8 +185,9 @@ export function filterPools(
         continue;
       }
 
-      // b. hours — false drops; null (no usable data) always keeps
-      if (target) {
+      // b. hours — checked against the resolved start instant (always
+      // defined now); false drops, null (no usable data) always keeps
+      {
         const verdict = isOpenAt(place.currentOpeningHours, target);
         if (verdict === false) {
           drop("hours", `closed at target ${fmtTarget(target)}`);

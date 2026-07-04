@@ -15,6 +15,36 @@ export const DAY_PART_DEFAULTS: Record<string, { hour: number; minute: number }>
   night: { hour: 20, minute: 0 },
 };
 
+// Category → sensible default start when NEITHER a clock time NOR a
+// day-part is given ("brunch downtown" shouldn't book at 3 AM).
+// Ordered: specific rules before broad ones ("comedy club" is a show
+// at 20:00, not a club at 22:00). No match → next full hour.
+export const CATEGORY_START_DEFAULTS: Array<
+  [RegExp, { hour: number; minute: number }]
+> = [
+  [/brunch/i, { hour: 10, minute: 30 }],
+  [/breakfast/i, { hour: 9, minute: 0 }],
+  [/lunch/i, { hour: 12, minute: 0 }],
+  [/coffee|caf[eé]|espresso|matcha/i, { hour: 10, minute: 0 }],
+  [/comedy|show|theatre|theater|concert/i, { hour: 20, minute: 0 }],
+  [/club/i, { hour: 22, minute: 0 }],
+  [/\bbars?\b|cocktail|pub|brewery|wine|drink/i, { hour: 20, minute: 0 }],
+  [
+    /dinner|restaurant|dining|ramen|sushi|pizza|taco|noodle|pho|steak|izakaya|bbq/i,
+    { hour: 19, minute: 0 },
+  ],
+];
+
+function inferCategoryStart(
+  category: string | undefined
+): { hour: number; minute: number } | null {
+  if (!category) return null;
+  for (const [pattern, t] of CATEGORY_START_DEFAULTS) {
+    if (pattern.test(category)) return t;
+  }
+  return null;
+}
+
 // NOTE: date components are built with server-local Date math; the
 // prototype assumes the server runs in America/Toronto (true for local
 // dev). The offset in the ISO output is computed properly per-date.
@@ -45,12 +75,19 @@ function toTorontoISO(d: Date): string {
 }
 
 /**
- * Resolve time_window to a concrete start Date.
+ * Resolve time_window to a concrete start Date. This is the single
+ * source of truth for "when does the outing start" — the hours filter,
+ * weather gate, and schedule all call it so they agree on one instant.
  * 1. Clock time present → parseTargetTime (day-of-week aware).
  * 2. Day-part keyword → DAY_PART_DEFAULTS (respecting "tomorrow").
- * 3. Otherwise → next full hour from now.
+ * 3. Neither → infer a day-part from the first category (anchor).
+ * 4. Otherwise → next full hour from now.
  */
-export function resolveStartTime(timeWindow: string, now: Date = new Date()): Date {
+export function resolveStartTime(
+  timeWindow: string,
+  now: Date = new Date(),
+  categories: string[] = []
+): Date {
   const tw = (timeWindow ?? "").toLowerCase();
 
   // A start in the past is never a valid plan: "this afternoon" asked at
@@ -75,6 +112,16 @@ export function resolveStartTime(timeWindow: string, now: Date = new Date()): Da
       d.setHours(t.hour, t.minute, 0, 0);
       return rollForward(d);
     }
+  }
+
+  // no clock time, no day-part → infer from the first stop's category
+  const anchor = categories.find((c) => typeof c === "string" && c.trim());
+  const inferred = inferCategoryStart(anchor);
+  if (inferred) {
+    const dayOffset = tw.includes("tomorrow") ? 1 : 0;
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset);
+    d.setHours(inferred.hour, inferred.minute, 0, 0);
+    return rollForward(d);
   }
 
   // unspecified → next full hour
@@ -116,7 +163,11 @@ export function buildSchedule(
   now: Date = new Date(),
   travelLegs: TravelLeg[] = []
 ): { startISO: string; stops: ScheduledStop[] } {
-  const start = resolveStartTime(timeWindow, now);
+  const start = resolveStartTime(
+    timeWindow,
+    now,
+    selections.map((s) => s.category)
+  );
   const cursor = new Date(start);
 
   const timed: ScheduledStop[] = [];

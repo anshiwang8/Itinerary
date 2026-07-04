@@ -11,16 +11,20 @@ import {
   RATING_FLOOR,
   WeatherHour,
 } from "./filter";
+import { buildSchedule, resolveStartTime } from "../../schedule/schedule";
 
 // ── fixtures ──
-// Open 08:00–18:00 every day of the week (day-independent verdicts, so
-// tests don't depend on what "tomorrow" resolves to at runtime).
-const HOURS_8_TO_18 = {
-  periods: Array.from({ length: 7 }, (_, day) => ({
-    open: { day, hour: 8, minute: 0 },
-    close: { day, hour: 18, minute: 0 },
-  })),
-};
+// Open the same hours every day of the week (day-independent verdicts,
+// so tests don't depend on what "tomorrow" resolves to at runtime).
+function hoursAllDays(openHour: number, closeHour: number) {
+  return {
+    periods: Array.from({ length: 7 }, (_, day) => ({
+      open: { day, hour: openHour, minute: 0 },
+      close: { day, hour: closeHour, minute: 0 },
+    })),
+  };
+}
+const HOURS_8_TO_18 = hoursAllDays(8, 18);
 
 function mkPlace(id: string, overrides: Partial<Place> = {}): Place {
   return {
@@ -100,16 +104,93 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
-    "no clock time in time_window → hours check skipped entirely",
+    "no clock time → hours checked at the resolved day-part instant (not skipped)",
     () => {
-      // 8–18 venue would be closed at any early target, but "morning"
-      // has no comparable clock time → everything passes the hours rule
+      const NOW = new Date(2026, 6, 3, 13, 20, 0);
+      // "morning" at 13:20 rolls to tomorrow 10:00; the 8–18 venue is
+      // open then, the 18–23 venue is not — it must drop
       const { pools, dropLog } = filterPools(
-        { cafe: [mkPlace("a")] },
-        mkParsed({ time_window: "morning" })
+        {
+          cafe: [
+            mkPlace("day"),
+            mkPlace("nightOnly", { currentOpeningHours: hoursAllDays(18, 23) }),
+          ],
+        },
+        mkParsed({ time_window: "morning" }),
+        null,
+        NOW
       );
-      assert.deepStrictEqual(pools.cafe.map((p) => p.id), ["a"]);
-      assert.strictEqual(dropLog.length, 0);
+      assert.deepStrictEqual(pools.cafe.map((p) => p.id), ["day"]);
+      assert.deepStrictEqual(rulesFor(dropLog, "nightOnly"), ["hours"]);
+    },
+  ],
+  [
+    "3 AM repro: 'brunch then a beach walk', unspecified time → hours-drops, not 0 drops",
+    () => {
+      const threeAM = new Date(2026, 6, 3, 3, 0, 0);
+      // anchor category "brunch" → target 10:30 today (Fri). Before the
+      // fix, parseTargetTime returned null and EVERYTHING survived.
+      const { pools, dropLog } = filterPools(
+        {
+          brunch: [
+            mkPlace("brunchSpot"), // 8–18, open at 10:30
+            mkPlace("dinnerOnly", { currentOpeningHours: hoursAllDays(18, 23) }),
+          ],
+          "beach walk": [mkPlace("boardwalk")], // 8–18, open at 10:30
+        },
+        mkParsed({
+          time_window: "unspecified",
+          category_signals: ["brunch", "beach walk"],
+        }),
+        null,
+        threeAM
+      );
+      assert.deepStrictEqual(pools.brunch.map((p) => p.id), ["brunchSpot"]);
+      assert.deepStrictEqual(pools["beach walk"].map((p) => p.id), ["boardwalk"]);
+      assert.deepStrictEqual(rulesFor(dropLog, "dinnerOnly"), ["hours"]);
+      assert.match(dropLog[0].detail, /closed at target Fri 10:30/);
+    },
+  ],
+  [
+    "integration: weather gate, hours filter, and schedule all see the identical resolved instant",
+    () => {
+      const NOW = new Date(2026, 6, 3, 13, 20, 0);
+      // unspecified + anchor "patio bar" → today 20:00 (future at 13:20)
+      const start = resolveStartTime("unspecified", NOW, ["patio bar", "dessert"]);
+      assert.strictEqual(start.toISOString(), new Date(2026, 6, 3, 20, 0, 0).toISOString());
+
+      const weather: WeatherHour[] = [
+        { hourISO: new Date(2026, 6, 3, 20, 0).toISOString(), tempC: 20, precipProbability: 90, condition: "Rain" },
+      ];
+      const { pools, dropLog, weatherBlocked } = filterPools(
+        {
+          "patio bar": [mkPlace("pb1", { currentOpeningHours: hoursAllDays(8, 23) })],
+          dessert: [
+            mkPlace("open", { currentOpeningHours: hoursAllDays(8, 23) }),
+            mkPlace("dayOnly"), // 8–18, closed at 20:00
+          ],
+        },
+        mkParsed({ time_window: "unspecified", category_signals: ["patio bar", "dessert"] }),
+        weather,
+        NOW
+      );
+      // weather gate saw 20:00 → "8pm" in the reason
+      assert.deepStrictEqual(weatherBlocked, [
+        { category: "patio bar", weatherBlocked: true, reason: "rain likely at 8pm" },
+      ]);
+      // hours filter saw the SAME 20:00 → day-only venue dropped
+      assert.deepStrictEqual(pools.dessert.map((p) => p.id), ["open"]);
+      assert.match(dropLog.find((d) => d.id === "dayOnly")!.detail, /Fri 20:00/);
+      // schedule books the SAME 20:00
+      const { startISO } = buildSchedule(
+        [
+          { category: "patio bar", id: null, reason: "no venues survived filtering" },
+          { category: "dessert", id: "open", name: "Open Dessert" },
+        ],
+        "unspecified",
+        NOW
+      );
+      assert.strictEqual(startISO, "2026-07-03T20:00:00-04:00");
     },
   ],
   [
