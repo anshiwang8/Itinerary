@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { buildSchedule, ScheduledStop } from "./api/schedule/schedule";
+import { TravelLeg } from "./api/schedule/travel";
+import { Itinerary, StopStatus } from "./api/itinerary/store";
 import ItineraryMap, { MapStop } from "./ItineraryMap";
 
 // Throwaway harness proving the parse → places pipeline works end to
@@ -53,6 +55,9 @@ export default function PlacesTest() {
   const [selections, setSelections] = useState<Selection[] | null>(null);
   const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
   const [mapStops, setMapStops] = useState<MapStop[]>([]);
+  const [travelLegs, setTravelLegs] = useState<TravelLeg[]>([]);
+  const [itinerary, setItinerary] = useState<Itinerary | null>(null);
+  const [simNow, setSimNow] = useState(""); // dev time control (datetime-local)
   const [error, setError] = useState<string | null>(null);
   const [stage, setStage] = useState<
     "idle" | "parsing" | "searching" | "selecting" | "routing"
@@ -67,6 +72,9 @@ export default function PlacesTest() {
     setSelections(null);
     setSchedule(null);
     setMapStops([]);
+    setTravelLegs([]);
+    setItinerary(null);
+    setSimNow("");
     try {
       setStage("parsing");
       const parseRes = await fetch("/api/parse", {
@@ -164,6 +172,7 @@ export default function PlacesTest() {
         legs
       );
       setSchedule(stops);
+      setTravelLegs(legs);
 
       // Map input: timed stops with coords from their category pools.
       // Null-id picks (blocked/empty pools) have no coords — skipped.
@@ -193,6 +202,49 @@ export default function PlacesTest() {
       setStage("idle");
     }
   }
+
+  async function refreshItinerary(id: string, simValue: string) {
+    const nowISO = simValue ? new Date(simValue).toISOString() : "";
+    const url = `/api/itinerary/${id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (res.ok) setItinerary(data);
+  }
+
+  async function startItinerary() {
+    if (!schedule) return;
+    const res = await fetch("/api/itinerary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stops: schedule, legs: travelLegs }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.error ?? `itinerary HTTP ${res.status}`);
+      return;
+    }
+    await refreshItinerary(data.id, simNow);
+  }
+
+  const statusFor = (category: string): StopStatus | undefined =>
+    itinerary?.stops.find((s) => s.category === category)?.status;
+
+  // map markers restyle by live status once an itinerary is active
+  const styledMapStops = useMemo(
+    () =>
+      itinerary
+        ? mapStops.map((ms) => ({ ...ms, status: statusFor(ms.category) }))
+        : mapStops,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mapStops, itinerary]
+  );
+
+  const BADGE_COLORS: Record<StopStatus, string> = {
+    upcoming: "#8ab8c4",
+    active: "#e8873d",
+    completed: "#7aa47a",
+    skipped: "#aaa",
+  };
 
   return (
     <div
@@ -252,6 +304,22 @@ export default function PlacesTest() {
                 <div style={{ fontSize: 11, textTransform: "uppercase", color: "#679" }}>
                   {s.category}
                   {s.fallback && " · fallback"}
+                  {itinerary && statusFor(s.category) && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        padding: "1px 7px",
+                        borderRadius: 9,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: "#fff",
+                        background: BADGE_COLORS[statusFor(s.category)!],
+                        textTransform: "lowercase",
+                      }}
+                    >
+                      {statusFor(s.category)}
+                    </span>
+                  )}
                 </div>
                 {block ? (
                   <em style={{ color: "#96803e" }}>
@@ -301,7 +369,51 @@ export default function PlacesTest() {
               </div>
             );
           })}
-          {mapStops.length > 0 && <ItineraryMap stops={mapStops} />}
+          {schedule && !itinerary && (
+            <button onClick={startItinerary} style={{ marginTop: 8 }}>
+              Start this itinerary
+            </button>
+          )}
+          {itinerary && (
+            <div style={{ marginTop: 8, fontSize: 12 }}>
+              <div>
+                itinerary <code>{itinerary.id.slice(0, 8)}</code> ·{" "}
+                <b>{itinerary.status}</b>
+              </div>
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: "6px 8px",
+                  border: "1px dashed #c9a227",
+                  borderRadius: 8,
+                  background: "#fdf9ec",
+                }}
+              >
+                <label style={{ fontWeight: 700, color: "#8a6d1a" }}>
+                  DEV · simulate time:{" "}
+                </label>
+                <input
+                  type="datetime-local"
+                  value={simNow}
+                  onChange={(e) => {
+                    setSimNow(e.target.value);
+                    refreshItinerary(itinerary.id, e.target.value);
+                  }}
+                  style={{ fontSize: 12 }}
+                />
+                <button
+                  onClick={() => {
+                    setSimNow("");
+                    refreshItinerary(itinerary.id, "");
+                  }}
+                  style={{ marginLeft: 6, fontSize: 11 }}
+                >
+                  real time
+                </button>
+              </div>
+            </div>
+          )}
+          {styledMapStops.length > 0 && <ItineraryMap stops={styledMapStops} />}
         </div>
       )}
 

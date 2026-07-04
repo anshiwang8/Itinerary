@@ -16,6 +16,8 @@ export interface MapStop {
   reason?: string;
   /** mode of the travel leg departing this stop (undefined on the last) */
   legModeToNext?: "transit" | "walk" | "unknown";
+  /** live itinerary status — markers restyle when set */
+  status?: "upcoming" | "active" | "completed" | "skipped";
 }
 
 type Libs = [google.maps.MapsLibrary, google.maps.MarkerLibrary];
@@ -86,19 +88,28 @@ export default function ItineraryMap({ stops }: { stops: MapStop[] }) {
             })
           : "?";
 
-      // numbered markers in stop order
+      // numbered markers in stop order, restyled by itinerary status
       stops.forEach((s, i) => {
+        const style =
+          s.status === "active"
+            ? { background: "#e8873d", borderColor: "#fff", scale: 1.3, opacity: "1" }
+            : s.status === "completed"
+            ? { background: "#b9c6cb", borderColor: "#9aa7ac", scale: 0.9, opacity: "0.55" }
+            : { background: STROKE, borderColor: "#2a5f70", scale: 1, opacity: "1" };
         const pin = new PinElement({
           glyph: String(i + 1),
           glyphColor: "#fff",
-          background: STROKE,
-          borderColor: "#2a5f70",
+          background: style.background,
+          borderColor: style.borderColor,
+          scale: style.scale,
         });
+        pin.element.style.opacity = style.opacity;
         const marker = new AdvancedMarkerElement({
           map,
           position: { lat: s.lat, lng: s.lng },
           content: pin.element,
           title: s.name,
+          zIndex: s.status === "active" ? 10 : 1,
         });
         marker.addListener("click", () => {
           info.setContent(
