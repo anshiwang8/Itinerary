@@ -26,10 +26,13 @@ export const CATEGORY_START_DEFAULTS: Array<
   [/breakfast/i, { hour: 9, minute: 0 }],
   [/lunch/i, { hour: 12, minute: 0 }],
   [/coffee|caf[eé]|espresso|matcha/i, { hour: 10, minute: 0 }],
+  [/ice\s*cream|gelato/i, { hour: 15, minute: 0 }],
+  [/dessert/i, { hour: 20, minute: 0 }], // typically post-dinner
   [/comedy|show|theatre|theater|concert/i, { hour: 20, minute: 0 }],
   [/club/i, { hour: 22, minute: 0 }],
   [/\bbars?\b|cocktail|pub|brewery|wine|drink/i, { hour: 20, minute: 0 }],
   [
+    // cuisine words cover the ramen/late-night-food cases too
     /dinner|restaurant|dining|ramen|sushi|pizza|taco|noodle|pho|steak|izakaya|bbq/i,
     { hour: 19, minute: 0 },
   ],
@@ -80,8 +83,9 @@ function toTorontoISO(d: Date): string {
  * weather gate, and schedule all call it so they agree on one instant.
  * 1. Clock time present → parseTargetTime (day-of-week aware).
  * 2. Day-part keyword → DAY_PART_DEFAULTS (respecting "tomorrow").
- * 3. Neither → infer a day-part from the first category (anchor).
- * 4. Otherwise → next full hour from now.
+ * 3. Neither → infer from categories: earliest table default among the
+ *    categories that match (anchor).
+ * 4. No category matches either → next full hour from now.
  */
 export function resolveStartTime(
   timeWindow: string,
@@ -114,9 +118,19 @@ export function resolveStartTime(
     }
   }
 
-  // no clock time, no day-part → infer from the first stop's category
-  const anchor = categories.find((c) => typeof c === "string" && c.trim());
-  const inferred = inferCategoryStart(anchor);
+  // No clock time, no day-part → infer from the categories. Anchor on
+  // the EARLIEST default among the categories that match the table —
+  // not blindly the first category ("dessert then dinner" must anchor
+  // on dinner's 19:00, not wipe every pool at next-full-hour because
+  // the first category alone decided). No match at all → fall through.
+  let inferred: { hour: number; minute: number } | null = null;
+  for (const c of categories) {
+    if (typeof c !== "string" || !c.trim()) continue;
+    const t = inferCategoryStart(c);
+    if (t && (!inferred || t.hour * 60 + t.minute < inferred.hour * 60 + inferred.minute)) {
+      inferred = t;
+    }
+  }
   if (inferred) {
     const dayOffset = tw.includes("tomorrow") ? 1 : 0;
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset);

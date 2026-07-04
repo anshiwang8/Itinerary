@@ -112,6 +112,41 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "anchor = earliest matching category: 'dessert then dinner' → 19:00, not 20:00 or 4 AM",
+    () => {
+      const threeAM = new Date(2026, 6, 3, 3, 0, 0);
+      // dessert matches (20:00), dinner matches (19:00) → earliest wins
+      assert.strictEqual(
+        resolveStartTime("unspecified", threeAM, ["dessert", "dinner"]).toISOString(),
+        new Date(2026, 6, 3, 19, 0, 0).toISOString()
+      );
+      // dessert alone anchors at its own 20:00; ice cream at 15:00
+      assert.strictEqual(
+        resolveStartTime("unspecified", threeAM, ["dessert"]).toISOString(),
+        new Date(2026, 6, 3, 20, 0, 0).toISOString()
+      );
+      assert.strictEqual(
+        resolveStartTime("unspecified", threeAM, ["ice cream"]).toISOString(),
+        new Date(2026, 6, 3, 15, 0, 0).toISOString()
+      );
+      // unmatched first category no longer poisons the anchor
+      assert.strictEqual(
+        resolveStartTime("unspecified", threeAM, ["escape room", "ramen"]).toISOString(),
+        new Date(2026, 6, 3, 19, 0, 0).toISOString()
+      );
+    },
+  ],
+  [
+    "ONLY unmatched categories still fall to next full hour",
+    () => {
+      const threeAM = new Date(2026, 6, 3, 3, 0, 0);
+      assert.strictEqual(
+        resolveStartTime("unspecified", threeAM, ["axe throwing", "escape room"]).toISOString(),
+        new Date(2026, 6, 3, 4, 0, 0).toISOString()
+      );
+    },
+  ],
+  [
     "explicit clock time and day-part both override category defaults",
     () => {
       const threeAM = new Date(2026, 6, 3, 3, 0, 0);

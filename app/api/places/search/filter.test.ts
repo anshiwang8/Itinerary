@@ -152,6 +152,34 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "'dessert then dinner' repro: anchors 19:00, BOTH pools populated",
+    () => {
+      const threeAM = new Date(2026, 6, 3, 3, 0, 0);
+      // before the anchor fix: dessert (then unmatched) → next full hour
+      // 4 AM → unified filter wiped both pools
+      assert.strictEqual(
+        resolveStartTime("unspecified", threeAM, ["dessert", "dinner"]).toISOString(),
+        new Date(2026, 6, 3, 19, 0, 0).toISOString()
+      );
+      const eveningHours = hoursAllDays(11, 23); // open at 19:00
+      const { pools, dropLog } = filterPools(
+        {
+          dessert: [mkPlace("sweet", { currentOpeningHours: eveningHours })],
+          dinner: [mkPlace("resto", { currentOpeningHours: eveningHours })],
+        },
+        mkParsed({
+          time_window: "unspecified",
+          category_signals: ["dessert", "dinner"],
+        }),
+        null,
+        threeAM
+      );
+      assert.deepStrictEqual(pools.dessert.map((p) => p.id), ["sweet"]);
+      assert.deepStrictEqual(pools.dinner.map((p) => p.id), ["resto"]);
+      assert.strictEqual(dropLog.length, 0);
+    },
+  ],
+  [
     "integration: weather gate, hours filter, and schedule all see the identical resolved instant",
     () => {
       const NOW = new Date(2026, 6, 3, 13, 20, 0);
