@@ -16,11 +16,17 @@ export interface MapStop {
   reason?: string;
   /** mode of the travel leg departing this stop (undefined on the last) */
   legModeToNext?: "transit" | "walk" | "unknown";
+  /** encoded route geometry to the next stop; straight-line fallback when null */
+  polylineToNext?: string | null;
   /** live itinerary status — markers restyle when set */
   status?: "upcoming" | "active" | "completed" | "skipped";
 }
 
-type Libs = [google.maps.MapsLibrary, google.maps.MarkerLibrary];
+type Libs = [
+  google.maps.MapsLibrary,
+  google.maps.MarkerLibrary,
+  google.maps.GeometryLibrary
+];
 
 // Load the Maps JS API once, lazily — first mount of this component is
 // the first time the API is requested at all.
@@ -35,6 +41,7 @@ function loadMapLibs(): Promise<Libs> {
     libsPromise = Promise.all([
       importLibrary("maps"),
       importLibrary("marker"),
+      importLibrary("geometry"),
     ]);
   }
   return libsPromise;
@@ -56,10 +63,11 @@ export default function ItineraryMap({ stops }: { stops: MapStop[] }) {
     let cancelled = false;
 
     (async () => {
-      const [mapsLib, markerLib] = await loadMapLibs();
+      const [mapsLib, markerLib, geometryLib] = await loadMapLibs();
       if (cancelled || !divRef.current) return;
       const { Map, InfoWindow, Polyline } = mapsLib;
       const { AdvancedMarkerElement, PinElement } = markerLib;
+      const { encoding } = geometryLib;
 
       if (!mapRef.current) {
         mapRef.current = new Map(divRef.current, {
@@ -124,12 +132,16 @@ export default function ItineraryMap({ stops }: { stops: MapStop[] }) {
         overlaysRef.current.markers.push(marker);
       });
 
-      // straight legs: solid = walk, dashed = transit
+      // route legs: real geometry when available (straight-line
+      // fallback otherwise); solid = walk, dashed = transit
       for (let i = 0; i < stops.length - 1; i++) {
-        const path = [
-          { lat: stops[i].lat, lng: stops[i].lng },
-          { lat: stops[i + 1].lat, lng: stops[i + 1].lng },
-        ];
+        const encoded = stops[i].polylineToNext;
+        const path = encoded
+          ? encoding.decodePath(encoded)
+          : [
+              { lat: stops[i].lat, lng: stops[i].lng },
+              { lat: stops[i + 1].lat, lng: stops[i + 1].lng },
+            ];
         const mode = stops[i].legModeToNext ?? "unknown";
         const line =
           mode === "transit"

@@ -192,6 +192,7 @@ export default function PlacesTest() {
               endTime: st.end_time,
               reason: st.reason,
               legModeToNext: st.travelToNext?.mode,
+              polylineToNext: st.travelToNext?.encodedPolyline ?? null,
             };
           })
           .filter((x): x is MapStop => x !== null)
@@ -360,7 +361,13 @@ export default function PlacesTest() {
                   }}
                 >
                   {leg.mode === "transit"
-                    ? `transit · ${leg.totalMinutes} min incl. ${leg.marginMinutes} min buffer`
+                    ? leg.transit
+                      ? `${leg.transit.lineName}${leg.transit.headsign ? ` ${leg.transit.headsign}` : ""} · ${
+                          leg.transit.stopCount ?? "?"
+                        } stops · from ${leg.transit.departStop} stop · ${leg.totalMinutes} min incl. ${
+                          leg.marginMinutes
+                        } min buffer`
+                      : `transit · ${leg.totalMinutes} min incl. ${leg.marginMinutes} min buffer`
                     : leg.mode === "walk"
                     ? `walk · ${leg.totalMinutes} min`
                     : "travel time unavailable"}
