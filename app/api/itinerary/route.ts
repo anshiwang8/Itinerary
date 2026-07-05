@@ -2,15 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { createItinerary } from "./store";
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
+import { ParsedPrompt } from "../places/search/filter";
 
 // POST /api/itinerary — store the full pipeline output, return { id }.
 export async function POST(request: NextRequest) {
   let stops: ScheduledStop[];
   let legs: TravelLeg[];
+  let parsed: ParsedPrompt | undefined;
   try {
     const body = await request.json();
     stops = body?.stops;
     legs = Array.isArray(body?.legs) ? body.legs : [];
+    parsed =
+      body?.parsed && typeof body.parsed === "object" ? body.parsed : undefined;
   } catch {
     return NextResponse.json(
       { error: "Request body must be JSON." },
@@ -24,6 +28,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const itinerary = createItinerary(stops, legs);
+  const itinerary = createItinerary(stops, legs, parsed);
   return NextResponse.json({ id: itinerary.id });
 }

@@ -1,0 +1,76 @@
+// Places Text Search core, shared by the /api/places/search route and
+// the reroute engine (which re-searches only the affected categories).
+import { ParsedPrompt, Place } from "./filter";
+
+const SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText";
+
+const FIELD_MASK = [
+  "places.displayName",
+  "places.id",
+  "places.location",
+  "places.rating",
+  "places.priceLevel",
+  "places.currentOpeningHours",
+  "places.businessStatus",
+].join(",");
+
+// e.g. aesthetic="lively night out", category="bar", location="Ossington"
+// → "lively night out bar Ossington Toronto"
+export function buildQuery(parsed: ParsedPrompt, category: string): string {
+  const aesthetic =
+    parsed.aesthetic && parsed.aesthetic.toLowerCase() !== "unspecified"
+      ? parsed.aesthetic
+      : "";
+  return [aesthetic, category, parsed.location, "Toronto"]
+    .filter(Boolean)
+    .join(" ");
+}
+
+async function searchText(apiKey: string, textQuery: string): Promise<Place[]> {
+  const res = await fetch(SEARCH_TEXT_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask": FIELD_MASK,
+    },
+    body: JSON.stringify({ textQuery }),
+    cache: "no-store",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(
+      data?.error?.message ?? `Places API request failed (${res.status}).`
+    );
+  }
+  return data.places ?? [];
+}
+
+/**
+ * One Text Search per category (parallel), keyed by category. With no
+ * categories, a single aesthetic+location query keyed "general" so
+ * vague prompts still get candidates. `categoriesOverride` lets the
+ * reroute engine re-search a subset without touching parsed.
+ */
+export async function searchPools(
+  apiKey: string,
+  parsed: ParsedPrompt,
+  categoriesOverride?: string[]
+): Promise<Record<string, Place[]>> {
+  const categories = (categoriesOverride ?? parsed.category_signals ?? []).filter(
+    (c): c is string => typeof c === "string" && c.trim() !== ""
+  );
+
+  if (categories.length === 0) {
+    return { general: await searchText(apiKey, buildQuery(parsed, "things to do")) };
+  }
+
+  const results = await Promise.all(
+    categories.map((category) => searchText(apiKey, buildQuery(parsed, category)))
+  );
+  const pools: Record<string, Place[]> = {};
+  categories.forEach((category, i) => {
+    pools[category] = results[i];
+  });
+  return pools;
+}

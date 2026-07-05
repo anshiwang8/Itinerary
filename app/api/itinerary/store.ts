@@ -3,6 +3,7 @@
 // handling. Keyed by itinerary id.
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
+import { ParsedPrompt } from "../places/search/filter";
 
 export type StopStatus = "upcoming" | "active" | "completed" | "skipped";
 export type ItineraryStatus = "planning" | "active" | "completed";
@@ -23,6 +24,8 @@ export interface Itinerary {
   status: ItineraryStatus;
   stops: ItineraryStop[];
   legs: TravelLeg[];
+  /** original parse output — the reroute engine re-runs the pipeline with it */
+  parsed?: ParsedPrompt;
 }
 
 // Survive Next dev hot-reloads: module state resets on recompile, the
@@ -54,7 +57,8 @@ export function deriveStopStatus(
 
 export function createItinerary(
   stops: ScheduledStop[],
-  legs: TravelLeg[]
+  legs: TravelLeg[],
+  parsed?: ParsedPrompt
 ): Itinerary {
   const itinerary: Itinerary = {
     id: crypto.randomUUID(),
@@ -67,6 +71,7 @@ export function createItinerary(
       locked: false,
     })),
     legs,
+    ...(parsed ? { parsed } : {}),
   };
   store.set(itinerary.id, itinerary);
   return itinerary;

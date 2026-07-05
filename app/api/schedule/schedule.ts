@@ -152,6 +152,8 @@ export interface SelectionLike {
   reason?: string;
   fallback?: boolean;
   rating?: number;
+  /** venue coordinates — passthrough; the reroute engine needs them */
+  location?: { latitude: number; longitude: number };
 }
 
 export interface ScheduledStop extends SelectionLike {
@@ -175,13 +177,13 @@ export function buildSchedule(
   selections: SelectionLike[],
   timeWindow: string,
   now: Date = new Date(),
-  travelLegs: TravelLeg[] = []
+  travelLegs: TravelLeg[] = [],
+  // reroute engine anchors the replanned chain at an explicit instant
+  startOverride?: Date
 ): { startISO: string; stops: ScheduledStop[] } {
-  const start = resolveStartTime(
-    timeWindow,
-    now,
-    selections.map((s) => s.category)
-  );
+  const start =
+    startOverride ??
+    resolveStartTime(timeWindow, now, selections.map((s) => s.category));
   const cursor = new Date(start);
 
   const timed: ScheduledStop[] = [];

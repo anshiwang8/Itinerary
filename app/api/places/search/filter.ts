@@ -114,7 +114,10 @@ export function filterPools(
   pools: Record<string, Place[]>,
   parsed: ParsedPrompt,
   weather: WeatherHour[] | null = null,
-  now: Date = new Date()
+  now: Date = new Date(),
+  // reroute engine anchors the replan at floor_time instead of the
+  // original time_window resolution
+  targetOverride?: Date
 ): {
   pools: Record<string, Place[]>;
   dropLog: DropEntry[];
@@ -131,11 +134,9 @@ export function filterPools(
   // book (same resolver, same category anchor). Hours filter and
   // weather gate both check this instant, so the three pipeline stages
   // can never disagree on the target time again.
-  const startInstant = resolveStartTime(
-    parsed.time_window ?? "",
-    now,
-    Object.keys(pools)
-  );
+  const startInstant =
+    targetOverride ??
+    resolveStartTime(parsed.time_window ?? "", now, Object.keys(pools));
   const target: TargetTime = {
     day: startInstant.getDay(),
     hour: startInstant.getHours(),

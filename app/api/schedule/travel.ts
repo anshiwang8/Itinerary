@@ -247,6 +247,28 @@ async function computeRoute(
 }
 
 /**
+ * Fetch a single leg between two points. `excludeTransit` is the
+ * reroute engine's disruption handling: a cancelled transit leg is
+ * re-fetched walk-only so the dead route can't be re-proposed.
+ */
+export async function getSingleLeg(
+  apiKey: string,
+  origin: LatLng,
+  destination: LatLng,
+  fromIndex: number,
+  departureTime?: string,
+  excludeTransit = false
+): Promise<TravelLeg> {
+  const [transitRes, walkRes] = await Promise.all([
+    excludeTransit
+      ? Promise.resolve(null)
+      : computeRoute(apiKey, origin, destination, "TRANSIT", departureTime),
+    computeRoute(apiKey, origin, destination, "WALK", departureTime),
+  ]);
+  return buildLeg(fromIndex, transitRes, walkRes);
+}
+
+/**
  * Fetch consecutive-pair travel legs for the ordered stop coordinates.
  * Two computeRoutes calls per leg (TRANSIT + WALK), all in parallel.
  * Cost note: fine at demo scale.
@@ -262,11 +284,10 @@ export async function getTravelLegs(
   if (points.length < 2) return [];
 
   return Promise.all(
-    points.slice(0, -1).map((origin, i) =>
-      Promise.all([
-        computeRoute(apiKey, origin, points[i + 1], "TRANSIT", departureTime),
-        computeRoute(apiKey, origin, points[i + 1], "WALK", departureTime),
-      ]).then(([transitRes, walkRes]) => buildLeg(i, transitRes, walkRes))
-    )
+    points
+      .slice(0, -1)
+      .map((origin, i) =>
+        getSingleLeg(apiKey, origin, points[i + 1], i, departureTime)
+      )
   );
 }

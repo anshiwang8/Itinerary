@@ -49,6 +49,7 @@ interface WeatherBlock {
 export default function PlacesTest() {
   const [prompt, setPrompt] = useState("");
   const [parsed, setParsed] = useState<string | null>(null);
+  const [parsedObj, setParsedObj] = useState<Record<string, unknown> | null>(null);
   const [grouped, setGrouped] = useState<GroupedPlaces | null>(null);
   const [dropLog, setDropLog] = useState<DropEntry[]>([]);
   const [weatherBlocks, setWeatherBlocks] = useState<WeatherBlock[]>([]);
@@ -58,6 +59,9 @@ export default function PlacesTest() {
   const [travelLegs, setTravelLegs] = useState<TravelLeg[]>([]);
   const [itinerary, setItinerary] = useState<Itinerary | null>(null);
   const [simNow, setSimNow] = useState(""); // dev time control (datetime-local)
+  const [disruptLeg, setDisruptLeg] = useState(0);
+  const [banner, setBanner] = useState<string | null>(null);
+  const [changedCategories, setChangedCategories] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [stage, setStage] = useState<
     "idle" | "parsing" | "searching" | "selecting" | "routing"
@@ -75,6 +79,9 @@ export default function PlacesTest() {
     setTravelLegs([]);
     setItinerary(null);
     setSimNow("");
+    setParsedObj(null);
+    setBanner(null);
+    setChangedCategories(new Set());
     try {
       setStage("parsing");
       const parseRes = await fetch("/api/parse", {
@@ -90,6 +97,7 @@ export default function PlacesTest() {
         );
       }
       setParsed(JSON.stringify(parseData, null, 2));
+      setParsedObj(parseData);
 
       // Weather is best-effort: failure just skips the weather gate.
       let weather = null;
@@ -214,10 +222,18 @@ export default function PlacesTest() {
 
   async function startItinerary() {
     if (!schedule) return;
+    // enrich stops with venue coordinates — the reroute engine needs
+    // them for inbound travel legs
+    const enriched = schedule.map((st) => {
+      const loc = st.id
+        ? (grouped?.[st.category] ?? []).find((p) => p.id === st.id)?.location
+        : undefined;
+      return loc ? { ...st, location: loc } : st;
+    });
     const res = await fetch("/api/itinerary", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stops: schedule, legs: travelLegs }),
+      body: JSON.stringify({ stops: enriched, legs: travelLegs, parsed: parsedObj }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -225,6 +241,89 @@ export default function PlacesTest() {
       return;
     }
     await refreshItinerary(data.id, simNow);
+  }
+
+  // Rebuild the rendered schedule/picks/map from the stored itinerary —
+  // after a reroute the server-side stops are the source of truth.
+  function applyItinerary(it: Itinerary) {
+    setItinerary(it);
+    setSchedule(it.stops);
+    setSelections(
+      it.stops.map((s) => ({
+        category: s.category,
+        id: s.id,
+        reason: s.reason ?? "",
+        fallback: s.fallback,
+        name: s.name,
+        rating: s.rating,
+      }))
+    );
+    setMapStops(
+      it.stops
+        .filter((s) => s.id !== null && s.location)
+        .map((s) => ({
+          name: s.name ?? "(unnamed)",
+          lat: s.location!.latitude,
+          lng: s.location!.longitude,
+          category: s.category,
+          startTime: s.start_time,
+          endTime: s.end_time,
+          reason: s.reason,
+          legModeToNext: s.travelToNext?.mode,
+          polylineToNext: s.travelToNext?.encodedPolyline ?? null,
+        }))
+    );
+  }
+
+  async function fireDisruption() {
+    if (!itinerary) return;
+    // capture the cancelled leg's label before the replan overwrites it
+    const timed = itinerary.stops.filter((s) => s.start_time);
+    const brokenLeg = timed[disruptLeg]?.travelToNext;
+    const legName =
+      brokenLeg?.transit?.lineName ??
+      (brokenLeg?.mode === "transit" ? "transit leg" : "leg");
+
+    const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
+    const res = await fetch(`/api/itinerary/${itinerary.id}/reroute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        disruption: { type: "transit_cancelled", legIndex: disruptLeg },
+        ...(nowISO ? { now: nowISO } : {}),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.error ?? `reroute HTTP ${res.status}`);
+      return;
+    }
+    if (!data.rerouted) {
+      setBanner(`${legName} cancelled — ${data.reason}`);
+      setChangedCategories(new Set());
+      return;
+    }
+    // refetch, rebuild the UI from the updated itinerary, diff-highlight
+    const itRes = await fetch(
+      `/api/itinerary/${itinerary.id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`
+    );
+    const updated: Itinerary = await itRes.json();
+    applyItinerary(updated);
+    const changedCats = new Set<string>(
+      data.changed.map((c: { stopIndex: number }) => updated.stops[c.stopIndex].category)
+    );
+    setChangedCategories(changedCats);
+    const keptStop = updated.stops.find(
+      (s) => s.status === "active" || s.status === "completed"
+    );
+    const floorLabel = new Date(data.floor_time).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    setBanner(
+      `${legName} cancelled — replanned from ${floorLabel}` +
+        (keptStop ? `, your ${keptStop.category} is unchanged` : "")
+    );
   }
 
   const statusFor = (category: string): StopStatus | undefined =>
@@ -287,19 +386,41 @@ export default function PlacesTest() {
       {selections && (
         <div style={{ marginTop: 10 }}>
           <div style={{ fontWeight: 700, fontSize: 14 }}>Final picks</div>
+          {banner && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: "7px 10px",
+                borderRadius: 8,
+                background: "#fdeeea",
+                border: "1px solid #e5b8a8",
+                color: "#9a4a2e",
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              {banner}
+            </div>
+          )}
           {selections.map((s) => {
             const stop = schedule?.find((t) => t.category === s.category);
             const leg = stop?.travelToNext;
             const block = weatherBlocks.find((b) => b.category === s.category);
+            const wasRerouted = changedCategories.has(s.category);
             return (
               <div key={s.category}>
               <div
                 style={{
                   marginTop: 6,
                   padding: "8px 10px",
-                  border: block ? "1px solid #e0d2b8" : "1px solid #d5e5ea",
+                  border: wasRerouted
+                    ? "2px solid #e8873d"
+                    : block
+                    ? "1px solid #e0d2b8"
+                    : "1px solid #d5e5ea",
                   borderRadius: 8,
-                  background: block ? "#fdf9ef" : "#f6fbfc",
+                  background: wasRerouted ? "#fdf3ea" : block ? "#fdf9ef" : "#f6fbfc",
+                  transition: "border 0.4s ease, background 0.4s ease",
                 }}
               >
                 <div style={{ fontSize: 11, textTransform: "uppercase", color: "#679" }}>
@@ -417,6 +538,33 @@ export default function PlacesTest() {
                 >
                   real time
                 </button>
+                <div style={{ marginTop: 6 }}>
+                  <label style={{ fontWeight: 700, color: "#8a6d1a" }}>
+                    DEV · simulate disruption:{" "}
+                  </label>
+                  <select
+                    value={disruptLeg}
+                    onChange={(e) => setDisruptLeg(Number(e.target.value))}
+                    style={{ fontSize: 11, maxWidth: 170 }}
+                  >
+                    {itinerary.stops
+                      .filter((s) => s.start_time)
+                      .slice(0, -1)
+                      .map((s, i, arr) => {
+                        const timed = itinerary.stops.filter((t) => t.start_time);
+                        const next = timed[i + 1];
+                        return (
+                          <option key={i} value={i}>
+                            leg {i}: {s.name} → {next?.name} (
+                            {s.travelToNext?.mode ?? "?"})
+                          </option>
+                        );
+                      })}
+                  </select>
+                  <button onClick={fireDisruption} style={{ marginLeft: 6, fontSize: 11 }}>
+                    cancel transit
+                  </button>
+                </div>
               </div>
             </div>
           )}
