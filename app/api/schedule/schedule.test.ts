@@ -8,6 +8,7 @@ import {
   resolveStartTime,
   resolveStartTimeChecked,
 } from "./schedule";
+import { TravelLeg } from "./travel";
 
 // Fixed "now": Friday 2026-07-03 13:20 local (EDT, -04:00).
 const NOW = new Date(2026, 6, 3, 13, 20, 0);
@@ -270,6 +271,59 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(stops[1].durationMinutes, null);
       // the only timed stop is also the last timed stop → no travel leg
       assert.strictEqual(stops[0].travelMinutesToNext, undefined);
+    },
+  ],
+  [
+    "home leg: resolved start = leave-home time, first stop starts after the leg",
+    () => {
+      const homeLeg: TravelLeg = {
+        fromIndex: -1,
+        mode: "transit",
+        rawMinutes: 27,
+        marginMinutes: 5,
+        totalMinutes: 32,
+        distanceMeters: 5200,
+        encodedPolyline: "enc_home",
+      };
+      const walk10: TravelLeg = {
+        fromIndex: 0,
+        mode: "walk",
+        rawMinutes: 10,
+        marginMinutes: 0,
+        totalMinutes: 10,
+        distanceMeters: 800,
+        encodedPolyline: null,
+      };
+      const { startISO, stops } = buildSchedule(
+        [
+          { category: "ramen", id: "r1", name: "Ramen Spot" }, // 90+15
+          { category: "cocktails", id: "b1", name: "Cocktail Bar" },
+        ],
+        "evening",
+        NOW,
+        [walk10],
+        undefined,
+        homeLeg
+      );
+      // leave home at the resolved 19:00; arrive stop 1 at 19:32
+      assert.strictEqual(startISO, "2026-07-03T19:00:00-04:00");
+      assert.strictEqual(stops[0].start_time, "2026-07-03T19:32:00-04:00");
+      assert.strictEqual(stops[0].end_time, "2026-07-03T21:17:00-04:00");
+      // inter-stop legs unaffected: bar = ramen end + 10 min walk
+      assert.strictEqual(stops[1].start_time, "2026-07-03T21:27:00-04:00");
+      assert.strictEqual(stops[0].travelToNext, walk10);
+    },
+  ],
+  [
+    "no home leg → schedule unchanged (home is opt-in, reroute path untouched)",
+    () => {
+      const { startISO, stops } = buildSchedule(
+        [{ category: "ramen", id: "r1", name: "Ramen Spot" }],
+        "evening",
+        NOW
+      );
+      assert.strictEqual(startISO, "2026-07-03T19:00:00-04:00");
+      assert.strictEqual(stops[0].start_time, "2026-07-03T19:00:00-04:00");
     },
   ],
 ];

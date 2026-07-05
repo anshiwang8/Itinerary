@@ -4,6 +4,7 @@
 import assert from "node:assert";
 import { createItinerary, deriveStopStatus, withStatuses } from "./store";
 import { ScheduledStop } from "../schedule/schedule";
+import { TravelLeg } from "../schedule/travel";
 
 function mkStop(
   category: string,
@@ -131,6 +132,34 @@ const cases: Array<[string, () => void]> = [
         locked: [true, true, true],
         itinerary: "completed",
       });
+    },
+  ],
+  [
+    "home leg is origin metadata: excluded from stop count, statuses, and completion",
+    () => {
+      const homeLeg: TravelLeg = {
+        fromIndex: -1,
+        mode: "transit",
+        rawMinutes: 27,
+        marginMinutes: 5,
+        totalMinutes: 32,
+        distanceMeters: 5200,
+        encodedPolyline: "enc_home",
+      };
+      const it = createItinerary(
+        [mkStop("dinner", S1.start, S1.end)],
+        [],
+        undefined,
+        homeLeg
+      );
+      // home is NOT a stop — stop count is the real stops only
+      assert.strictEqual(it.stops.length, 1);
+      assert.deepStrictEqual(it.homeLeg, homeLeg);
+      // completion is a function of real stops; home can't hold it open
+      withStatuses(it, at("2026-07-03T23:00:00-04:00"));
+      assert.strictEqual(it.status, "completed");
+      // status derivation bolts nothing onto the home leg — untouched
+      assert.deepStrictEqual(it.homeLeg, homeLeg);
     },
   ],
 ];

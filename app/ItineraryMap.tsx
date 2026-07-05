@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
+import { formatStopRange } from "./lib/timeLabels";
 
 // Map rendering for the final schedule. Straight polylines between
 // stops by design — no Directions/Routes geometry in this step.
@@ -20,6 +21,16 @@ export interface MapStop {
   polylineToNext?: string | null;
   /** live itinerary status — markers restyle when set */
   status?: "upcoming" | "active" | "completed" | "skipped";
+}
+
+// Home origin — rendered as a distinct (house-glyph, dark) marker, not
+// a numbered stop, with leg 0 drawn to the first stop.
+export interface MapHome {
+  label: string;
+  lat: number;
+  lng: number;
+  legModeToNext?: "transit" | "walk" | "unknown";
+  polylineToNext?: string | null;
 }
 
 type Libs = [
@@ -49,7 +60,13 @@ function loadMapLibs(): Promise<Libs> {
 
 const STROKE = "#3d8294";
 
-export default function ItineraryMap({ stops }: { stops: MapStop[] }) {
+export default function ItineraryMap({
+  stops,
+  home,
+}: {
+  stops: MapStop[];
+  home?: MapHome | null;
+}) {
   const divRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const overlaysRef = useRef<{
@@ -95,6 +112,10 @@ export default function ItineraryMap({ stops }: { stops: MapStop[] }) {
               minute: "2-digit",
             })
           : "?";
+      // date-aware "be here" range; falls back to raw times if either
+      // endpoint is missing
+      const beHere = (start: string | null, end: string | null) =>
+        start && end ? formatStopRange(start, end) : `${fmt(start)} – ${fmt(end)}`;
 
       // numbered markers in stop order, restyled by itinerary status
       stops.forEach((s, i) => {
@@ -123,7 +144,7 @@ export default function ItineraryMap({ stops }: { stops: MapStop[] }) {
           info.setContent(
             `<div style="font-family:sans-serif;font-size:13px;max-width:220px">` +
               `<strong>${s.name}</strong><br/>` +
-              `be here ${fmt(s.startTime)} – ${fmt(s.endTime)}` +
+              `be here ${beHere(s.startTime, s.endTime)}` +
               (s.reason ? `<br/><em>${s.reason}</em>` : "") +
               `</div>`
           );
@@ -132,17 +153,38 @@ export default function ItineraryMap({ stops }: { stops: MapStop[] }) {
         overlaysRef.current.markers.push(marker);
       });
 
+      // home origin: distinct house-glyph marker — visibly NOT a
+      // numbered stop
+      if (home) {
+        const pin = new PinElement({
+          glyph: "⌂",
+          glyphColor: "#fff",
+          background: "#3a3f4b",
+          borderColor: "#22262e",
+          scale: 1.05,
+        });
+        const marker = new AdvancedMarkerElement({
+          map,
+          position: { lat: home.lat, lng: home.lng },
+          content: pin.element,
+          title: home.label,
+        });
+        marker.addListener("click", () => {
+          info.setContent(
+            `<div style="font-family:sans-serif;font-size:13px;max-width:220px">` +
+              `<strong>${home.label}</strong><br/>starting point</div>`
+          );
+          info.open({ map, anchor: marker });
+        });
+        overlaysRef.current.markers.push(marker);
+      }
+
       // route legs: real geometry when available (straight-line
       // fallback otherwise); solid = walk, dashed = transit
-      for (let i = 0; i < stops.length - 1; i++) {
-        const encoded = stops[i].polylineToNext;
-        const path = encoded
-          ? encoding.decodePath(encoded)
-          : [
-              { lat: stops[i].lat, lng: stops[i].lng },
-              { lat: stops[i + 1].lat, lng: stops[i + 1].lng },
-            ];
-        const mode = stops[i].legModeToNext ?? "unknown";
+      const addLine = (
+        path: google.maps.LatLngLiteral[] | google.maps.LatLng[],
+        mode: "transit" | "walk" | "unknown"
+      ) => {
         const line =
           mode === "transit"
             ? new Polyline({
@@ -171,14 +213,41 @@ export default function ItineraryMap({ stops }: { stops: MapStop[] }) {
                 strokeWeight: 3,
               });
         overlaysRef.current.lines.push(line);
+      };
+
+      // leg 0: home → first stop, same walk/transit styling
+      if (home) {
+        addLine(
+          home.polylineToNext
+            ? encoding.decodePath(home.polylineToNext)
+            : [
+                { lat: home.lat, lng: home.lng },
+                { lat: stops[0].lat, lng: stops[0].lng },
+              ],
+          home.legModeToNext ?? "unknown"
+        );
       }
 
-      if (stops.length === 1) {
+      for (let i = 0; i < stops.length - 1; i++) {
+        const encoded = stops[i].polylineToNext;
+        addLine(
+          encoded
+            ? encoding.decodePath(encoded)
+            : [
+                { lat: stops[i].lat, lng: stops[i].lng },
+                { lat: stops[i + 1].lat, lng: stops[i + 1].lng },
+              ],
+          stops[i].legModeToNext ?? "unknown"
+        );
+      }
+
+      if (stops.length === 1 && !home) {
         map.setCenter({ lat: stops[0].lat, lng: stops[0].lng });
         map.setZoom(15);
       } else {
         const bounds = new google.maps.LatLngBounds();
         stops.forEach((s) => bounds.extend({ lat: s.lat, lng: s.lng }));
+        if (home) bounds.extend({ lat: home.lat, lng: home.lng });
         map.fitBounds(bounds, 60);
       }
     })();
@@ -186,7 +255,7 @@ export default function ItineraryMap({ stops }: { stops: MapStop[] }) {
     return () => {
       cancelled = true;
     };
-  }, [stops]);
+  }, [stops, home]);
 
   if (stops.length === 0) return null;
   return (

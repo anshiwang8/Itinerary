@@ -7,8 +7,10 @@ import {
   ScheduledStop,
 } from "./api/schedule/schedule";
 import { TravelLeg } from "./api/schedule/travel";
+import { HOME, splitHomeLeg } from "./api/schedule/home";
 import { Itinerary, StopStatus } from "./api/itinerary/store";
-import ItineraryMap, { MapStop } from "./ItineraryMap";
+import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
+import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 
 // Throwaway harness proving the parse → places pipeline works end to
 // end: one button runs /api/parse, then feeds the result straight into
@@ -61,6 +63,7 @@ export default function PlacesTest() {
   const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
   const [mapStops, setMapStops] = useState<MapStop[]>([]);
   const [travelLegs, setTravelLegs] = useState<TravelLeg[]>([]);
+  const [homeLeg, setHomeLeg] = useState<TravelLeg | null>(null);
   const [itinerary, setItinerary] = useState<Itinerary | null>(null);
   const [simNow, setSimNow] = useState(""); // dev time control (datetime-local)
   const [disruptLeg, setDisruptLeg] = useState(0);
@@ -81,6 +84,7 @@ export default function PlacesTest() {
     setSchedule(null);
     setMapStops([]);
     setTravelLegs([]);
+    setHomeLeg(null);
     setItinerary(null);
     setSimNow("");
     setParsedObj(null);
@@ -173,13 +177,20 @@ export default function PlacesTest() {
           return pool.find((p) => p.id === s.id)?.location ?? null;
         });
 
-      let legs = [];
-      if (points.length >= 2 && points.every(Boolean)) {
+      let legs: TravelLeg[] = [];
+      let hl: TravelLeg | null = null;
+      if (points.length >= 1 && points.every(Boolean)) {
+        // home is the origin waypoint: leg 0 = home → first stop, then
+        // the usual consecutive venue pairs. startISO (the resolved
+        // outing start) is the leave-home time.
         const { startISO } = buildSchedule(sels, parseData.time_window ?? "");
         const travelRes = await fetch("/api/schedule/travel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ points, departureTime: startISO }),
+          body: JSON.stringify({
+            points: [HOME.location, ...points],
+            departureTime: startISO,
+          }),
         });
         const travelData = await travelRes.json();
         if (!travelRes.ok) {
@@ -188,14 +199,19 @@ export default function PlacesTest() {
               (travelData.details ? `\ndetails: ${travelData.details}` : "")
           );
         }
-        legs = travelData.legs ?? [];
+        const split = splitHomeLeg(travelData.legs ?? []);
+        hl = split.homeLeg;
+        legs = split.interLegs;
       }
+      setHomeLeg(hl);
 
       const { stops } = buildSchedule(
         sels,
         parseData.time_window ?? "",
         new Date(),
-        legs
+        legs,
+        undefined,
+        hl
       );
       setSchedule(stops);
       setTravelLegs(legs);
@@ -251,7 +267,12 @@ export default function PlacesTest() {
     const res = await fetch("/api/itinerary", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stops: enriched, legs: travelLegs, parsed: parsedObj }),
+      body: JSON.stringify({
+        stops: enriched,
+        legs: travelLegs,
+        parsed: parsedObj,
+        homeLeg,
+      }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -266,6 +287,7 @@ export default function PlacesTest() {
   function applyItinerary(it: Itinerary) {
     setItinerary(it);
     setSchedule(it.stops);
+    setHomeLeg(it.homeLeg ?? null);
     setSelections(
       it.stops.map((s) => ({
         category: s.category,
@@ -334,10 +356,7 @@ export default function PlacesTest() {
     const keptStop = updated.stops.find(
       (s) => s.status === "active" || s.status === "completed"
     );
-    const floorLabel = new Date(data.floor_time).toLocaleTimeString([], {
-      hour: "numeric",
-      minute: "2-digit",
-    });
+    const floorLabel = formatStopTime(data.floor_time);
     setBanner(
       `${legName} cancelled — replanned from ${floorLabel}` +
         (keptStop ? `, your ${keptStop.category} is unchanged` : "")
@@ -356,6 +375,35 @@ export default function PlacesTest() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [mapStops, itinerary]
   );
+
+  // memoized so the map effect doesn't re-fire on unrelated re-renders
+  const mapHome = useMemo<MapHome | null>(
+    () =>
+      homeLeg
+        ? {
+            label: HOME.label,
+            lat: HOME.location.latitude,
+            lng: HOME.location.longitude,
+            legModeToNext: homeLeg.mode,
+            polylineToNext: homeLeg.encodedPolyline,
+          }
+        : null,
+    [homeLeg]
+  );
+
+  // one leg-detail formatter for the home leg and every inter-stop leg
+  const legLabel = (leg: TravelLeg): string =>
+    leg.mode === "transit"
+      ? leg.transit
+        ? `${leg.transit.lineName}${leg.transit.headsign ? ` ${leg.transit.headsign}` : ""} · ${
+            leg.transit.stopCount ?? "?"
+          } stops · from ${leg.transit.departStop} stop · ${leg.totalMinutes} min incl. ${
+            leg.marginMinutes
+          } min buffer`
+        : `transit · ${leg.totalMinutes} min incl. ${leg.marginMinutes} min buffer`
+      : leg.mode === "walk"
+      ? `walk · ${leg.totalMinutes} min`
+      : "travel time unavailable";
 
   const BADGE_COLORS: Record<StopStatus, string> = {
     upcoming: "#8ab8c4",
@@ -420,6 +468,33 @@ export default function PlacesTest() {
               {banner}
             </div>
           )}
+          {homeLeg &&
+            (() => {
+              // leave-home time = first timed stop's start − the home
+              // leg's travel; rolled-forward plans show its date too.
+              const firstTimed = schedule?.find((s) => s.start_time);
+              const leaveHome = firstTimed?.start_time
+                ? new Date(
+                    new Date(firstTimed.start_time).getTime() -
+                      homeLeg.totalMinutes * 60_000
+                  )
+                : null;
+              return (
+                <div
+                  style={{
+                    margin: "6px 0 0 18px",
+                    fontSize: 12,
+                    color: "#688",
+                    borderLeft: "2px dotted #9cc4d0",
+                    paddingLeft: 8,
+                  }}
+                >
+                  from <b>{HOME.label}</b>
+                  {leaveHome && <> — leave by {formatStopTime(leaveHome)}</>} ·{" "}
+                  {legLabel(homeLeg)}
+                </div>
+              );
+            })()}
           {selections.map((s) => {
             const stop = schedule?.find((t) => t.category === s.category);
             const leg = stop?.travelToNext;
@@ -474,16 +549,7 @@ export default function PlacesTest() {
                     <div style={{ color: "#557", marginTop: 2 }}>{s.reason}</div>
                     {stop?.start_time && stop?.end_time && (
                       <div style={{ marginTop: 3, fontWeight: 600, color: "#367" }}>
-                        be here{" "}
-                        {new Date(stop.start_time).toLocaleTimeString([], {
-                          hour: "numeric",
-                          minute: "2-digit",
-                        })}
-                        {" – "}
-                        {new Date(stop.end_time).toLocaleTimeString([], {
-                          hour: "numeric",
-                          minute: "2-digit",
-                        })}
+                        be here {formatStopRange(stop.start_time, stop.end_time)}
                       </div>
                     )}
                   </>
@@ -499,17 +565,7 @@ export default function PlacesTest() {
                     paddingLeft: 8,
                   }}
                 >
-                  {leg.mode === "transit"
-                    ? leg.transit
-                      ? `${leg.transit.lineName}${leg.transit.headsign ? ` ${leg.transit.headsign}` : ""} · ${
-                          leg.transit.stopCount ?? "?"
-                        } stops · from ${leg.transit.departStop} stop · ${leg.totalMinutes} min incl. ${
-                          leg.marginMinutes
-                        } min buffer`
-                      : `transit · ${leg.totalMinutes} min incl. ${leg.marginMinutes} min buffer`
-                    : leg.mode === "walk"
-                    ? `walk · ${leg.totalMinutes} min`
-                    : "travel time unavailable"}
+                  {legLabel(leg)}
                 </div>
               )}
               </div>
@@ -586,7 +642,9 @@ export default function PlacesTest() {
               </div>
             </div>
           )}
-          {styledMapStops.length > 0 && <ItineraryMap stops={styledMapStops} />}
+          {styledMapStops.length > 0 && (
+            <ItineraryMap stops={styledMapStops} home={mapHome} />
+          )}
         </div>
       )}
 

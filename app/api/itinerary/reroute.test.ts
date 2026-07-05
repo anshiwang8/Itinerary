@@ -50,12 +50,17 @@ function mkStops(): ScheduledStop[] {
   ];
 }
 
-function mkItinerary() {
-  return createItinerary(mkStops(), [leg(0, "transit", 15), leg(1, "walk", 10)], {
-    time_window: "evening", stop_count: null, aesthetic: "lively",
-    category_signals: ["dinner", "bar", "dessert"], group_context: "date",
-    budget: null, constraints: [], location: "Ossington",
-  });
+function mkItinerary(homeLeg?: TravelLeg) {
+  return createItinerary(
+    mkStops(),
+    [leg(0, "transit", 15), leg(1, "walk", 10)],
+    {
+      time_window: "evening", stop_count: null, aesthetic: "lively",
+      category_signals: ["dinner", "bar", "dessert"], group_context: "date",
+      budget: null, constraints: [], location: "Ossington",
+    },
+    homeLeg
+  );
 }
 
 // ── fake pipeline deps ──
@@ -245,6 +250,43 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(inbound.excludeTransit, false);
       assert.strictEqual(inter.excludeTransit, true);
       assert.strictEqual(it.stops[1].travelToNext?.mode, "walk");
+    },
+  ],
+  [
+    "home leg (leg 0) is fixed history: reroute after departure never touches it",
+    async () => {
+      const homeLeg: TravelLeg = {
+        fromIndex: -1,
+        mode: "transit",
+        rawMinutes: 27,
+        marginMinutes: 5,
+        totalMinutes: 32,
+        distanceMeters: 5200,
+        encodedPolyline: "enc_home",
+        transit: {
+          lineName: "501 Queen", headsign: "West", stopCount: 9,
+          departStop: "Queen St West at University Ave",
+          arriveStop: "Queen St West at Ossington Ave",
+        },
+      };
+      const it = mkItinerary(homeLeg);
+      const homeBefore = JSON.parse(JSON.stringify(it.homeLeg));
+      const legCalls: LegCall[] = [];
+      const now = new Date(T(19, 30)); // mid-dinner — left home long ago
+      const before = snapAll(it);
+      const res = await rerouteItinerary(
+        it, { type: "transit_cancelled", legIndex: 0 }, now, mkDeps(legCalls)
+      );
+      assert.ok(res.rerouted);
+      if (!res.rerouted) return;
+      // the home leg is byte-identical after the replan
+      assert.deepStrictEqual(it.homeLeg, homeBefore);
+      // rebuilt legs array holds only real stop pairs — home never enters it
+      assert.ok(it.legs.every((l) => l.fromIndex >= 0));
+      // and the stop home feeds into (dinner) is untouched, per the floor
+      assert.strictEqual(it.stops[0].start_time, T(19, 0));
+      assert.strictEqual(it.stops[0].name, "Dinner Spot");
+      assertFloorGuarantee(before, it, res.floor_time);
     },
   ],
 ];

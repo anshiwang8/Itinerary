@@ -238,6 +238,11 @@ export interface ScheduledStop extends SelectionLike {
  * leg between the k-th and (k+1)-th TIMED stop. Omitted/missing legs
  * fall back to 0 travel. Null-id selections (empty pools) pass through
  * untimed. Times are ISO strings in America/Toronto.
+ *
+ * With a homeLeg (home → first stop), the resolved start is the
+ * LEAVE-HOME time — startISO — and the first timed stop starts after
+ * that leg's travel, mirroring how the reroute engine anchors a replan
+ * at floor + inbound travel.
  */
 export function buildSchedule(
   selections: SelectionLike[],
@@ -245,12 +250,14 @@ export function buildSchedule(
   now: Date = new Date(),
   travelLegs: TravelLeg[] = [],
   // reroute engine anchors the replanned chain at an explicit instant
-  startOverride?: Date
+  startOverride?: Date,
+  homeLeg?: TravelLeg | null
 ): { startISO: string; stops: ScheduledStop[] } {
   const start =
     startOverride ??
     resolveStartTime(timeWindow, now, selections.map((s) => s.category));
   const cursor = new Date(start);
+  if (homeLeg) cursor.setMinutes(cursor.getMinutes() + homeLeg.totalMinutes);
 
   const timed: ScheduledStop[] = [];
   let timedIndex = 0;

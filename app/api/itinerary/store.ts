@@ -24,6 +24,12 @@ export interface Itinerary {
   status: ItineraryStatus;
   stops: ItineraryStop[];
   legs: TravelLeg[];
+  /**
+   * Leg 0: home → first stop. Origin metadata, NOT a stop — no status,
+   * no lock, excluded from completion. Fixed history once the outing
+   * starts; the reroute engine never reads or writes it.
+   */
+  homeLeg?: TravelLeg;
   /** original parse output — the reroute engine re-runs the pipeline with it */
   parsed?: ParsedPrompt;
 }
@@ -58,7 +64,8 @@ export function deriveStopStatus(
 export function createItinerary(
   stops: ScheduledStop[],
   legs: TravelLeg[],
-  parsed?: ParsedPrompt
+  parsed?: ParsedPrompt,
+  homeLeg?: TravelLeg | null
 ): Itinerary {
   const itinerary: Itinerary = {
     id: crypto.randomUUID(),
@@ -71,6 +78,7 @@ export function createItinerary(
       locked: false,
     })),
     legs,
+    ...(homeLeg ? { homeLeg } : {}),
     ...(parsed ? { parsed } : {}),
   };
   store.set(itinerary.id, itinerary);

@@ -36,8 +36,8 @@ The replan reuses the real pipeline via `searchPlaces.ts` and `selectVenues.ts` 
 Maintain the devlog. Every feature/fix lands as an entry: type label, then Goal / What should be done / What was done (technical) — each on its own line, plain English keeping technical terms.
 
 ## Currently in progress
-Three bug fixes: (1) unstated-time prompts booking absurd hours at night — resolve via category defaults, fail loud only if truly degenerate; (2) dietary/vibe constraints must reach the Places search query, not just the reason text; (3) weather-gate decision logging to tell variance from bug.
-Next after bugs: home origin (hardcoded Chestnut Residence coords as leg 0), date-display fix, then the real UI pass. GTFS only if time allows.
+Home origin shipped: itineraries start from HOME (Chestnut Residence, `app/api/schedule/home.ts`) as leg 0; resolved start = leave-home time, first stop starts after the leg; `homeLeg` is stored outside stops/legs so the reroute engine never sees it.
+Next: date-display fix, then the real UI pass. GTFS only if time allows.
 
 ## Open gaps (deferred, not blockers)
 Reservation availability (needs OpenTable/Resy partnership), GTFS-realtime (manual disruption button for now), rideshare fallback, movie runtimes (TMDB), multi-location prompts flatten to one location, stop reordering, pick reasons don't see resolved times, rolled-forward dates not shown in UI, reroute skips weather gate (lands with GTFS).

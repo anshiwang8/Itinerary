@@ -9,12 +9,15 @@ export async function POST(request: NextRequest) {
   let stops: ScheduledStop[];
   let legs: TravelLeg[];
   let parsed: ParsedPrompt | undefined;
+  let homeLeg: TravelLeg | undefined;
   try {
     const body = await request.json();
     stops = body?.stops;
     legs = Array.isArray(body?.legs) ? body.legs : [];
     parsed =
       body?.parsed && typeof body.parsed === "object" ? body.parsed : undefined;
+    homeLeg =
+      body?.homeLeg && typeof body.homeLeg === "object" ? body.homeLeg : undefined;
   } catch {
     return NextResponse.json(
       { error: "Request body must be JSON." },
@@ -28,6 +31,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const itinerary = createItinerary(stops, legs, parsed);
+  const itinerary = createItinerary(stops, legs, parsed, homeLeg);
   return NextResponse.json({ id: itinerary.id });
 }
