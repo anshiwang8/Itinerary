@@ -1,7 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { buildSchedule, ScheduledStop } from "./api/schedule/schedule";
+import {
+  buildSchedule,
+  resolveStartTimeChecked,
+  ScheduledStop,
+} from "./api/schedule/schedule";
 import { TravelLeg } from "./api/schedule/travel";
 import { Itinerary, StopStatus } from "./api/itinerary/store";
 import ItineraryMap, { MapStop } from "./ItineraryMap";
@@ -98,6 +102,20 @@ export default function PlacesTest() {
       }
       setParsed(JSON.stringify(parseData, null, 2));
       setParsedObj(parseData);
+
+      // Fail loud on implausible inferred start times (e.g. a bare
+      // "axe throwing" at 4 AM) BEFORE burning Places/Groq calls on a
+      // target hour nobody meant.
+      const timeCheck = resolveStartTimeChecked(
+        parseData.time_window ?? "",
+        new Date(),
+        parseData.category_signals ?? []
+      );
+      if (!timeCheck.ok) {
+        setError(timeCheck.reason);
+        setStage("idle");
+        return;
+      }
 
       // Weather is best-effort: failure just skips the weather gate.
       let weather = null;

@@ -149,23 +149,33 @@ export function filterPools(
 
   for (const [category, places] of Object.entries(pools)) {
     // category-level weather block: outdoor + bad forecast at target
-    if (forecast && isOutdoorCategory(category)) {
-      let reason: string | null = null;
-      if (
-        forecast.precipProbability !== null &&
-        forecast.precipProbability > PRECIP_BLOCK_THRESHOLD
-      ) {
-        reason = `rain likely at ${hourLabel(startInstant)}`;
-      } else if (
-        forecast.tempC !== null &&
-        forecast.tempC < COLD_BLOCK_THRESHOLD_C
-      ) {
-        reason = `too cold at ${hourLabel(startInstant)} (${forecast.tempC}°C)`;
-      }
-      if (reason) {
-        out[category] = [];
-        weatherBlocked.push({ category, weatherBlocked: true, reason });
-        continue;
+    if (isOutdoorCategory(category)) {
+      if (!forecast) {
+        // observability only — logic unchanged (missing data never blocks)
+        console.log(
+          `[weather-gate] category="${category}" target=${startInstant.toISOString()} forecast=NONE (no data or outside horizon) verdict=SKIPPED`
+        );
+      } else {
+        let reason: string | null = null;
+        if (
+          forecast.precipProbability !== null &&
+          forecast.precipProbability > PRECIP_BLOCK_THRESHOLD
+        ) {
+          reason = `rain likely at ${hourLabel(startInstant)}`;
+        } else if (
+          forecast.tempC !== null &&
+          forecast.tempC < COLD_BLOCK_THRESHOLD_C
+        ) {
+          reason = `too cold at ${hourLabel(startInstant)} (${forecast.tempC}°C)`;
+        }
+        console.log(
+          `[weather-gate] category="${category}" target=${startInstant.toISOString()} precip=${forecast.precipProbability}% (block >${PRECIP_BLOCK_THRESHOLD}%) tempC=${forecast.tempC} (block <${COLD_BLOCK_THRESHOLD_C}) verdict=${reason ? `BLOCK — ${reason}` : "ALLOW"}`
+        );
+        if (reason) {
+          out[category] = [];
+          weatherBlocked.push({ category, weatherBlocked: true, reason });
+          continue;
+        }
       }
     }
 

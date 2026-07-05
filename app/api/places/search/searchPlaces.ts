@@ -15,13 +15,19 @@ const FIELD_MASK = [
 ].join(",");
 
 // e.g. aesthetic="lively night out", category="bar", location="Ossington"
-// → "lively night out bar Ossington Toronto"
+// → "lively night out bar Ossington Toronto".
+// Constraints (dietary/vibe: "vegan", "quiet", "wheelchair accessible")
+// are injected into the query so they shape the candidate pool itself —
+// not just the selection reasons ("vegan lunch" must SEARCH vegan).
 export function buildQuery(parsed: ParsedPrompt, category: string): string {
   const aesthetic =
     parsed.aesthetic && parsed.aesthetic.toLowerCase() !== "unspecified"
       ? parsed.aesthetic
       : "";
-  return [aesthetic, category, parsed.location, "Toronto"]
+  const constraints = (parsed.constraints ?? [])
+    .filter((c) => typeof c === "string" && c.trim() !== "")
+    .join(" ");
+  return [aesthetic, constraints, category, parsed.location, "Toronto"]
     .filter(Boolean)
     .join(" ");
 }

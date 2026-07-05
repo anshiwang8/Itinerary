@@ -2,7 +2,12 @@
 // Run with: npx tsx app/api/schedule/schedule.test.ts
 import assert from "node:assert";
 import { DURATION_TABLE, getDuration, resolveCategory } from "./durations";
-import { buildSchedule, resolveStartTime } from "./schedule";
+import {
+  buildSchedule,
+  IMPLAUSIBLE_TIME_MESSAGE,
+  resolveStartTime,
+  resolveStartTimeChecked,
+} from "./schedule";
 
 // Fixed "now": Friday 2026-07-03 13:20 local (EDT, -04:00).
 const NOW = new Date(2026, 6, 3, 13, 20, 0);
@@ -144,6 +149,48 @@ const cases: Array<[string, () => void]> = [
         resolveStartTime("unspecified", threeAM, ["axe throwing", "escape room"]).toISOString(),
         new Date(2026, 6, 3, 4, 0, 0).toISOString()
       );
+    },
+  ],
+  [
+    "4 AM 'dinner': category default → 7 PM today, NOT 4 AM (checked resolver passes)",
+    () => {
+      const fourAM = new Date(2026, 6, 3, 4, 0, 0);
+      const res = resolveStartTimeChecked("unspecified", fourAM, ["dinner"]);
+      assert.strictEqual(res.ok, true);
+      if (res.ok) {
+        assert.strictEqual(
+          res.start.toISOString(),
+          new Date(2026, 6, 3, 19, 0, 0).toISOString()
+        );
+      }
+    },
+  ],
+  [
+    "4 AM 'axe throwing' (no default): plausible-band check fails loud",
+    () => {
+      const fourAM = new Date(2026, 6, 3, 4, 0, 0);
+      // next-full-hour would book 5 AM — outside the generic 8–23 band
+      const res = resolveStartTimeChecked("unspecified", fourAM, ["axe throwing"]);
+      assert.deepStrictEqual(res, { ok: false, reason: IMPLAUSIBLE_TIME_MESSAGE });
+    },
+  ],
+  [
+    "checked resolver: sane inferred times and explicit user times still pass",
+    () => {
+      // 13:20 → next full hour 14:00, inside the generic band
+      const NOW = new Date(2026, 6, 3, 13, 20, 0);
+      const sane = resolveStartTimeChecked("unspecified", NOW, ["axe throwing"]);
+      assert.strictEqual(sane.ok, true);
+      // explicit clock time is the user's call — even at a weird hour
+      const fourAM = new Date(2026, 6, 3, 3, 0, 0);
+      const explicit = resolveStartTimeChecked("4am", fourAM, ["dinner"]);
+      assert.strictEqual(explicit.ok, true);
+      // stated day-part passes too
+      const dayPart = resolveStartTimeChecked("morning", fourAM, ["axe throwing"]);
+      assert.strictEqual(dayPart.ok, true);
+      // club at 22:00 is inside its own (midnight-wrapping) band
+      const club = resolveStartTimeChecked("unspecified", fourAM, ["night club"]);
+      assert.strictEqual(club.ok, true);
     },
   ],
   [

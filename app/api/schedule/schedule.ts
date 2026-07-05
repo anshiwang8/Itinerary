@@ -48,6 +48,72 @@ function inferCategoryStart(
   return null;
 }
 
+// Plausible start bands per category — the fail-loud guard for resolved
+// times that carry no user time info. endHour < startHour wraps past
+// midnight (bars, clubs).
+export interface PlausibleBand {
+  startHour: number;
+  endHour: number;
+}
+export const PLAUSIBLE_BANDS: Array<[RegExp, PlausibleBand]> = [
+  [/brunch/i, { startHour: 8, endHour: 15 }],
+  [/breakfast/i, { startHour: 6, endHour: 12 }],
+  [/lunch/i, { startHour: 11, endHour: 16 }],
+  [/coffee|caf[eé]|espresso|matcha/i, { startHour: 7, endHour: 22 }],
+  [/ice\s*cream|gelato/i, { startHour: 10, endHour: 23 }],
+  [/dessert/i, { startHour: 10, endHour: 24 }],
+  [/comedy|show|theatre|theater|concert/i, { startHour: 12, endHour: 24 }],
+  [/club/i, { startHour: 20, endHour: 4 }],
+  [/\bbars?\b|cocktail|pub|brewery|wine|drink/i, { startHour: 11, endHour: 2 }],
+  [
+    /dinner|restaurant|dining|ramen|sushi|pizza|taco|noodle|pho|steak|izakaya|bbq/i,
+    { startHour: 11, endHour: 23 },
+  ],
+];
+export const DEFAULT_PLAUSIBLE_BAND: PlausibleBand = { startHour: 8, endHour: 23 };
+
+function inBand(d: Date, band: PlausibleBand): boolean {
+  const h = d.getHours() + d.getMinutes() / 60;
+  if (band.startHour <= band.endHour) return h >= band.startHour && h < band.endHour;
+  return h >= band.startHour || h < band.endHour; // wraps midnight
+}
+
+export type StartResolution =
+  | { ok: true; start: Date }
+  | { ok: false; reason: string };
+
+export const IMPLAUSIBLE_TIME_MESSAGE =
+  "couldn't find a sensible time — try adding one (e.g. 'dinner at 7pm')";
+
+/**
+ * resolveStartTime + the fail-loud plausibility check. Explicit clock
+ * times and stated day-parts are the user's call and always pass; only
+ * inferred starts (category default or next-full-hour) must land inside
+ * a plausible band for at least one of the categories (generic 8–23
+ * band when nothing matches). Outside every band → ok: false with a
+ * user-facing message instead of silently booking a 4 AM dinner.
+ */
+export function resolveStartTimeChecked(
+  timeWindow: string,
+  now: Date = new Date(),
+  categories: string[] = []
+): StartResolution {
+  const start = resolveStartTime(timeWindow, now, categories);
+  const tw = (timeWindow ?? "").toLowerCase();
+
+  const hasClockTime = parseTargetTime(tw, now) !== null;
+  const hasDayPart = Object.keys(DAY_PART_DEFAULTS).some((k) => tw.includes(k));
+  if (hasClockTime || hasDayPart) return { ok: true, start };
+
+  const bands = categories
+    .map((c) => PLAUSIBLE_BANDS.find(([p]) => p.test(c))?.[1])
+    .filter((b): b is PlausibleBand => !!b);
+  if (bands.length === 0) bands.push(DEFAULT_PLAUSIBLE_BAND);
+
+  if (bands.some((b) => inBand(start, b))) return { ok: true, start };
+  return { ok: false, reason: IMPLAUSIBLE_TIME_MESSAGE };
+}
+
 // NOTE: date components are built with server-local Date math; the
 // prototype assumes the server runs in America/Toronto (true for local
 // dev). The offset in the ISO output is computed properly per-date.
