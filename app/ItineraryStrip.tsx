@@ -97,16 +97,27 @@ function LegCard({ leg }: { leg: StripLeg }) {
   );
 }
 
+export interface SwapInline {
+  text: string;
+  onText: (v: string) => void;
+  onSubmit: () => void;
+  submitting: boolean;
+  error: string | null;
+  canSwap: boolean;
+}
+
 function StopCard({
   stop,
   index,
   selected,
   onSelect,
+  swap,
 }: {
   stop: StripStop;
   index: number;
   selected: boolean;
   onSelect: () => void;
+  swap?: SwapInline | null;
 }) {
   const price = stop.price ? PRICE_LABEL[stop.price] ?? null : null;
   const cls =
@@ -116,7 +127,19 @@ function StopCard({
     (stop.status === "completed" ? " lstrip__stop--done" : "") +
     (stop.changed ? " lstrip__stop--changed" : "");
   return (
-    <button className={cls} onClick={onSelect} aria-pressed={selected}>
+    <div
+      className={cls}
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+    >
       <div className="lstrip__stophead">
         <span className="lstrip__num">{index + 1}</span>
         <span className="eyebrow">{stop.category}</span>
@@ -140,7 +163,32 @@ function StopCard({
         {price && <span className="lstrip__price">{price}</span>}
       </div>
       {selected && stop.reason && <div className="lstrip__reason">{stop.reason}</div>}
-    </button>
+      {selected && swap?.canSwap && (
+        <div className="lstrip__swap" onClick={(e) => e.stopPropagation()}>
+          <div className="lstrip__swaplabel">Not quite right?</div>
+          <div className="lstrip__swaprow">
+            <input
+              className="lstrip__swapinput"
+              value={swap.text}
+              onChange={(e) => swap.onText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") swap.onSubmit();
+              }}
+              placeholder="cheaper, an hour earlier, a patio…"
+              aria-label={`Tell me what to change about ${stop.name}`}
+            />
+            <button
+              className="lstrip__swapgo"
+              onClick={swap.onSubmit}
+              disabled={swap.submitting || !swap.text.trim()}
+            >
+              {swap.submitting ? "…" : "Swap"}
+            </button>
+          </div>
+          {swap.error && <div className="lstrip__swaperr">{swap.error}</div>}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -149,11 +197,13 @@ export default function ItineraryStrip({
   stops,
   selected,
   onSelect,
+  swap,
 }: {
   home?: StripHome | null;
   stops: StripStop[];
   selected: string | null;
   onSelect: (category: string) => void;
+  swap?: SwapInline | null;
 }) {
   if (stops.length === 0) return null;
   return (
@@ -173,7 +223,13 @@ export default function ItineraryStrip({
       {home?.leg && <LegCard leg={home.leg} />}
       {stops.map((s, i) => (
         <div key={s.id} className="lstrip__pair" role="listitem" style={{ display: "contents" }}>
-          <StopCard stop={s} index={i} selected={selected === s.category} onSelect={() => onSelect(s.category)} />
+          <StopCard
+            stop={s}
+            index={i}
+            selected={selected === s.category}
+            onSelect={() => onSelect(s.category)}
+            swap={selected === s.category ? swap : null}
+          />
           {s.legToNext && <LegCard leg={s.legToNext} />}
         </div>
       ))}

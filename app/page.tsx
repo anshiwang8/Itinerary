@@ -411,7 +411,9 @@ export default function Home() {
     setSelected(swapped.category);
     setSwapText("");
     setBannerFlat(false);
-    setBanner(`Swapped ${data.before.category} — ${data.reason}`);
+    // time-path reasons are self-contained ("Moved dinner to 7:29 PM");
+    // venue-path reasons describe the pick, so they get the "Swapped" lead.
+    setBanner(data.path === "time" ? data.reason : `Swapped ${data.before.category} — ${data.reason}`);
   }
 
   // merge live status + changed flags (by venue id) onto the base map stops
@@ -565,7 +567,20 @@ export default function Home() {
         </div>
       )}
 
-      <ItineraryStrip home={stripHome} stops={stripStops} selected={selected} onSelect={(c) => setSelected(c)} />
+      <ItineraryStrip
+        home={stripHome}
+        stops={stripStops}
+        selected={selected}
+        onSelect={(c) => setSelected(c)}
+        swap={{
+          text: swapText,
+          onText: setSwapText,
+          onSubmit: doSwap,
+          submitting: swapping,
+          error: swapError,
+          canSwap,
+        }}
+      />
 
       <div className="topbar">
         <span className="topbar__mark">Itinerary</span>
@@ -592,28 +607,6 @@ export default function Home() {
         </div>
       )}
       {error && !banner && <div className="stage__err">{error}</div>}
-
-      {canSwap && selectedStop && (
-        <div className="swapbar">
-          <span className="swapbar__label">
-            Not quite right? Change <b>{selectedStop.name}</b>
-          </span>
-          <input
-            className="swapbar__input"
-            value={swapText}
-            onChange={(e) => setSwapText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") doSwap();
-            }}
-            placeholder="cheaper, a patio, less fancy…"
-            aria-label={`Tell me what to change about ${selectedStop.name}`}
-          />
-          <button className="swapbar__go" onClick={doSwap} disabled={swapping || !swapText.trim()}>
-            {swapping ? "…" : "Swap"}
-          </button>
-          {swapError && <span className="swapbar__err">{swapError}</span>}
-        </div>
-      )}
 
       {weatherBlocks.length > 0 && (
         <div style={{ position: "absolute", bottom: 70, left: 16, zIndex: 19, display: "flex", flexDirection: "column", gap: 6 }}>

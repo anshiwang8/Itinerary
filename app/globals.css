@@ -280,6 +280,26 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__stop--changed { border-color: var(--live); border-width: 1.5px; }
 .lstrip__stop--done { opacity: 0.6; }
 
+/* inline swap prompt, revealed under the selected card */
+.lstrip__swap { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--rule); }
+.lstrip__swaplabel { font-family: var(--grot); font-size: 11px; color: var(--ink-soft); margin-bottom: 5px; }
+.lstrip__swaprow { display: flex; gap: 6px; align-items: stretch; }
+.lstrip__swapinput {
+  flex: 1; min-width: 0; border: 1px solid var(--rule); border-radius: 8px;
+  background: var(--paper); padding: 6px 9px; outline: none;
+  font-family: var(--grot); font-size: 13px; color: var(--ink);
+}
+.lstrip__swapinput:focus { border-color: var(--ink); }
+.lstrip__swapinput::placeholder { color: var(--ink-faint); }
+.lstrip__swapgo {
+  border: none; background: var(--ink); color: var(--card);
+  font-family: var(--grot); font-weight: 500; font-size: 12px;
+  padding: 0 13px; border-radius: 8px; white-space: nowrap;
+}
+.lstrip__swapgo:hover { background: #0e1720; }
+.lstrip__swapgo[disabled] { opacity: 0.5; cursor: default; }
+.lstrip__swaperr { font-family: var(--grot); font-size: 11.5px; color: var(--ink); margin-top: 6px; }
+
 .lstrip__leg { width: 118px; display: flex; flex-direction: column; justify-content: center; }
 .lstrip__legicon { width: 22px; height: 22px; margin-bottom: 5px; }
 .lstrip__legicon svg { width: 22px; height: 22px; fill: var(--ink-soft); }
