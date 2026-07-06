@@ -78,6 +78,21 @@ function inBand(d: Date, band: PlausibleBand): boolean {
   return h >= band.startHour || h < band.endHour; // wraps midnight
 }
 
+/** The plausible-hours band for a set of categories (first match wins). */
+export function bandForCategories(categories: string[]): PlausibleBand {
+  for (const c of categories) {
+    const b = PLAUSIBLE_BANDS.find(([p]) => p.test(c))?.[1];
+    if (b) return b;
+  }
+  return DEFAULT_PLAUSIBLE_BAND;
+}
+
+/** Is `d` a sensible hour for these categories? Reused by the swap engine
+ * to reject implausible time changes ("dinner at 4am"). */
+export function isPlausibleAt(d: Date, categories: string[]): boolean {
+  return inBand(d, bandForCategories(categories));
+}
+
 export type StartResolution =
   | { ok: true; start: Date }
   | { ok: false; reason: string };

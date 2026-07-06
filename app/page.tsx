@@ -11,6 +11,7 @@ import { HOME, splitHomeLeg } from "./api/schedule/home";
 import { Itinerary } from "./api/itinerary/store";
 import { formatStopTime } from "./lib/timeLabels";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
+import ItineraryStrip, { StripHome, StripStop } from "./ItineraryStrip";
 
 interface Place {
   id: string;
@@ -24,6 +25,35 @@ interface WeatherBlock {
   category: string;
   weatherBlocked: true;
   reason: string;
+}
+interface WeatherHour {
+  hourISO: string;
+  tempC: number | null;
+  precipProbability: number | null;
+  condition: string | null;
+}
+
+function WeatherIcon({ condition, precip }: { condition: string | null; precip: number | null }) {
+  const c = (condition ?? "").toLowerCase();
+  if ((precip != null && precip > 50) || /rain|shower|drizzle/.test(c)) {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M17.5 15a4.5 4.5 0 0 0-.9-8.9A6 6 0 0 0 5 8.5 4 4 0 0 0 6 16h11a1 1 0 0 0 .5-1zM8 18l-1 3m4-3-1 3m4-3-1 3" />
+      </svg>
+    );
+  }
+  if (/cloud|overcast/.test(c)) {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M17.5 18a4.5 4.5 0 0 0-.9-8.9A6 6 0 0 0 5 11.5 4 4 0 0 0 6 19h11a1 1 0 0 0 .5-1z" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zm0-14v2m0 14v2M3 12h2m14 0h2M5.6 5.6l1.4 1.4m10 10 1.4 1.4m0-12.8-1.4 1.4m-10 10-1.4 1.4" />
+    </svg>
+  );
 }
 
 // transit-leg detail line, e.g. "505 Dundas · 11 stops · 22 min"
@@ -97,6 +127,21 @@ export default function Home() {
   const [swapText, setSwapText] = useState("");
   const [swapping, setSwapping] = useState(false);
   const [swapError, setSwapError] = useState<string | null>(null);
+  const [weather, setWeather] = useState<WeatherHour[] | null>(null);
+
+  // ambient weather chip — fetched once, independent of the pipeline
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/weather")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && Array.isArray(d)) setWeather(d);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [error, setError] = useState<string | null>(null);
   const [loadingText, setLoadingText] = useState<string | null>(null);
@@ -404,6 +449,77 @@ export default function Home() {
 
   const timedStops = itinerary?.stops.filter((s) => s.start_time) ?? [];
 
+  // price is only known from the pools; look it up by venue id
+  const priceById = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const arr of Object.values(pools)) {
+      for (const p of arr) if (p.priceLevel) m[p.id] = p.priceLevel;
+    }
+    return m;
+  }, [pools]);
+
+  // strip cards, left→right: home leg card handled separately
+  const stripStops = useMemo<StripStop[]>(() => {
+    if (!itinerary) return [];
+    const venues = itinerary.stops.filter((s) => s.id !== null);
+    return venues.map((s, i) => {
+      const next = venues[i + 1];
+      const leg = s.travelToNext;
+      return {
+        id: s.id!,
+        category: s.category,
+        name: s.name ?? "(unnamed)",
+        start: s.start_time,
+        end: s.end_time,
+        rating: s.rating ?? null,
+        price: priceById[s.id!] ?? null,
+        reason: s.reason ?? null,
+        status: s.status,
+        changed: changedIds.has(s.id!),
+        oldStart: oldStarts[s.id!] ?? null,
+        legToNext: leg
+          ? {
+              mode: leg.mode,
+              totalMinutes: leg.totalMinutes,
+              marginMinutes: leg.marginMinutes,
+              lineName: leg.transit?.lineName ?? null,
+              headsign: leg.transit?.headsign ?? null,
+              stopCount: leg.transit?.stopCount ?? null,
+              departStop: leg.transit?.departStop ?? null,
+              boardISO: s.end_time,
+              arriveISO: next?.start_time ?? null,
+            }
+          : null,
+      };
+    });
+  }, [itinerary, priceById, changedIds, oldStarts]);
+
+  const stripHome = useMemo<StripHome | null>(() => {
+    if (!homeLeg || !itinerary) return null;
+    const first = itinerary.stops.find((s) => s.start_time && s.id !== null);
+    const leaveISO =
+      first?.start_time != null
+        ? new Date(new Date(first.start_time).getTime() - homeLeg.totalMinutes * 60_000).toISOString()
+        : null;
+    return {
+      label: HOME.label,
+      leaveBy: leaveISO ? formatStopTime(leaveISO) : null,
+      leg: {
+        mode: homeLeg.mode,
+        totalMinutes: homeLeg.totalMinutes,
+        marginMinutes: homeLeg.marginMinutes,
+        lineName: homeLeg.transit?.lineName ?? null,
+        headsign: homeLeg.transit?.headsign ?? null,
+        stopCount: homeLeg.transit?.stopCount ?? null,
+        departStop: homeLeg.transit?.departStop ?? null,
+        boardISO: leaveISO,
+        arriveISO: first?.start_time ?? null,
+      },
+    };
+  }, [homeLeg, itinerary]);
+
+  const wxNow = weather?.[0] ?? null;
+
   // ── empty state ──
   if (!itinerary) {
     return (
@@ -438,8 +554,18 @@ export default function Home() {
 
   // ── map stage ──
   return (
-    <main className="stage">
+    <main className={"stage" + (banner ? " stage--banner" : "")}>
       <ItineraryMap stops={styledStops} home={mapHome} selected={selected} onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))} />
+
+      {wxNow && (
+        <div className="weather" aria-label="Current weather in Ossington">
+          <WeatherIcon condition={wxNow.condition} precip={wxNow.precipProbability} />
+          <span className="weather__temp">{wxNow.tempC != null ? `${Math.round(wxNow.tempC)}°` : "—"}</span>
+          {wxNow.condition && <span className="weather__cond">{wxNow.condition}</span>}
+        </div>
+      )}
+
+      <ItineraryStrip home={stripHome} stops={stripStops} selected={selected} onSelect={(c) => setSelected(c)} />
 
       <div className="topbar">
         <span className="topbar__mark">Itinerary</span>
@@ -490,7 +616,7 @@ export default function Home() {
       )}
 
       {weatherBlocks.length > 0 && (
-        <div style={{ position: "absolute", top: 74, left: 18, zIndex: 19, display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ position: "absolute", bottom: 70, left: 16, zIndex: 19, display: "flex", flexDirection: "column", gap: 6 }}>
           {weatherBlocks.map((b) => (
             <div
               key={b.category}

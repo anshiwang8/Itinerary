@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
-import { formatStopRange, formatStopTime } from "./lib/timeLabels";
+import { formatStopTime } from "./lib/timeLabels";
 
 // Printed-cartography map: warm-paper Google styling (inline JSON, so no
 // Cloud map id), ink-navy route lines, and an HTML overlay layer for the
@@ -87,6 +87,7 @@ export default function ItineraryMap({ stops, home, selected, onSelect }: Props)
   const mapRef = useRef<google.maps.Map | null>(null);
   const projRef = useRef<google.maps.MapCanvasProjection | null>(null);
   const linesRef = useRef<google.maps.Polyline[]>([]);
+  const rafRef = useRef<number | null>(null);
   const [, setTick] = useState(0);
   const [ready, setReady] = useState(false);
 
@@ -108,12 +109,20 @@ export default function ItineraryMap({ stops, home, selected, onSelect }: Props)
         });
         // A projection probe: its draw() fires on every pan/zoom, giving
         // us live container-pixel projection for the HTML overlay layer.
+        // The tick is scheduled on the next frame — never call setState
+        // synchronously inside draw(), which Google can invoke during a
+        // React commit (setState-in-render crash).
         class Probe extends maps.OverlayView {
           onAdd() {}
           onRemove() {}
           draw() {
             projRef.current = this.getProjection();
-            setTick((t) => t + 1);
+            if (rafRef.current == null) {
+              rafRef.current = requestAnimationFrame(() => {
+                rafRef.current = null;
+                setTick((t) => t + 1);
+              });
+            }
           }
         }
         const probe = new Probe();
@@ -123,6 +132,7 @@ export default function ItineraryMap({ stops, home, selected, onSelect }: Props)
     })();
     return () => {
       cancelled = true;
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
   }, []);
 
@@ -238,19 +248,6 @@ export default function ItineraryMap({ stops, home, selected, onSelect }: Props)
     }
   }
 
-  const timeLabel = (s: MapStop) => {
-    if (!s.startTime || !s.endTime) return null;
-    if (s.changed && s.oldStart) {
-      return (
-        <>
-          <span className="old-time">{formatStopTime(s.oldStart)}</span>
-          <span className="new-time">{formatStopTime(s.startTime)}</span>
-        </>
-      );
-    }
-    return formatStopRange(s.startTime, s.endTime);
-  };
-
   return (
     <div className="mapwrap">
       <div ref={mapDivRef} className="map" aria-label="Map of your evening in Ossington" />
@@ -283,97 +280,47 @@ export default function ItineraryMap({ stops, home, selected, onSelect }: Props)
           // swap-changed upcoming stop keeps its ink marker (with a subtle
           // changed ring); its just-changed signal is the settling time /
           // redrawn route, not a "now" pin.
+          // Chartreuse marker is reserved for the live "now" stop. A
+          // swap-changed upcoming stop keeps its ink marker (chartreuse
+          // ring). The venue detail now lives in the top strip — the map
+          // shows compact pin tags only, highlighted when selected.
           const live = s.status === "active";
           const changed = !!s.changed;
-          const expanded = selected === s.category;
+          const isSel = selected === s.category;
           const mkClass =
             "mk " +
             (live ? "mk--live" : changed ? "mk--changed" : s.status === "completed" ? "mk--done" : "");
-          // keep the expanded card fully on screen: clamp horizontally and
-          // flip below the pin when it's near the top edge
-          const W = mapDivRef.current?.clientWidth ?? 0;
-          const half = 154;
-          const cardX = W ? Math.min(Math.max(p.x, half), W - half) : p.x;
-          const below = p.y < 190;
           return (
             <div key={s.category}>
               <div className={mkClass} style={{ left: p.x, top: p.y }} aria-hidden="true">
                 <div className="mk__dot" />
               </div>
-
-              {expanded ? (
-                <div
-                  className={
-                    "ecard" +
-                    (s.blockedReason ? " ecard--blocked" : "") +
-                    (live ? " ecard--live" : "") +
-                    (changed ? " ecard--changed" : "")
-                  }
-                  style={{
-                    left: cardX,
-                    top: p.y,
-                    transform: `translate(-50%, ${below ? "22px" : "calc(-100% - 14px)"})`,
-                  }}
-                  onClick={() => onSelect(s.category)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") onSelect(s.category);
-                  }}
-                >
-                  <div className="ecard__cat">
-                    <span className="eyebrow">{s.category}</span>
-                    {s.status === "active" && <span className="ecard__badge">now</span>}
-                  </div>
-                  {s.blockedReason ? (
-                    <>
-                      <div className="ecard__name">{s.name}</div>
-                      <div className="wx-note">{s.blockedReason}</div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="ecard__name">{s.name}</div>
-                      {(s.startTime || s.oldStart) && (
-                        <div className="ecard__be">be here {timeLabel(s)}</div>
-                      )}
-                      {s.reason && <div className="ecard__reason">{s.reason}</div>}
-                      {s.legLabel && <div className="ecard__meta">{s.legLabel}</div>}
-                    </>
-                  )}
-                </div>
-              ) : (
-                <button
-                  className={
-                    "chip" +
-                    (s.status === "active" ? " chip--live" : "") +
-                    (s.status === "completed" ? " chip--done" : "") +
-                    (s.changed ? " chip--changed" : "")
-                  }
-                  style={{
-                    left: p.x,
-                    top: p.y,
-                    // a changed chip lifts above its neighbours so its
-                    // struck/settled times stay legible
-                    zIndex: s.changed ? 8 : undefined,
-                  }}
-                  onClick={() => onSelect(s.category)}
-                >
-                  <span className="chip__num">{i + 1}</span>
-                  <span className="chip__name">{s.name}</span>
-                  {s.startTime && (
-                    <span className="chip__time">
-                      {s.changed && s.oldStart ? (
-                        <>
-                          <span className="old-time">{formatStopTime(s.oldStart)}</span>
-                          <span className="new-time">{formatStopTime(s.startTime)}</span>
-                        </>
-                      ) : (
-                        formatStopTime(s.startTime)
-                      )}
-                    </span>
-                  )}
-                </button>
-              )}
+              <button
+                className={
+                  "chip" +
+                  (isSel ? " chip--selected" : "") +
+                  (s.status === "active" ? " chip--live" : "") +
+                  (s.status === "completed" ? " chip--done" : "") +
+                  (s.changed ? " chip--changed" : "")
+                }
+                style={{ left: p.x, top: p.y, zIndex: isSel ? 9 : s.changed ? 8 : undefined }}
+                onClick={() => onSelect(s.category)}
+              >
+                <span className="chip__num">{i + 1}</span>
+                <span className="chip__name">{s.name}</span>
+                {s.startTime && (
+                  <span className="chip__time">
+                    {s.changed && s.oldStart ? (
+                      <>
+                        <span className="old-time">{formatStopTime(s.oldStart)}</span>
+                        <span className="new-time">{formatStopTime(s.startTime)}</span>
+                      </>
+                    ) : (
+                      formatStopTime(s.startTime)
+                    )}
+                  </span>
+                )}
+              </button>
             </div>
           );
         })}

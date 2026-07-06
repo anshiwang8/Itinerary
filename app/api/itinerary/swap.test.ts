@@ -63,6 +63,8 @@ function mkVenue(id: string, name = `New ${id}`): Place {
 }
 
 interface Opts {
+  intent?: "venue" | "time" | "constraint";
+  newStartClock?: string;
   path?: "refilter" | "research";
   newCategory?: string;
   budget?: string | null;
@@ -75,18 +77,33 @@ interface Opts {
 
 function mkDeps(opts: Opts = {}): SwapDeps {
   return {
-    interpret: async (parsed, category, refinement) => ({
-      path: opts.path ?? (/patio|outdoor|cuisine/i.test(refinement) ? "research" : "refilter"),
-      category: opts.newCategory ?? category,
-      aesthetic: parsed.aesthetic,
-      budget:
-        opts.budget !== undefined
-          ? opts.budget
-          : /cheap|cheaper|budget/i.test(refinement)
-          ? "cheap"
-          : parsed.budget,
-      constraints: opts.constraints ?? (/patio/i.test(refinement) ? ["patio"] : parsed.constraints),
-    }),
+    interpret: async (parsed, category, _currentStartISO, refinement) => {
+      const intent =
+        opts.intent ??
+        (/too late|earlier|later|after \d|at \d/i.test(refinement)
+          ? "time"
+          : /patio|outdoor|near/i.test(refinement)
+          ? "constraint"
+          : "venue");
+      const path =
+        intent === "constraint"
+          ? "research"
+          : opts.path ?? (/patio|outdoor|cuisine/i.test(refinement) ? "research" : "refilter");
+      return {
+        intent,
+        path,
+        category: opts.newCategory ?? category,
+        aesthetic: parsed.aesthetic,
+        budget:
+          opts.budget !== undefined
+            ? opts.budget
+            : /cheap|cheaper|budget/i.test(refinement)
+            ? "cheap"
+            : parsed.budget,
+        constraints: opts.constraints ?? (/patio/i.test(refinement) ? ["patio"] : parsed.constraints),
+        newStartClock: opts.newStartClock ?? null,
+      };
+    },
     searchPools: async (parsed, cats) => {
       opts.onSearch?.(parsed as never);
       const key = cats[0];
@@ -225,6 +242,47 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "TIME complaint ('too late') moves the stop earlier and re-checks venues",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(18, 0)); // all upcoming
+      let searched: string[] | null = null;
+      // move dinner 19:00 → 18:30 (earlier)
+      const res = await swapStop(
+        it, 0, "the time is too late", now,
+        mkDeps({ intent: "time", newStartClock: "18:30", legMin: 10, onSearch: (p) => (searched = p.category_signals) })
+      );
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      assert.strictEqual(res.path, "time");
+      // slot MOVED, not just the venue
+      assert.strictEqual(ms(it.stops[0].start_time), ms(T(18, 30)));
+      assert.strictEqual(ms(it.stops[0].end_time), ms(T(20, 15))); // 18:30 + 105
+      // venues were re-checked at the new time (search ran for dinner)
+      assert.deepStrictEqual(searched, ["dinner"]);
+      // moving earlier doesn't push anything downstream
+      assert.deepStrictEqual(res.downstreamShifted, []);
+      assert.strictEqual(it.stops[1].start_time, T(21, 0)); // bar unchanged
+    },
+  ],
+  [
+    "impossible time ('dinner at 4am') fails loud with the real reason",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(18, 0));
+      const res = await swapStop(
+        it, 0, "can we do dinner at 4am", now,
+        mkDeps({ intent: "time", newStartClock: "04:00" })
+      );
+      assert.strictEqual(res.swapped, false);
+      // specific reason (not a generic "keeping it"), names the hour
+      if (!res.swapped) assert.match(res.reason, /4:00 AM|won't work|nothing's really open/);
+      // dinner untouched
+      assert.strictEqual(it.stops[0].id, "d1");
+      assert.strictEqual(it.stops[0].start_time, T(19, 0));
+    },
+  ],
+  [
     "no better candidate → honest refusal, original kept",
     async () => {
       const it = mkItinerary();
@@ -235,7 +293,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         mkDeps({ pool: [mkVenue("b1", "Bar Spot")] })
       );
       assert.strictEqual(res.swapped, false);
-      if (!res.swapped) assert.match(res.reason, /Couldn't find a better bar than Bar Spot/);
+      if (!res.swapped) assert.match(res.reason, /Couldn't find another bar that fits — keeping Bar Spot/);
       // original bar untouched
       assert.strictEqual(it.stops[1].id, "b1");
       assert.strictEqual(it.stops[1].start_time, T(21, 0));
