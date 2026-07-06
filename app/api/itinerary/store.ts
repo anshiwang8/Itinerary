@@ -90,6 +90,19 @@ export function getItinerary(id: string): Itinerary | undefined {
 }
 
 /**
+ * floor_time = max(now, end of the currently active stop). Stops at or
+ * before this instant are underway/past and never change. The single
+ * source of this rule — the reroute and swap engines both call it.
+ * Assumes withStatuses(itinerary, now) has already been applied.
+ */
+export function floorTime(itinerary: Itinerary, now: Date): Date {
+  const active = itinerary.stops.find((s) => s.status === "active");
+  return active?.end_time
+    ? new Date(Math.max(now.getTime(), new Date(active.end_time).getTime()))
+    : now;
+}
+
+/**
  * Compute stop + itinerary statuses against reference time t.
  * Statuses are pure derivations; `locked` is the one ratchet — once a
  * stop has been active (or is already past), it stays locked even if

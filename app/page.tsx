@@ -1,350 +1,562 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import PlacesTest from "./PlacesTest";
+import { useEffect, useMemo, useState } from "react";
+import {
+  buildSchedule,
+  resolveStartTimeChecked,
+  ScheduledStop,
+} from "./api/schedule/schedule";
+import { TravelLeg } from "./api/schedule/travel";
+import { HOME, splitHomeLeg } from "./api/schedule/home";
+import { Itinerary } from "./api/itinerary/store";
+import { formatStopTime } from "./lib/timeLabels";
+import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 
-// The Itinerary prototype is a heavily imperative, DOM-driven UI (custom
-// date picker, hand-drawn pointer SVG, staggered reveal). Rather than
-// rewrite all of that into React state, we mount the original markup and
-// run the original vanilla logic once on the client. The weather box is
-// currently a static placeholder (live integration to be rebuilt).
-const MARKUP = `
-<div class="bg-base" id="bgBase"></div>
-<div class="bg-weather" id="bgWeather">
-  <div class="sun-big"></div>
-  <div class="cloud c1"></div>
-  <div class="cloud c2"></div>
-  <div class="cloud c3"></div>
-</div>
+interface Place {
+  id: string;
+  displayName?: { text: string };
+  location?: { latitude: number; longitude: number };
+  rating?: number;
+  priceLevel?: string;
+}
+type Pools = Record<string, Place[]>;
+interface WeatherBlock {
+  category: string;
+  weatherBlocked: true;
+  reason: string;
+}
 
-<nav>
-  <div class="brand">Itinerary</div>
-  <div class="nav-links"><a href="#">Pricing</a><a href="#">About us</a></div>
-</nav>
+// transit-leg detail line, e.g. "505 Dundas · 11 stops · 22 min"
+function legDetail(leg?: TravelLeg | null): string | null {
+  if (!leg || leg.mode !== "transit" || !leg.transit) return null;
+  const t = leg.transit;
+  return `${t.lineName}${t.stopCount ? ` · ${t.stopCount} stops` : ""} · ${leg.totalMinutes} min`;
+}
 
-<div class="nav-search" id="navSearch">
-  <div class="seg"><label>Search</label><span class="val" id="navQ">—</span></div>
-  <div class="divline"></div>
-  <div class="seg"><label>Start</label><span class="val" id="navStart">—</span></div>
-  <div class="divline"></div>
-  <div class="seg"><label>End</label><span class="val" id="navEnd">—</span></div>
-  <button class="mini-btn"><svg viewBox="0 0 24 24"><path d="M21.7 20.3l-4.9-4.9A8.3 8.3 0 1 0 15.4 16.8l4.9 4.9a1 1 0 0 0 1.4-1.4zM10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13z"/></svg></button>
-</div>
-
-<main class="hero" id="hero">
-  <h1>Itinerary</h1>
-  <p class="tagline">life moves simpler.</p>
-  <div class="search-bar">
-    <div class="bar-section search-seg">
-      <label for="searchInput">Search</label>
-      <input type="text" id="searchInput" placeholder="what were you thinking?" />
-    </div>
-    <div class="bar-divider"></div>
-    <div class="bar-section" id="startSection" onclick="openPicker('start', event)">
-      <label>Start Time</label>
-      <div class="datetime-display" id="startDisplay">Add date</div>
-    </div>
-    <div class="bar-divider"></div>
-    <div class="bar-section" id="endSection" onclick="openPicker('end', event)">
-      <label>End Time</label>
-      <div class="datetime-display" id="endDisplay">Add date</div>
-    </div>
-    <button class="search-btn" onclick="runSearch()" aria-label="Search">
-      <svg viewBox="0 0 24 24"><path d="M21.7 20.3l-4.9-4.9A8.3 8.3 0 1 0 15.4 16.8l4.9 4.9a1 1 0 0 0 1.4-1.4zM10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13z"/></svg>
-    </button>
-  </div>
-</main>
-
-<div class="picker-overlay" id="pickerOverlay" onclick="overlayClick(event)">
-  <div class="picker-popup" id="pickerPopup">
-    <div class="picker-header">
-      <button onclick="changeMonth(-1)">&#8249;</button>
-      <span class="month-year" id="monthYear"></span>
-      <button onclick="changeMonth(1)">&#8250;</button>
-    </div>
-    <div class="calendar-grid" id="calendarGrid"></div>
-    <div class="time-section">
-      <label>Time</label>
-      <div class="time-inputs">
-        <input type="number" id="hourInput" min="1" max="12" placeholder="12" />
-        <span class="time-sep">:</span>
-        <input type="number" id="minInput" min="0" max="59" placeholder="00" />
-      </div>
-      <button class="ampm-btn" id="ampmBtn" onclick="toggleAmPm()">AM</button>
-    </div>
-    <div class="picker-footer">
-      <button class="btn-clear" onclick="clearPicker()">Clear</button>
-      <button class="btn-apply" onclick="applyPicker()">Apply</button>
-    </div>
-  </div>
-</div>
-
-<section class="schedule-screen" id="schedule">
-  <div class="rows" id="rows"></div>
-  <div class="edit-zone">
-    <div class="edit-bar" id="editBar">
-      <span class="q">Switch out <b id="editTarget">this</b> for…</span>
-      <input type="text" placeholder="what would you prefer?" />
-      <button class="go"><svg viewBox="0 0 24 24"><path d="M21.7 20.3l-4.9-4.9A8.3 8.3 0 1 0 15.4 16.8l4.9 4.9a1 1 0 0 0 1.4-1.4zM10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13z"/></svg></button>
-    </div>
-  </div>
-</section>
-
-<div class="weather-box" id="weatherBox">
-  <svg class="w-icon" id="wIcon" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="24" cy="24" r="11" fill="#ffd24d"/>
-    <g stroke="#ffd24d" stroke-width="2.5" stroke-linecap="round">
-      <line x1="24" y1="6" x2="24" y2="11"/>
-      <line x1="24" y1="37" x2="24" y2="42"/>
-      <line x1="6" y1="24" x2="11" y2="24"/>
-      <line x1="9" y1="9" x2="13" y2="13"/>
-      <line x1="35" y1="13" x2="39" y2="9"/>
-    </g>
-    <path d="M30 44a9 9 0 0 1 17.6-2.6A8 8 0 1 1 49 57H32a6.5 6.5 0 0 1-2-12.7z" fill="#eef4f7" stroke="#cfe0e6" stroke-width="1.5"/>
-  </svg>
-  <div class="w-text">
-    <div class="cond" id="wCond">—</div>
-    <div class="w-temps">
-      <span class="hi"><span id="wHi">–</span>°<span class="deg"> H</span></span>
-      <span class="lo"><span id="wLo">–</span>°<span class="deg"> L</span></span>
-    </div>
-  </div>
-</div>
-
-<svg id="pointerSvg"></svg>
-`;
-
-function initItinerary() {
-  const w = window as unknown as Record<string, unknown>;
-  if (w.__itineraryInit) return;
-  w.__itineraryInit = true;
-
-  const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-  const DAYS = ["Su","Mo","Tu","We","Th","Fr","Sa"];
-
-  type PickerVal = { year: number; month: number; day: number; hour: number; min: number; ampm: string };
-  let activePicker: string | null = null;
-  let pickerState = { year: 0, month: 0, selectedDate: null as number | null, hour: 12, min: 0, ampm: "AM" };
-  let startValue: PickerVal | null = null;
-  let endValue: PickerVal | null = null;
-
-  const $ = (id: string) => document.getElementById(id)!;
-
-  function openPicker(which: string, e: Event) {
-    e && e.stopPropagation();
-    activePicker = which;
-    const existing = which === "start" ? startValue : endValue;
-    const now = new Date();
-    pickerState = {
-      year: existing ? existing.year : now.getFullYear(),
-      month: existing ? existing.month : now.getMonth(),
-      selectedDate: existing ? existing.day : null,
-      hour: existing ? existing.hour : 12,
-      min: existing ? existing.min : 0,
-      ampm: existing ? existing.ampm : "AM",
-    };
-    const rect = $(which + "Section").getBoundingClientRect();
-    const popup = $("pickerPopup");
-    popup.style.top = rect.bottom + 10 + "px";
-    let left = rect.left;
-    if (left + 320 > window.innerWidth - 12) left = window.innerWidth - 332;
-    popup.style.left = left + "px";
-    $("pickerOverlay").classList.add("open");
-    renderCalendar();
-    syncTimeInputs();
+function stopsFromSchedule(sched: ScheduledStop[], pools: Pools): MapStop[] {
+  const out: MapStop[] = [];
+  for (const st of sched) {
+    if (st.id === null) continue;
+    const loc = (pools[st.category] ?? []).find((p) => p.id === st.id)?.location ?? st.location;
+    if (!loc) continue;
+    out.push({
+      id: st.id,
+      category: st.category,
+      name: st.name ?? "(unnamed)",
+      lat: loc.latitude,
+      lng: loc.longitude,
+      startTime: st.start_time,
+      endTime: st.end_time,
+      reason: st.reason,
+      legModeToNext: st.travelToNext?.mode,
+      polylineToNext: st.travelToNext?.encodedPolyline ?? null,
+      legLabel: legDetail(st.travelToNext),
+    });
   }
-  function overlayClick(e: Event) { if (e.target === $("pickerOverlay")) closePicker(); }
-  function closePicker() { $("pickerOverlay").classList.remove("open"); activePicker = null; }
-  function renderCalendar() {
-    const { year, month, selectedDate } = pickerState;
-    $("monthYear").textContent = MONTHS[month] + " " + year;
-    const grid = $("calendarGrid"); grid.innerHTML = "";
-    DAYS.forEach((d) => { const el = document.createElement("div"); el.className = "cal-day-name"; el.textContent = d; grid.appendChild(el); });
-    const firstDay = new Date(year, month, 1).getDay();
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const today = new Date();
-    for (let i = 0; i < firstDay; i++) { const b = document.createElement("button"); b.className = "cal-day"; b.disabled = true; grid.appendChild(b); }
-    for (let d = 1; d <= daysInMonth; d++) {
-      const btn = document.createElement("button"); btn.className = "cal-day"; btn.textContent = String(d);
-      if (d === selectedDate) btn.classList.add("selected");
-      if (d === today.getDate() && month === today.getMonth() && year === today.getFullYear()) btn.classList.add("today");
-      btn.onclick = () => { pickerState.selectedDate = d; renderCalendar(); };
-      grid.appendChild(btn);
-    }
-  }
-  function changeMonth(delta: number) {
-    let { year, month } = pickerState; month += delta;
-    if (month < 0) { month = 11; year--; } if (month > 11) { month = 0; year++; }
-    pickerState.year = year; pickerState.month = month; renderCalendar();
-  }
-  function syncTimeInputs() {
-    ($("hourInput") as HTMLInputElement).value = String(pickerState.hour);
-    ($("minInput") as HTMLInputElement).value = String(pickerState.min).padStart(2, "0");
-    $("ampmBtn").textContent = pickerState.ampm;
-  }
-  function toggleAmPm() { pickerState.ampm = pickerState.ampm === "AM" ? "PM" : "AM"; $("ampmBtn").textContent = pickerState.ampm; }
-  function applyPicker() {
-    if (!pickerState.selectedDate) { closePicker(); return; }
-    const h = parseInt(($("hourInput") as HTMLInputElement).value) || 12;
-    const m = parseInt(($("minInput") as HTMLInputElement).value) || 0;
-    const ampm = $("ampmBtn").textContent || "AM";
-    const val: PickerVal = { year: pickerState.year, month: pickerState.month, day: pickerState.selectedDate, hour: h, min: m, ampm };
-    const label = MONTHS[val.month].slice(0, 3) + " " + val.day + ", " + String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0") + " " + ampm;
-    if (activePicker === "start") { startValue = val; const el = $("startDisplay"); el.textContent = label; el.classList.add("has-value"); }
-    else { endValue = val; const el = $("endDisplay"); el.textContent = label; el.classList.add("has-value"); }
-    closePicker();
-  }
-  function clearPicker() {
-    if (activePicker === "start") { startValue = null; const el = $("startDisplay"); el.textContent = "Add date"; el.classList.remove("has-value"); }
-    else { endValue = null; const el = $("endDisplay"); el.textContent = "Add date"; el.classList.remove("has-value"); }
-    closePicker();
-  }
+  return out;
+}
 
-  // ── Itinerary data ──
-  const ICONS: Record<string, string> = {
-    bus: '<svg viewBox="0 0 24 24"><path d="M4 16c0 .88.39 1.67 1 2.22V20a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1h8v1a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1.78c.61-.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8 .5-8 4v10zm3.5 1a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm9 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zM18 11H6V6h12v5z"/></svg>',
-    subway: '<svg viewBox="0 0 24 24"><path d="M12 2c-4 0-8 .5-8 4v9.5A3.5 3.5 0 0 0 7.5 19L6 20.5V21h2.23l2-2h3.54l2 2H18v-.5L16.5 19a3.5 3.5 0 0 0 3.5-3.5V6c0-3.5-4-4-8-4zM7.5 17A1.5 1.5 0 1 1 9 15.5 1.5 1.5 0 0 1 7.5 17zM11 10H6V6h5v4zm2 0V6h5v4h-5zm3.5 7a1.5 1.5 0 1 1 1.5-1.5 1.5 1.5 0 0 1-1.5 1.5z"/></svg>',
-  };
-  type Item =
-    | { type: "transport"; name: string; icon: string; meta: string; sub: string; times: string; price: string }
-    | { type: "destination"; name: string; rating: number; price: string; desc: string };
-  const items: Item[] = [
-    { type: "transport", name: "Bus 91", icon: "bus", meta: "Bus · 1h 15m", sub: "Bayview Ave & Taylor Mills Dr S → Finch Station", times: "2:35 board · 3:50 arrive", price: "$4.50" },
-    { type: "transport", name: "Subway", icon: "subway", meta: "Subway · 35m", sub: "Finch Station → Union Station", times: "3:55 board · 4:30 arrive", price: "Free Transfer" },
-    { type: "destination", name: "Scotiabank Arena", rating: 4.5, price: "$30", desc: "Leafs Game" },
-  ];
-  const PER_ROW = 3;
-
-  function starSvg(fill: string) {
-    const id = "g" + Math.random().toString(36).slice(2, 8);
-    if (fill === "half") return `<svg viewBox="0 0 24 24"><defs><linearGradient id="${id}"><stop offset="50%" stop-color="#f5c518"/><stop offset="50%" stop-color="#dfe7ea"/></linearGradient></defs><path fill="url(#${id})" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`;
-    const paint = fill === "empty" ? "#dfe7ea" : "#f5c518";
-    return `<svg viewBox="0 0 24 24"><path fill="${paint}" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`;
-  }
-  function renderStars(rating: number) {
-    let html = "";
-    for (let i = 1; i <= 5; i++) html += rating >= i ? starSvg("full") : rating >= i - 0.5 ? starSvg("half") : starSvg("empty");
-    return `<span class="stars">${html}</span>`;
-  }
-  function cardHtml(item: Item, idx: number) {
-    if (item.type === "transport") {
-      return `<div class="card transport" data-idx="${idx}" onclick="selectCard(${idx})">
-        <div class="t-icon">${ICONS[item.icon]}</div>
-        <div class="title">${item.name}</div>
-        <div class="meta">${item.meta}</div>
-        <div class="sub">${item.sub}</div>
-        <div class="sub" style="margin-top:6px">${item.times}</div>
-        <div class="price-tag">${item.price}</div>
-      </div>`;
-    }
-    return `<div class="card destination" data-idx="${idx}" onclick="selectCard(${idx})">
-      <div class="dest-photo"><div class="sun"></div><div class="hill"></div></div>
-      <div class="dest-body">
-        <div class="title">${item.name}</div>
-        <div class="rating">${renderStars(item.rating)}<span class="num">${item.rating.toFixed(1)}</span><span class="price">· ${item.price}</span></div>
-        <div class="desc">${item.desc}</div>
-      </div>
-    </div>`;
-  }
-  function buildSchedule() {
-    const rows = $("rows"); rows.innerHTML = "";
-    for (let r = 0; r * PER_ROW < items.length; r++) {
-      const slice = items.slice(r * PER_ROW, r * PER_ROW + PER_ROW);
-      const reverse = r % 2 === 1;
-      const row = document.createElement("div"); row.className = "sched-row";
-      row.style.flexDirection = reverse ? "row-reverse" : "row";
-      slice.forEach((item, i) => {
-        const globalIdx = r * PER_ROW + i;
-        const wrap = document.createElement("div"); wrap.style.display = "contents";
-        wrap.innerHTML = cardHtml(item, globalIdx);
-        row.appendChild(wrap.firstElementChild!);
-        if (i < slice.length - 1) { const c = document.createElement("div"); c.className = "connector-h " + (reverse ? "dir-left" : "dir-right"); row.appendChild(c); }
-      });
-      rows.appendChild(row);
-      if ((r + 1) * PER_ROW < items.length) {
-        const gap = document.createElement("div"); gap.className = "row-gap";
-        gap.style.justifyContent = reverse ? "flex-start" : "flex-end";
-        gap.style.paddingRight = reverse ? "0" : "104px";
-        gap.style.paddingLeft = reverse ? "104px" : "0";
-        const v = document.createElement("div"); v.className = "connector-v dir-down"; gap.appendChild(v);
-        rows.appendChild(gap);
-      }
-    }
-  }
-
-  function fmt(v: PickerVal) {
-    return MONTHS[v.month].slice(0, 3) + " " + v.day + ", " + String(v.hour).padStart(2, "0") + ":" + String(v.min).padStart(2, "0") + " " + v.ampm;
-  }
-
-  function runSearch() {
-    const q = ($("searchInput") as HTMLInputElement).value.trim();
-    if (!q || !startValue || !endValue) { alert("Enter a search and pick both start and end dates to build your itinerary."); return; }
-    $("navQ").textContent = q;
-    $("navStart").textContent = fmt(startValue);
-    $("navEnd").textContent = fmt(endValue);
-    buildSchedule();
-    $("hero").classList.add("lift");
-    setTimeout(() => {
-      $("hero").style.display = "none";
-      $("schedule").classList.add("show");
-      $("navSearch").classList.add("show");
-      $("bgWeather").classList.add("show");
-      $("bgBase").style.opacity = "0";
-      $("weatherBox").classList.add("show");
-      document.querySelectorAll(".card").forEach((c, i) => setTimeout(() => c.classList.add("in"), 120 + i * 130));
-    }, 480);
-  }
-
-  // ── Card selection ──
-  let activeIdx: number | null = null;
-  function selectCard(idx: number) {
-    if (activeIdx === idx) { closeEdit(); return; }
-    activeIdx = idx;
-    document.querySelectorAll(".card").forEach((c) => c.classList.toggle("active", Number((c as HTMLElement).dataset.idx) === idx));
-    $("editTarget").textContent = items[idx].name;
-    $("editBar").classList.add("show");
-    requestAnimationFrame(() => requestAnimationFrame(drawPointer));
-  }
-  function closeEdit() {
-    activeIdx = null;
-    document.querySelectorAll(".card").forEach((c) => c.classList.remove("active"));
-    $("editBar").classList.remove("show");
-    $("pointerSvg").innerHTML = "";
-  }
-  function drawPointer() {
-    const svg = $("pointerSvg"); svg.innerHTML = "";
-    if (activeIdx === null) return;
-    const card = document.querySelector(`.card[data-idx="${activeIdx}"]`);
-    const bar = $("editBar");
-    if (!card || !bar.classList.contains("show")) return;
-    const cr = card.getBoundingClientRect(), br = bar.getBoundingClientRect();
-    const x1 = br.left + br.width / 2, y1 = br.top;
-    const x2 = cr.left + cr.width / 2, y2 = cr.bottom;
-    const my = (y1 + y2) / 2;
-    svg.innerHTML = `<path d="M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}" fill="none" stroke="#6fc3d6" stroke-width="2" stroke-dasharray="6 6" opacity="0.8"/><circle cx="${x2}" cy="${y2}" r="4" fill="#6fc3d6"/>`;
-  }
-
-  // Expose handlers referenced by inline onclick attributes.
-  Object.assign(w, { openPicker, runSearch, overlayClick, changeMonth, toggleAmPm, applyPicker, clearPicker, selectCard });
-
-  window.addEventListener("resize", drawPointer);
-  window.addEventListener("scroll", drawPointer, true);
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closePicker(); closeEdit(); } });
-  $("searchInput").addEventListener("keydown", (e) => { if ((e as KeyboardEvent).key === "Enter") runSearch(); });
+function stopsFromItinerary(it: Itinerary): MapStop[] {
+  return it.stops
+    .filter((s) => s.id !== null && s.location)
+    .map((s) => ({
+      id: s.id!,
+      category: s.category,
+      name: s.name ?? "(unnamed)",
+      lat: s.location!.latitude,
+      lng: s.location!.longitude,
+      startTime: s.start_time,
+      endTime: s.end_time,
+      reason: s.reason,
+      legModeToNext: s.travelToNext?.mode,
+      polylineToNext: s.travelToNext?.encodedPolyline ?? null,
+      legLabel: legDetail(s.travelToNext),
+    }));
 }
 
 export default function Home() {
-  const ref = useRef<HTMLDivElement>(null);
+  const [prompt, setPrompt] = useState("");
+  const [pools, setPools] = useState<Pools>({});
+  const [parsedObj, setParsedObj] = useState<Record<string, unknown> | null>(null);
+  const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
+  const [travelLegs, setTravelLegs] = useState<TravelLeg[]>([]);
+  const [homeLeg, setHomeLeg] = useState<TravelLeg | null>(null);
+  const [mapStops, setMapStops] = useState<MapStop[]>([]);
+  const [itinerary, setItinerary] = useState<Itinerary | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [weatherBlocks, setWeatherBlocks] = useState<WeatherBlock[]>([]);
 
-  useEffect(() => {
-    initItinerary();
-  }, []);
+  const [simNow, setSimNow] = useState("");
+  const [disruptLeg, setDisruptLeg] = useState(0);
+  const [banner, setBanner] = useState<string | null>(null);
+  const [bannerFlat, setBannerFlat] = useState(false);
+  // "changed" is keyed by venue id (a swap can change a stop's category)
+  const [changedIds, setChangedIds] = useState<Set<string>>(new Set());
+  const [oldStarts, setOldStarts] = useState<Record<string, string | null>>({});
+  const [devOpen, setDevOpen] = useState(true);
+  const [swapText, setSwapText] = useState("");
+  const [swapping, setSwapping] = useState(false);
+  const [swapError, setSwapError] = useState<string | null>(null);
 
+  const [error, setError] = useState<string | null>(null);
+  const [loadingText, setLoadingText] = useState<string | null>(null);
+  const busy = loadingText !== null;
+
+  async function runPipeline() {
+    const q = prompt.trim();
+    if (!q || busy) return;
+    setError(null);
+    setBanner(null);
+    setChangedIds(new Set());
+    setOldStarts({});
+    setSwapError(null);
+    try {
+      setLoadingText("Reading your evening…");
+      const parseRes = await fetch("/api/parse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: q }),
+      });
+      const parseData = await parseRes.json();
+      if (!parseRes.ok) throw new Error(parseData.error ?? `parse failed (${parseRes.status})`);
+      setParsedObj(parseData);
+
+      // fail loud on an implausible inferred time before spending calls
+      const check = resolveStartTimeChecked(
+        parseData.time_window ?? "",
+        new Date(),
+        parseData.category_signals ?? []
+      );
+      if (!check.ok) {
+        setError(check.reason);
+        setLoadingText(null);
+        return;
+      }
+
+      let weather = null;
+      try {
+        const wr = await fetch("/api/weather");
+        if (wr.ok) weather = await wr.json();
+      } catch {
+        weather = null;
+      }
+
+      setLoadingText("Finding places…");
+      const placesRes = await fetch("/api/places/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parsed: parseData, weather }),
+      });
+      const placesData = await placesRes.json();
+      if (!placesRes.ok) throw new Error(placesData.error ?? `places failed (${placesRes.status})`);
+      const { _dropLog, _weatherBlocked, ...categories } = placesData;
+      void _dropLog;
+      setPools(categories as Pools);
+      setWeatherBlocks(Array.isArray(_weatherBlocked) ? _weatherBlocked : []);
+
+      setLoadingText("Choosing the spots…");
+      const selectRes = await fetch("/api/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parsed: parseData, pools: categories }),
+      });
+      const selectData = await selectRes.json();
+      if (!selectRes.ok) throw new Error(selectData.error ?? `select failed (${selectRes.status})`);
+      const sels = selectData.selections ?? [];
+
+      setLoadingText("Timing the route…");
+      const points = sels
+        .filter((s: { id: string | null }) => s.id !== null)
+        .map((s: { id: string; category: string }) => {
+          const pool: Place[] = (categories as Pools)[s.category] ?? [];
+          return pool.find((p) => p.id === s.id)?.location ?? null;
+        });
+
+      let legs: TravelLeg[] = [];
+      let hl: TravelLeg | null = null;
+      if (points.length >= 1 && points.every(Boolean)) {
+        const { startISO } = buildSchedule(sels, parseData.time_window ?? "");
+        const travelRes = await fetch("/api/schedule/travel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ points: [HOME.location, ...points], departureTime: startISO }),
+        });
+        const travelData = await travelRes.json();
+        if (!travelRes.ok) throw new Error(travelData.error ?? `travel failed (${travelRes.status})`);
+        const split = splitHomeLeg(travelData.legs ?? []);
+        hl = split.homeLeg;
+        legs = split.interLegs;
+      }
+
+      const { stops } = buildSchedule(sels, parseData.time_window ?? "", new Date(), legs, undefined, hl);
+      setSchedule(stops);
+      setTravelLegs(legs);
+      setHomeLeg(hl);
+      const ms = stopsFromSchedule(stops, categories as Pools);
+      setMapStops(ms);
+      setSelected(ms[0]?.category ?? null);
+
+      // auto-store the itinerary so the live/reroute controls work at once
+      await storeItinerary(stops, legs, hl, parseData, categories as Pools, "");
+      setLoadingText(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setLoadingText(null);
+    }
+  }
+
+  async function storeItinerary(
+    sched: ScheduledStop[],
+    legs: TravelLeg[],
+    hl: TravelLeg | null,
+    parsed: Record<string, unknown>,
+    poolsIn: Pools,
+    simValue: string
+  ) {
+    const enriched = sched.map((st) => {
+      const loc = st.id ? (poolsIn[st.category] ?? []).find((p) => p.id === st.id)?.location : undefined;
+      return loc ? { ...st, location: loc } : st;
+    });
+    const res = await fetch("/api/itinerary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stops: enriched, legs, parsed, homeLeg: hl }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.error ?? `itinerary failed (${res.status})`);
+      return;
+    }
+    await refreshItinerary(data.id, simValue);
+  }
+
+  async function refreshItinerary(id: string, simValue: string) {
+    const nowISO = simValue ? new Date(simValue).toISOString() : "";
+    const url = `/api/itinerary/${id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`;
+    const res = await fetch(url);
+    const data: Itinerary = await res.json();
+    if (!res.ok) return;
+    setItinerary(data);
+    const active = data.stops.find((s) => s.status === "active");
+    if (active) setSelected(active.category);
+  }
+
+  function applyItinerary(it: Itinerary) {
+    setItinerary(it);
+    setSchedule(it.stops as ScheduledStop[]);
+    setMapStops(stopsFromItinerary(it));
+    setHomeLeg(it.homeLeg ?? null);
+  }
+
+  async function fireDisruption() {
+    if (!itinerary) return;
+    const timed = itinerary.stops.filter((s) => s.start_time);
+    const broken = timed[disruptLeg]?.travelToNext;
+    const legName =
+      broken?.transit?.lineName ?? (broken?.mode === "transit" ? "The transit leg" : "That leg");
+
+    const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
+    const res = await fetch(`/api/itinerary/${itinerary.id}/reroute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        disruption: { type: "transit_cancelled", legIndex: disruptLeg },
+        ...(nowISO ? { now: nowISO } : {}),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.error ?? `reroute failed (${res.status})`);
+      return;
+    }
+    if (!data.rerouted) {
+      setBannerFlat(true);
+      setBanner(`${legName} cancelled — ${data.reason}.`);
+      setChangedIds(new Set());
+      return;
+    }
+
+    const itRes = await fetch(
+      `/api/itinerary/${itinerary.id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`
+    );
+    const updated: Itinerary = await itRes.json();
+
+    // capture pre-reroute starts for the strike-through, keyed by venue id
+    const olds: Record<string, string | null> = {};
+    const ids = new Set<string>();
+    for (const c of data.changed as { stopIndex: number; before: { start: string | null } }[]) {
+      const st = updated.stops[c.stopIndex];
+      if (st.id) {
+        ids.add(st.id);
+        olds[st.id] = c.before.start;
+      }
+    }
+    applyItinerary(updated);
+    setChangedIds(ids);
+    setOldStarts(olds);
+    // surface the change: expand the first replanned stop so its new venue
+    // and settled time are the hero of the moment
+    const firstChanged = (data.changed as { stopIndex: number }[])[0];
+    if (firstChanged) setSelected(updated.stops[firstChanged.stopIndex].category);
+
+    const floorLabel = formatStopTime(data.floor_time);
+    const kept = updated.stops.find((s) => s.status === "active" || s.status === "completed");
+    setBannerFlat(false);
+    setBanner(
+      `${legName} cancelled. Replanned from ${floorLabel}` +
+        (kept ? ` — your ${kept.category}'s unchanged.` : ".")
+    );
+  }
+
+  // Surgical per-stop swap: replace the selected upcoming stop from its
+  // mini-prompt, reusing the reroute reflow visuals for the result.
+  async function doSwap() {
+    if (!itinerary || !selected) return;
+    const refinement = swapText.trim();
+    if (!refinement) return;
+    const stopIndex = itinerary.stops.findIndex((s) => s.category === selected);
+    if (stopIndex < 0) return;
+
+    setSwapping(true);
+    setSwapError(null);
+    const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
+    // pre-swap starts (by id) so downstream shifts can strike-through
+    const oldById = Object.fromEntries(
+      itinerary.stops.filter((s) => s.id).map((s) => [s.id as string, s.start_time])
+    );
+    const res = await fetch(`/api/itinerary/${itinerary.id}/swap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stopIndex, refinement, ...(nowISO ? { now: nowISO } : {}) }),
+    });
+    const data = await res.json();
+    setSwapping(false);
+    if (!res.ok) {
+      setSwapError(data.error ?? `swap failed (${res.status})`);
+      return;
+    }
+    if (!data.swapped) {
+      // honest refusal — nothing better found, original kept
+      setBannerFlat(true);
+      setBanner(data.reason);
+      return;
+    }
+
+    const itRes = await fetch(
+      `/api/itinerary/${itinerary.id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`
+    );
+    const updated: Itinerary = await itRes.json();
+
+    const ids = new Set<string>();
+    const olds: Record<string, string | null> = {};
+    const swapped = updated.stops[data.stopIndex];
+    // the swapped stop: venue changed, slot held → no time strike, just settle
+    if (swapped.id) ids.add(swapped.id);
+    // downstream shifts: their times moved → strike old, settle new
+    for (const di of data.downstreamShifted as number[]) {
+      const s = updated.stops[di];
+      if (s.id) {
+        ids.add(s.id);
+        olds[s.id] = oldById[s.id] ?? null;
+      }
+    }
+    applyItinerary(updated);
+    setChangedIds(ids);
+    setOldStarts(olds);
+    setSelected(swapped.category);
+    setSwapText("");
+    setBannerFlat(false);
+    setBanner(`Swapped ${data.before.category} — ${data.reason}`);
+  }
+
+  // merge live status + changed flags (by venue id) onto the base map stops
+  const styledStops = useMemo<MapStop[]>(
+    () =>
+      mapStops.map((ms) => ({
+        ...ms,
+        status: itinerary?.stops.find((s) => s.category === ms.category)?.status,
+        changed: changedIds.has(ms.id),
+        oldStart: oldStarts[ms.id] ?? null,
+      })),
+    [mapStops, itinerary, changedIds, oldStarts]
+  );
+
+  const selectedStop = itinerary?.stops.find((s) => s.category === selected) ?? null;
+  const canSwap = !!selectedStop && selectedStop.status === "upcoming" && selectedStop.id !== null;
+
+  const mapHome = useMemo<MapHome | null>(() => {
+    if (!homeLeg) return null;
+    const first = (schedule ?? []).find((s) => s.start_time);
+    const leaveBy =
+      first?.start_time != null
+        ? formatStopTime(new Date(new Date(first.start_time).getTime() - homeLeg.totalMinutes * 60_000))
+        : null;
+    return {
+      label: HOME.label,
+      lat: HOME.location.latitude,
+      lng: HOME.location.longitude,
+      legModeToNext: homeLeg.mode,
+      polylineToNext: homeLeg.encodedPolyline,
+      legLabel: legDetail(homeLeg),
+      leaveBy,
+    };
+  }, [homeLeg, schedule]);
+
+  const timedStops = itinerary?.stops.filter((s) => s.start_time) ?? [];
+
+  // ── empty state ──
+  if (!itinerary) {
+    return (
+      <main className="empty">
+        <div className="empty__mark">Itinerary</div>
+        <div className="eyebrow empty__kicker">Ossington, Toronto · tonight</div>
+        <h1 className="empty__title">What&rsquo;s your evening?</h1>
+        <p className="empty__sub">
+          One night out, planned end to end — real places, real times, real transit — that
+          fixes itself when a route falls through.
+        </p>
+        <div className="prompt">
+          <input
+            className="prompt__input"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") runPipeline();
+            }}
+            placeholder="ramen then a quiet bar in Ossington"
+            aria-label="Describe your evening"
+            autoFocus
+          />
+          <button className="prompt__go" onClick={runPipeline} disabled={busy || !prompt.trim()}>
+            {busy ? loadingText : "Plan it"}
+          </button>
+        </div>
+        {error && <div className="empty__err">{error}</div>}
+      </main>
+    );
+  }
+
+  // ── map stage ──
   return (
-    <>
-      <div ref={ref} dangerouslySetInnerHTML={{ __html: MARKUP }} />
-      {/* Temporary Places API test harness — remove after verification. */}
-      <PlacesTest />
-    </>
+    <main className="stage">
+      <ItineraryMap stops={styledStops} home={mapHome} selected={selected} onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))} />
+
+      <div className="topbar">
+        <span className="topbar__mark">Itinerary</span>
+        <span className="topbar__rule" />
+        <input
+          className="topbar__input"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") runPipeline();
+          }}
+          aria-label="Describe your evening"
+        />
+        <button className="topbar__go" onClick={runPipeline} disabled={busy || !prompt.trim()}>
+          {busy ? "…" : "Replan"}
+        </button>
+      </div>
+
+      {loadingText && <div className="loading">{loadingText}</div>}
+
+      {banner && (
+        <div className={"banner banner--show" + (bannerFlat ? " banner--flat" : "")} role="status">
+          {banner}
+        </div>
+      )}
+      {error && !banner && <div className="stage__err">{error}</div>}
+
+      {canSwap && selectedStop && (
+        <div className="swapbar">
+          <span className="swapbar__label">
+            Not quite right? Change <b>{selectedStop.name}</b>
+          </span>
+          <input
+            className="swapbar__input"
+            value={swapText}
+            onChange={(e) => setSwapText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") doSwap();
+            }}
+            placeholder="cheaper, a patio, less fancy…"
+            aria-label={`Tell me what to change about ${selectedStop.name}`}
+          />
+          <button className="swapbar__go" onClick={doSwap} disabled={swapping || !swapText.trim()}>
+            {swapping ? "…" : "Swap"}
+          </button>
+          {swapError && <span className="swapbar__err">{swapError}</span>}
+        </div>
+      )}
+
+      {weatherBlocks.length > 0 && (
+        <div style={{ position: "absolute", top: 74, left: 18, zIndex: 19, display: "flex", flexDirection: "column", gap: 6 }}>
+          {weatherBlocks.map((b) => (
+            <div
+              key={b.category}
+              style={{
+                background: "var(--card)",
+                border: "1px solid var(--rule)",
+                borderLeft: "3px solid var(--ink-soft)",
+                borderRadius: "0 9px 9px 0",
+                padding: "7px 12px",
+                fontFamily: "var(--grot)",
+                fontSize: 12.5,
+                color: "var(--ink-soft)",
+              }}
+            >
+              Skipped the {b.category} — {b.reason}.
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* discreet dev strip — time + disruption simulators for the demo */}
+      {devOpen ? (
+        <div className="dev">
+          <div className="dev__title">
+            <span>Dev</span>
+            <button className="ghost" style={{ marginLeft: "auto", padding: "2px 7px" }} onClick={() => setDevOpen(false)}>
+              hide
+            </button>
+          </div>
+          <div className="dev__row">
+            <label>time</label>
+            <input
+              type="datetime-local"
+              value={simNow}
+              onChange={(e) => {
+                setSimNow(e.target.value);
+                refreshItinerary(itinerary.id, e.target.value);
+              }}
+            />
+            <button
+              className="ghost"
+              onClick={() => {
+                setSimNow("");
+                refreshItinerary(itinerary.id, "");
+              }}
+            >
+              real
+            </button>
+          </div>
+          <div className="dev__row">
+            <label>leg</label>
+            <select value={disruptLeg} onChange={(e) => setDisruptLeg(Number(e.target.value))}>
+              {timedStops.slice(0, -1).map((s, i) => (
+                <option key={i} value={i}>
+                  {s.name} → {timedStops[i + 1]?.name} ({s.travelToNext?.mode ?? "?"})
+                </option>
+              ))}
+            </select>
+            <button onClick={fireDisruption}>cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button className="dev dev__collapsed" onClick={() => setDevOpen(true)}>
+          Dev
+        </button>
+      )}
+    </main>
   );
 }

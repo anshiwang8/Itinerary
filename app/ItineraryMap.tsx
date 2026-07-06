@@ -1,267 +1,383 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
-import { formatStopRange } from "./lib/timeLabels";
+import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 
-// Map rendering for the final schedule. Straight polylines between
-// stops by design — no Directions/Routes geometry in this step.
+// Printed-cartography map: warm-paper Google styling (inline JSON, so no
+// Cloud map id), ink-navy route lines, and an HTML overlay layer for the
+// chips / editorial cards positioned off the live map projection. Acid
+// green is reserved for the active "now" stop and reroute-changed stops.
 
 export interface MapStop {
+  id: string;
+  category: string;
   name: string;
   lat: number;
   lng: number;
-  category: string;
   startTime: string | null;
   endTime: string | null;
   reason?: string;
-  /** mode of the travel leg departing this stop (undefined on the last) */
   legModeToNext?: "transit" | "walk" | "unknown";
-  /** encoded route geometry to the next stop; straight-line fallback when null */
   polylineToNext?: string | null;
-  /** live itinerary status — markers restyle when set */
+  /** transit line detail for the leg leaving this stop */
+  legLabel?: string | null;
   status?: "upcoming" | "active" | "completed" | "skipped";
+  /** replanned in this session → acid green */
+  changed?: boolean;
+  /** pre-reroute start, shown struck-through while the change is fresh */
+  oldStart?: string | null;
+  blockedReason?: string | null;
 }
 
-// Home origin — rendered as a distinct (house-glyph, dark) marker, not
-// a numbered stop, with leg 0 drawn to the first stop.
 export interface MapHome {
   label: string;
   lat: number;
   lng: number;
   legModeToNext?: "transit" | "walk" | "unknown";
   polylineToNext?: string | null;
+  legLabel?: string | null;
+  leaveBy?: string | null;
 }
 
-type Libs = [
-  google.maps.MapsLibrary,
-  google.maps.MarkerLibrary,
-  google.maps.GeometryLibrary
+// Warm-paper cartography — desaturated greys, POIs and transit stripped
+// so the cards ARE the points of interest.
+const PAPER_STYLE: google.maps.MapTypeStyle[] = [
+  { elementType: "geometry", stylers: [{ color: "#e9e6df" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#5c5f57" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#e9e6df" }] },
+  { elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+  { featureType: "poi", stylers: [{ visibility: "off" }] },
+  { featureType: "transit", stylers: [{ visibility: "off" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#f1ede5" }] },
+  { featureType: "road", elementType: "labels.text.fill", stylers: [{ color: "#7a7d74" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#e6e1d6" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#ddd7ca" }] },
+  { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#e4e0d5" }] },
+  { featureType: "administrative", elementType: "geometry", stylers: [{ visibility: "off" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#d9d5cb" }] },
 ];
 
-// Load the Maps JS API once, lazily — first mount of this component is
-// the first time the API is requested at all.
-let libsPromise: Promise<Libs> | null = null;
-function loadMapLibs(): Promise<Libs> {
+const INK = "#17212E";
+const LIVE = "#C8F000";
+
+let libsPromise: Promise<
+  [google.maps.MapsLibrary, google.maps.GeometryLibrary]
+> | null = null;
+function loadMapLibs() {
   if (!libsPromise) {
-    setOptions({
-      // The ONE browser-side key, protected by referrer restriction.
-      key: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "",
-      v: "weekly",
-    });
+    setOptions({ key: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "", v: "weekly" });
     libsPromise = Promise.all([
-      importLibrary("maps"),
-      importLibrary("marker"),
-      importLibrary("geometry"),
+      importLibrary("maps") as Promise<google.maps.MapsLibrary>,
+      importLibrary("geometry") as Promise<google.maps.GeometryLibrary>,
     ]);
   }
   return libsPromise;
 }
 
-const STROKE = "#3d8294";
-
-export default function ItineraryMap({
-  stops,
-  home,
-}: {
+interface Props {
   stops: MapStop[];
   home?: MapHome | null;
-}) {
-  const divRef = useRef<HTMLDivElement>(null);
+  selected: string | null;
+  onSelect: (category: string) => void;
+}
+
+export default function ItineraryMap({ stops, home, selected, onSelect }: Props) {
+  const mapDivRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
-  const overlaysRef = useRef<{
-    markers: google.maps.marker.AdvancedMarkerElement[];
-    lines: google.maps.Polyline[];
-    info: google.maps.InfoWindow | null;
-  }>({ markers: [], lines: [], info: null });
+  const projRef = useRef<google.maps.MapCanvasProjection | null>(null);
+  const linesRef = useRef<google.maps.Polyline[]>([]);
+  const [, setTick] = useState(0);
+  const [ready, setReady] = useState(false);
 
+  // one-time map + projection probe
   useEffect(() => {
-    if (stops.length === 0) return;
     let cancelled = false;
-
     (async () => {
-      const [mapsLib, markerLib, geometryLib] = await loadMapLibs();
-      if (cancelled || !divRef.current) return;
-      const { Map, InfoWindow, Polyline } = mapsLib;
-      const { AdvancedMarkerElement, PinElement } = markerLib;
-      const { encoding } = geometryLib;
-
+      const [maps] = await loadMapLibs();
+      if (cancelled || !mapDivRef.current) return;
       if (!mapRef.current) {
-        mapRef.current = new Map(divRef.current, {
-          center: { lat: stops[0].lat, lng: stops[0].lng },
-          zoom: 15,
-          // AdvancedMarkerElement requires SOME mapId; DEMO_MAP_ID is
-          // Google's sanctioned zero-config value — default styling,
-          // no cloud styling setup.
-          mapId: "DEMO_MAP_ID",
+        mapRef.current = new maps.Map(mapDivRef.current, {
+          center: { lat: 43.6497, lng: -79.4197 },
+          zoom: 14,
+          styles: PAPER_STYLE,
+          disableDefaultUI: true,
+          gestureHandling: "greedy",
+          backgroundColor: "#e9e6df",
+          clickableIcons: false,
+        });
+        // A projection probe: its draw() fires on every pan/zoom, giving
+        // us live container-pixel projection for the HTML overlay layer.
+        class Probe extends maps.OverlayView {
+          onAdd() {}
+          onRemove() {}
+          draw() {
+            projRef.current = this.getProjection();
+            setTick((t) => t + 1);
+          }
+        }
+        const probe = new Probe();
+        probe.setMap(mapRef.current);
+        setReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // route polylines + fit bounds when the stops change
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    let cancelled = false;
+    (async () => {
+      const [maps, geometry] = await loadMapLibs();
+      if (cancelled) return;
+      linesRef.current.forEach((l) => l.setMap(null));
+      linesRef.current = [];
+
+      const segs: {
+        from: google.maps.LatLngLiteral;
+        to: google.maps.LatLngLiteral;
+        mode?: "transit" | "walk" | "unknown";
+        encoded?: string | null;
+        live: boolean;
+      }[] = [];
+
+      if (home && stops[0]) {
+        segs.push({
+          from: { lat: home.lat, lng: home.lng },
+          to: { lat: stops[0].lat, lng: stops[0].lng },
+          mode: home.legModeToNext,
+          encoded: home.polylineToNext,
+          live: false,
         });
       }
-      const map = mapRef.current;
-
-      // clear overlays from a previous run
-      overlaysRef.current.markers.forEach((m) => (m.map = null));
-      overlaysRef.current.lines.forEach((l) => l.setMap(null));
-      overlaysRef.current.info?.close();
-      const info = new InfoWindow();
-      overlaysRef.current = { markers: [], lines: [], info };
-
-      const fmt = (iso: string | null) =>
-        iso
-          ? new Date(iso).toLocaleTimeString([], {
-              hour: "numeric",
-              minute: "2-digit",
-            })
-          : "?";
-      // date-aware "be here" range; falls back to raw times if either
-      // endpoint is missing
-      const beHere = (start: string | null, end: string | null) =>
-        start && end ? formatStopRange(start, end) : `${fmt(start)} – ${fmt(end)}`;
-
-      // numbered markers in stop order, restyled by itinerary status
-      stops.forEach((s, i) => {
-        const style =
-          s.status === "active"
-            ? { background: "#e8873d", borderColor: "#fff", scale: 1.3, opacity: "1" }
-            : s.status === "completed"
-            ? { background: "#b9c6cb", borderColor: "#9aa7ac", scale: 0.9, opacity: "0.55" }
-            : { background: STROKE, borderColor: "#2a5f70", scale: 1, opacity: "1" };
-        const pin = new PinElement({
-          glyph: String(i + 1),
-          glyphColor: "#fff",
-          background: style.background,
-          borderColor: style.borderColor,
-          scale: style.scale,
+      for (let i = 0; i < stops.length - 1; i++) {
+        segs.push({
+          from: { lat: stops[i].lat, lng: stops[i].lng },
+          to: { lat: stops[i + 1].lat, lng: stops[i + 1].lng },
+          mode: stops[i].legModeToNext,
+          encoded: stops[i].polylineToNext,
+          // the redrawn inbound leg of a changed stop reads live
+          live: !!stops[i + 1].changed,
         });
-        pin.element.style.opacity = style.opacity;
-        const marker = new AdvancedMarkerElement({
-          map,
-          position: { lat: s.lat, lng: s.lng },
-          content: pin.element,
-          title: s.name,
-          zIndex: s.status === "active" ? 10 : 1,
-        });
-        marker.addListener("click", () => {
-          info.setContent(
-            `<div style="font-family:sans-serif;font-size:13px;max-width:220px">` +
-              `<strong>${s.name}</strong><br/>` +
-              `be here ${beHere(s.startTime, s.endTime)}` +
-              (s.reason ? `<br/><em>${s.reason}</em>` : "") +
-              `</div>`
-          );
-          info.open({ map, anchor: marker });
-        });
-        overlaysRef.current.markers.push(marker);
-      });
-
-      // home origin: distinct house-glyph marker — visibly NOT a
-      // numbered stop
-      if (home) {
-        const pin = new PinElement({
-          glyph: "⌂",
-          glyphColor: "#fff",
-          background: "#3a3f4b",
-          borderColor: "#22262e",
-          scale: 1.05,
-        });
-        const marker = new AdvancedMarkerElement({
-          map,
-          position: { lat: home.lat, lng: home.lng },
-          content: pin.element,
-          title: home.label,
-        });
-        marker.addListener("click", () => {
-          info.setContent(
-            `<div style="font-family:sans-serif;font-size:13px;max-width:220px">` +
-              `<strong>${home.label}</strong><br/>starting point</div>`
-          );
-          info.open({ map, anchor: marker });
-        });
-        overlaysRef.current.markers.push(marker);
       }
 
-      // route legs: real geometry when available (straight-line
-      // fallback otherwise); solid = walk, dashed = transit
-      const addLine = (
-        path: google.maps.LatLngLiteral[] | google.maps.LatLng[],
-        mode: "transit" | "walk" | "unknown"
-      ) => {
+      for (const seg of segs) {
+        const path = seg.encoded
+          ? geometry.encoding.decodePath(seg.encoded)
+          : [seg.from, seg.to];
+        const color = seg.live ? LIVE : INK;
         const line =
-          mode === "transit"
-            ? new Polyline({
+          seg.mode === "transit"
+            ? new maps.Polyline({
                 map,
                 path,
                 strokeOpacity: 0,
                 icons: [
                   {
-                    icon: {
-                      path: "M 0,-1 0,1",
-                      strokeOpacity: 1,
-                      strokeColor: STROKE,
-                      strokeWeight: 3,
-                      scale: 3,
-                    },
+                    icon: { path: "M 0,-1 0,1", strokeOpacity: 1, strokeColor: color, strokeWeight: 2.5, scale: 3 },
                     offset: "0",
-                    repeat: "16px",
+                    repeat: "13px",
                   },
                 ],
               })
-            : new Polyline({
-                map,
-                path,
-                strokeColor: STROKE,
-                strokeOpacity: 0.9,
-                strokeWeight: 3,
-              });
-        overlaysRef.current.lines.push(line);
-      };
-
-      // leg 0: home → first stop, same walk/transit styling
-      if (home) {
-        addLine(
-          home.polylineToNext
-            ? encoding.decodePath(home.polylineToNext)
-            : [
-                { lat: home.lat, lng: home.lng },
-                { lat: stops[0].lat, lng: stops[0].lng },
-              ],
-          home.legModeToNext ?? "unknown"
-        );
-      }
-
-      for (let i = 0; i < stops.length - 1; i++) {
-        const encoded = stops[i].polylineToNext;
-        addLine(
-          encoded
-            ? encoding.decodePath(encoded)
-            : [
-                { lat: stops[i].lat, lng: stops[i].lng },
-                { lat: stops[i + 1].lat, lng: stops[i + 1].lng },
-              ],
-          stops[i].legModeToNext ?? "unknown"
-        );
-      }
-
-      if (stops.length === 1 && !home) {
-        map.setCenter({ lat: stops[0].lat, lng: stops[0].lng });
-        map.setZoom(15);
-      } else {
-        const bounds = new google.maps.LatLngBounds();
-        stops.forEach((s) => bounds.extend({ lat: s.lat, lng: s.lng }));
-        if (home) bounds.extend({ lat: home.lat, lng: home.lng });
-        map.fitBounds(bounds, 60);
+            : new maps.Polyline({ map, path, strokeColor: color, strokeOpacity: 0.92, strokeWeight: seg.live ? 3.5 : 2.5 });
+        linesRef.current.push(line);
       }
     })();
-
     return () => {
       cancelled = true;
     };
-  }, [stops, home]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stops, home, ready]);
 
-  if (stops.length === 0) return null;
+  // Fit bounds only when the geography actually changes (initial plan or a
+  // reroute swapping a venue) — NOT on every status tick, which would yank
+  // the view around each time the dev clock moves.
+  const fitKey =
+    stops.map((s) => `${s.lat.toFixed(5)},${s.lng.toFixed(5)}`).join("|") +
+    (home ? `#${home.lat.toFixed(5)},${home.lng.toFixed(5)}` : "");
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const pts: google.maps.LatLngLiteral[] = stops.map((s) => ({ lat: s.lat, lng: s.lng }));
+    if (home) pts.push({ lat: home.lat, lng: home.lng });
+    if (pts.length === 1) {
+      map.setCenter(pts[0]);
+      map.setZoom(15);
+    } else if (pts.length > 1) {
+      const bounds = new google.maps.LatLngBounds();
+      pts.forEach((p) => bounds.extend(p));
+      map.fitBounds(bounds, { top: 130, bottom: 90, left: 80, right: 80 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitKey, ready]);
+
+  const px = (lat: number, lng: number) => {
+    const proj = projRef.current;
+    if (!proj) return null;
+    const p = proj.fromLatLngToContainerPixel(new google.maps.LatLng(lat, lng));
+    return p ? { x: p.x, y: p.y } : null;
+  };
+  const midPx = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) =>
+    px((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
+
+  // transit leg labels pinned to each leg's midpoint (home leg + inter-stop)
+  const legLabels: { key: string; x: number; y: number; text: string }[] = [];
+  if (home && stops[0] && home.legLabel) {
+    const p = midPx(home, stops[0]);
+    if (p) legLabels.push({ key: "home", x: p.x, y: p.y, text: home.legLabel });
+  }
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (stops[i].legLabel) {
+      const p = midPx(stops[i], stops[i + 1]);
+      if (p) legLabels.push({ key: stops[i].category, x: p.x, y: p.y, text: stops[i].legLabel! });
+    }
+  }
+
+  const timeLabel = (s: MapStop) => {
+    if (!s.startTime || !s.endTime) return null;
+    if (s.changed && s.oldStart) {
+      return (
+        <>
+          <span className="old-time">{formatStopTime(s.oldStart)}</span>
+          <span className="new-time">{formatStopTime(s.startTime)}</span>
+        </>
+      );
+    }
+    return formatStopRange(s.startTime, s.endTime);
+  };
+
   return (
-    <div
-      ref={divRef}
-      style={{ height: 400, marginTop: 10, borderRadius: 10, overflow: "hidden" }}
-    />
+    <div className="mapwrap">
+      <div ref={mapDivRef} className="map" aria-label="Map of your evening in Ossington" />
+      <div className="ov-layer">
+        {legLabels.map((l) => (
+          <div key={l.key} className="leglab" style={{ left: l.x, top: l.y }}>
+            {l.text}
+          </div>
+        ))}
+        {home &&
+          (() => {
+            const p = px(home.lat, home.lng);
+            if (!p) return null;
+            return (
+              <div className="mk mk--home" style={{ left: p.x, top: p.y }}>
+                <div className="mk__dot" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M12 3 3 10v11h6v-6h6v6h6V10z" />
+                  </svg>
+                </div>
+                {home.leaveBy && <div className="mk__tag">leave {home.label.replace(/^Home · /, "")} · {home.leaveBy}</div>}
+              </div>
+            );
+          })()}
+
+        {stops.map((s, i) => {
+          const p = px(s.lat, s.lng);
+          if (!p) return null;
+          // Chartreuse marker is reserved for the live "now" stop. A
+          // swap-changed upcoming stop keeps its ink marker (with a subtle
+          // changed ring); its just-changed signal is the settling time /
+          // redrawn route, not a "now" pin.
+          const live = s.status === "active";
+          const changed = !!s.changed;
+          const expanded = selected === s.category;
+          const mkClass =
+            "mk " +
+            (live ? "mk--live" : changed ? "mk--changed" : s.status === "completed" ? "mk--done" : "");
+          // keep the expanded card fully on screen: clamp horizontally and
+          // flip below the pin when it's near the top edge
+          const W = mapDivRef.current?.clientWidth ?? 0;
+          const half = 154;
+          const cardX = W ? Math.min(Math.max(p.x, half), W - half) : p.x;
+          const below = p.y < 190;
+          return (
+            <div key={s.category}>
+              <div className={mkClass} style={{ left: p.x, top: p.y }} aria-hidden="true">
+                <div className="mk__dot" />
+              </div>
+
+              {expanded ? (
+                <div
+                  className={
+                    "ecard" +
+                    (s.blockedReason ? " ecard--blocked" : "") +
+                    (live ? " ecard--live" : "") +
+                    (changed ? " ecard--changed" : "")
+                  }
+                  style={{
+                    left: cardX,
+                    top: p.y,
+                    transform: `translate(-50%, ${below ? "22px" : "calc(-100% - 14px)"})`,
+                  }}
+                  onClick={() => onSelect(s.category)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") onSelect(s.category);
+                  }}
+                >
+                  <div className="ecard__cat">
+                    <span className="eyebrow">{s.category}</span>
+                    {s.status === "active" && <span className="ecard__badge">now</span>}
+                  </div>
+                  {s.blockedReason ? (
+                    <>
+                      <div className="ecard__name">{s.name}</div>
+                      <div className="wx-note">{s.blockedReason}</div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="ecard__name">{s.name}</div>
+                      {(s.startTime || s.oldStart) && (
+                        <div className="ecard__be">be here {timeLabel(s)}</div>
+                      )}
+                      {s.reason && <div className="ecard__reason">{s.reason}</div>}
+                      {s.legLabel && <div className="ecard__meta">{s.legLabel}</div>}
+                    </>
+                  )}
+                </div>
+              ) : (
+                <button
+                  className={
+                    "chip" +
+                    (s.status === "active" ? " chip--live" : "") +
+                    (s.status === "completed" ? " chip--done" : "") +
+                    (s.changed ? " chip--changed" : "")
+                  }
+                  style={{
+                    left: p.x,
+                    top: p.y,
+                    // a changed chip lifts above its neighbours so its
+                    // struck/settled times stay legible
+                    zIndex: s.changed ? 8 : undefined,
+                  }}
+                  onClick={() => onSelect(s.category)}
+                >
+                  <span className="chip__num">{i + 1}</span>
+                  <span className="chip__name">{s.name}</span>
+                  {s.startTime && (
+                    <span className="chip__time">
+                      {s.changed && s.oldStart ? (
+                        <>
+                          <span className="old-time">{formatStopTime(s.oldStart)}</span>
+                          <span className="new-time">{formatStopTime(s.startTime)}</span>
+                        </>
+                      ) : (
+                        formatStopTime(s.startTime)
+                      )}
+                    </span>
+                  )}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }

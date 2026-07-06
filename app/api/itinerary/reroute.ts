@@ -5,7 +5,7 @@
 // THE guarantee: no stop at or before floor_time is ever changed.
 // floor_time = max(now, end of the currently active stop); locked,
 // active, and completed stops are never touched.
-import { Itinerary, ItineraryStop, withStatuses } from "./store";
+import { Itinerary, ItineraryStop, withStatuses, floorTime } from "./store";
 import { filterPools, ParsedPrompt, Place } from "../places/search/filter";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
 import { selectVenues as realSelectVenues, Selection } from "../select/selectVenues";
@@ -107,11 +107,7 @@ export async function rerouteItinerary(
   withStatuses(itinerary, now);
 
   // floor_time = max(now, end of the active stop); no active stop → now.
-  const active = itinerary.stops.find((s) => s.status === "active");
-  const floor =
-    active?.end_time
-      ? new Date(Math.max(now.getTime(), new Date(active.end_time).getTime()))
-      : now;
+  const floor = floorTime(itinerary, now);
 
   // Affected: strictly after the floor AND never locked. Locked /
   // active / completed / skipped stops are untouchable.

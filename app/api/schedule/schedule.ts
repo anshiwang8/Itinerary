@@ -83,7 +83,7 @@ export type StartResolution =
   | { ok: false; reason: string };
 
 export const IMPLAUSIBLE_TIME_MESSAGE =
-  "couldn't find a sensible time — try adding one (e.g. 'dinner at 7pm')";
+  "Couldn't find a sensible time for this — add one, like “dinner at 7pm”.";
 
 /**
  * resolveStartTime + the fail-loud plausibility check. Explicit clock
@@ -117,7 +117,7 @@ export function resolveStartTimeChecked(
 // NOTE: date components are built with server-local Date math; the
 // prototype assumes the server runs in America/Toronto (true for local
 // dev). The offset in the ISO output is computed properly per-date.
-function toTorontoISO(d: Date): string {
+export function toTorontoISO(d: Date): string {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat("en-CA", {
       timeZone: "America/Toronto",
