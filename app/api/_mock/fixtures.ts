@@ -1,0 +1,335 @@
+// E2E fixture layer — deterministic stand-ins for the live APIs, active
+// only when the server runs with E2E_MOCK=1. A SEAM, not a rewrite: the
+// objective filter, scheduling, floor guards, and resettle ladder all run
+// for real; only the DATA SOURCES (Groq parse/select/interpret, Places
+// search, Routes legs, Weather) are swapped — same discipline as
+// isUsableAt. Real routes stay the default.
+//
+// The pools are deliberately varied so real scenarios are exercisable:
+//  - prices from $ to $$$ (a "cheaper" swap has somewhere to land — the
+//    top-rated dinner is EXPENSIVE, so budget requests change the pick)
+//  - hours from early-closing to overnight (time/duration swaps can hit
+//    open vs closed; the early closers make the adapt path fire)
+//  - three named categories (dinner / drinks / dessert) + a generated
+//    generic pool for anything else
+import type { ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
+import { isOpenAt, CurrentOpeningHours } from "../places/search/hours";
+import type { LatLng, TravelLeg } from "../schedule/travel";
+import type { Selection } from "../select/selectVenues";
+import type {
+  SwapDeps,
+  SwapIntent,
+  TimeShift,
+  DurationShift,
+} from "../itinerary/swap";
+import type { RerouteDeps } from "../itinerary/reroute";
+
+export function isMockMode(): boolean {
+  return process.env.E2E_MOCK === "1";
+}
+
+// ── hours: identical every day; closeH <= openH wraps past midnight ──
+function daily(openH: number, closeH: number): CurrentOpeningHours {
+  const periods = [];
+  for (let day = 0; day < 7; day++) {
+    periods.push({
+      open: { day, hour: openH, minute: 0 },
+      close: {
+        day: closeH <= openH ? (day + 1) % 7 : day,
+        hour: closeH % 24,
+        minute: 0,
+      },
+    });
+  }
+  return { periods };
+}
+
+function venue(
+  id: string,
+  name: string,
+  lat: number,
+  lng: number,
+  rating: number,
+  priceLevel: string,
+  openH: number,
+  closeH: number
+): Place {
+  return {
+    id,
+    displayName: { text: name },
+    location: { latitude: lat, longitude: lng },
+    rating,
+    priceLevel,
+    currentOpeningHours: daily(openH, closeH),
+    businessStatus: "OPERATIONAL",
+  };
+}
+
+// ── the fixture pools (Ossington-strip coordinates) ──
+const DINNER: Place[] = [
+  // top-rated but EXPENSIVE → the default pick; "cheaper" must beat it
+  venue("fx_dinner_velvet", "Velvet Fig", 43.6491, -79.4203, 4.8, "PRICE_LEVEL_EXPENSIVE", 17, 23),
+  venue("fx_dinner_corner", "The Corner Table", 43.6478, -79.4194, 4.5, "PRICE_LEVEL_MODERATE", 17, 23),
+  venue("fx_dinner_noodle", "Noodle Letterpress", 43.6502, -79.4211, 4.3, "PRICE_LEVEL_INEXPENSIVE", 11, 22),
+  // closes at 8 PM → late dinners drop it / adapt away from it
+  venue("fx_dinner_early", "Early Bird Diner", 43.6468, -79.4186, 4.1, "PRICE_LEVEL_INEXPENSIVE", 8, 20),
+];
+const BAR: Place[] = [
+  // top-rated but closes 10 PM → pushing drinks later fires the adapt path
+  venue("fx_bar_curfew", "Ten O'Clock Curfew", 43.6485, -79.4199, 4.7, "PRICE_LEVEL_EXPENSIVE", 16, 22),
+  venue("fx_bar_standing", "The Standing Room", 43.6495, -79.4207, 4.6, "PRICE_LEVEL_MODERATE", 17, 2),
+  venue("fx_bar_lantern", "Paper Lantern", 43.6473, -79.419, 4.4, "PRICE_LEVEL_INEXPENSIVE", 18, 2),
+];
+const DESSERT: Place[] = [
+  // closes 9 PM — THE adapt trigger for late-shifted evenings
+  venue("fx_dessert_sundown", "Sundown Scoops", 43.6488, -79.4197, 4.5, "PRICE_LEVEL_INEXPENSIVE", 12, 21),
+  venue("fx_dessert_midnight", "Midnight Flour", 43.6497, -79.4209, 4.4, "PRICE_LEVEL_MODERATE", 10, 1),
+  venue("fx_dessert_glace", "Glacé Counter", 43.647, -79.4188, 4.2, "PRICE_LEVEL_INEXPENSIVE", 12, 23),
+];
+
+const POOL_RULES: Array<[RegExp, Place[]]> = [
+  [/dessert|ice\s*cream|gelato|sweet|bakery|cake/i, DESSERT],
+  [/drink|bar|cocktail|pub|brewery|wine|lounge|club/i, BAR],
+  [/dinner|restaurant|dining|food|eat|ramen|sushi|pizza|taco|lunch|brunch/i, DINNER],
+];
+
+// unknown categories still get a small deterministic pool
+const genericCache = new Map<string, Place[]>();
+function genericPool(category: string): Place[] {
+  const cached = genericCache.get(category);
+  if (cached) return cached;
+  const slug = category.replace(/\W+/g, "_").toLowerCase();
+  const label = category.charAt(0).toUpperCase() + category.slice(1);
+  const pool = [
+    venue(`fx_${slug}_one`, `Fixture ${label} One`, 43.6493, -79.4201, 4.4, "PRICE_LEVEL_MODERATE", 10, 23),
+    venue(`fx_${slug}_two`, `Fixture ${label} Two`, 43.6481, -79.4192, 4.2, "PRICE_LEVEL_INEXPENSIVE", 10, 23),
+    venue(`fx_${slug}_three`, `Fixture ${label} Three`, 43.6505, -79.4214, 4.0, "PRICE_LEVEL_INEXPENSIVE", 10, 23),
+  ];
+  genericCache.set(category, pool);
+  return pool;
+}
+
+export function poolFor(category: string): Place[] {
+  for (const [pattern, pool] of POOL_RULES) {
+    if (pattern.test(category)) return pool;
+  }
+  return genericPool(category);
+}
+
+/** Mirror of searchPools: one pool per category, "general" when none. */
+export function mockPools(categories: string[]): Record<string, Place[]> {
+  const cats = categories.filter((c) => typeof c === "string" && c.trim() !== "");
+  if (cats.length === 0) return { general: genericPool("general") };
+  return Object.fromEntries(cats.map((c) => [c, poolFor(c)]));
+}
+
+// ── parse: keyword scan, deterministic, schema-complete ──
+export function mockParse(prompt: string): ParsedPrompt {
+  const p = prompt.toLowerCase();
+  const signals: string[] = [];
+  if (/dinner|restaurant|ramen|sushi|food|eat/.test(p)) signals.push("dinner");
+  if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
+  if (/dessert|ice\s*cream|gelato/.test(p)) signals.push("dessert");
+  if (/coffee|caf[eé]/.test(p)) signals.push("coffee");
+  if (signals.length === 0) signals.push("dinner", "drinks");
+
+  const clock = p.match(/\d{1,2}(?::\d{2})?\s*(?:am|pm)/);
+  const time_window = clock
+    ? clock[0]
+    : /tonight/.test(p)
+    ? "tonight"
+    : /evening/.test(p)
+    ? "evening"
+    : "unspecified";
+
+  const constraints: string[] = [];
+  if (/patio/.test(p)) constraints.push("patio");
+  if (/vegan/.test(p)) constraints.push("vegan");
+
+  return {
+    time_window,
+    stop_count: null,
+    aesthetic: "unspecified",
+    category_signals: signals,
+    group_context: "unspecified",
+    budget: /cheap|budget/.test(p) ? "cheap" : null,
+    constraints,
+    location: "Ossington",
+  };
+}
+
+// ── select: highest-rated wins; a stated cheap budget prefers non-$$$ ──
+export function mockSelect(
+  parsed: ParsedPrompt,
+  poolsIn: Record<string, Place[]>
+): Selection[] {
+  const cheap = /cheap|budget/i.test(parsed.budget ?? "");
+  const out: Selection[] = [];
+  for (const [category, places] of Object.entries(poolsIn)) {
+    if (category.startsWith("_") || !Array.isArray(places)) continue;
+    if (places.length === 0) {
+      out.push({ category, id: null, reason: "no venues survived filtering" });
+      continue;
+    }
+    const ranked = [...places].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+    const pick = cheap
+      ? ranked.find(
+          (v) =>
+            v.priceLevel !== "PRICE_LEVEL_EXPENSIVE" &&
+            v.priceLevel !== "PRICE_LEVEL_VERY_EXPENSIVE"
+        ) ?? ranked[0]
+      : ranked[0];
+    out.push({
+      category,
+      id: pick.id,
+      reason: `A reliable ${category} spot that suits the evening.`,
+      name: pick.displayName?.text,
+      rating: pick.rating,
+    });
+  }
+  return out;
+}
+
+// ── travel: distance-derived, deterministic. Short hops walk; the
+// cross-town home leg comes out transit with a named fixture line. ──
+function haversineKm(a: LatLng, b: LatLng): number {
+  const R = 6371;
+  const dLat = ((b.latitude - a.latitude) * Math.PI) / 180;
+  const dLng = ((b.longitude - a.longitude) * Math.PI) / 180;
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((a.latitude * Math.PI) / 180) *
+      Math.cos((b.latitude * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+export function mockLeg(
+  fromIndex: number,
+  from: LatLng,
+  to: LatLng,
+  excludeTransit = false
+): TravelLeg {
+  const km = haversineKm(from, to);
+  const distanceMeters = Math.round(km * 1000);
+  const walkMin = Math.max(3, Math.round(km * 13));
+  if (excludeTransit || km < 1.0) {
+    return {
+      fromIndex,
+      mode: "walk",
+      rawMinutes: walkMin,
+      marginMinutes: 0,
+      totalMinutes: walkMin,
+      distanceMeters,
+      encodedPolyline: null,
+    };
+  }
+  const raw = Math.max(8, Math.round(km * 4));
+  return {
+    fromIndex,
+    mode: "transit",
+    rawMinutes: raw,
+    marginMinutes: 5,
+    totalMinutes: raw + 5,
+    distanceMeters,
+    encodedPolyline: null,
+    transit: {
+      lineName: "505 Fixture",
+      headsign: "Mockbound",
+      stopCount: Math.max(2, Math.round(km * 3)),
+      departStop: "Fixture St at Mock Ave",
+      arriveStop: "Ossington Stand-In",
+    },
+  };
+}
+
+export function mockTravelLegs(points: LatLng[]): TravelLeg[] {
+  if (points.length < 2) return [];
+  return points.slice(0, -1).map((from, i) => mockLeg(i, from, points[i + 1]));
+}
+
+// ── weather: 24 calm hours from now. To exercise the weather gate in a
+// scenario, raise precipProbability above 50 for the plan's target hour. ──
+export function mockWeather(): WeatherHour[] {
+  const start = new Date();
+  start.setMinutes(0, 0, 0);
+  return Array.from({ length: 24 }, (_, i) => ({
+    hourISO: new Date(start.getTime() + i * 3_600_000).toISOString(),
+    tempC: 20,
+    precipProbability: 10,
+    condition: "Clear",
+  }));
+}
+
+// ── availability seam, mock flavor: stored stops carry no hours, so look
+// the venue up in the fixture registry by id (exactly what a real
+// availability API would do). Unknown id → keep-on-missing. ──
+function fixtureHoursById(id: string): CurrentOpeningHours | undefined {
+  const all = [
+    ...DINNER,
+    ...BAR,
+    ...DESSERT,
+    ...Array.from(genericCache.values()).flat(),
+  ];
+  return all.find((v) => v.id === id)?.currentOpeningHours;
+}
+
+export function mockIsUsableAt(place: Place, when: Date): boolean {
+  const hours = place.currentOpeningHours ?? fixtureHoursById(place.id);
+  return (
+    isOpenAt(hours, {
+      day: when.getDay(),
+      hour: when.getHours(),
+      minute: when.getMinutes(),
+    }) !== false
+  );
+}
+
+// ── engine deps. The deterministic time/duration parsers are injected by
+// swap.ts (they live there; injecting avoids a runtime import cycle). ──
+export function mockSwapDeps(
+  parseTime: (s: string) => TimeShift | null,
+  parseDuration: (s: string) => DurationShift | null
+): SwapDeps {
+  return {
+    interpret: async (parsed, category, _startISO, refinement) => {
+      const duration = parseDuration(refinement);
+      const time = duration ? null : parseTime(refinement);
+      const constraintish = /patio|outdoor|rooftop|terrace|near /i.test(refinement);
+      const cheap = /cheap|budget/i.test(refinement);
+      const intent: SwapIntent = duration
+        ? "duration"
+        : time
+        ? "time"
+        : constraintish
+        ? "constraint"
+        : "venue";
+      return {
+        intent,
+        path: constraintish ? "research" : "refilter",
+        category,
+        aesthetic: parsed.aesthetic,
+        budget: cheap ? "cheap" : parsed.budget,
+        constraints: constraintish
+          ? [...(parsed.constraints ?? []), refinement.trim()]
+          : parsed.constraints ?? [],
+        time,
+        duration,
+      };
+    },
+    searchPools: async (_parsed, categories) => mockPools(categories),
+    selectVenues: async (parsed, pools) => mockSelect(parsed, pools),
+    getSingleLeg: async (origin, destination, fromIndex, _departureTime, excludeTransit) =>
+      mockLeg(fromIndex, origin, destination, excludeTransit),
+    isUsableAt: mockIsUsableAt,
+  };
+}
+
+export function mockRerouteDeps(): RerouteDeps {
+  return {
+    searchPools: async (_parsed, categories) => mockPools(categories),
+    selectVenues: async (parsed, pools) => mockSelect(parsed, pools),
+    getSingleLeg: async (origin, destination, fromIndex, _departureTime, excludeTransit) =>
+      mockLeg(fromIndex, origin, destination, excludeTransit),
+  };
+}

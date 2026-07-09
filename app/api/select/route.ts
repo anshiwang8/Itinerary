@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ParsedPrompt, Place } from "../places/search/filter";
 import { SelectParseError, selectVenues } from "./selectVenues";
+import { isMockMode, mockSelect } from "../_mock/fixtures";
 
 // Thin wrapper over selectVenues (shared with the reroute engine).
 export async function POST(request: NextRequest) {
   const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
+  if (!apiKey && !isMockMode()) {
     return NextResponse.json({ error: "GROQ_API_KEY is not set." }, { status: 500 });
   }
 
@@ -26,7 +27,11 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const selections = await selectVenues(apiKey, parsed, poolsIn);
+    // fixture seam: deterministic highest-rated pick, no Groq call
+    if (isMockMode()) {
+      return NextResponse.json({ selections: mockSelect(parsed, poolsIn) });
+    }
+    const selections = await selectVenues(apiKey!, parsed, poolsIn);
     return NextResponse.json({ selections });
   } catch (err) {
     if (err instanceof SelectParseError) {

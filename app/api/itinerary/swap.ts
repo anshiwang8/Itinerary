@@ -28,6 +28,7 @@ import {
   TravelLeg,
 } from "../schedule/travel";
 import { HOME, HOME_LEG_INDEX } from "../schedule/home";
+import { isMockMode, mockSwapDeps } from "../_mock/fixtures";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "llama-3.3-70b-versatile";
@@ -324,6 +325,8 @@ async function interpretRefinement(
 }
 
 function realDeps(): SwapDeps {
+  // e2e fixture seam — deterministic interpret/search/select/legs/hours
+  if (isMockMode()) return mockSwapDeps(parseTimeExpr, parseDurationExpr);
   return {
     interpret: (parsed, category, currentStartISO, refinement) =>
       interpretRefinement(process.env.GROQ_API_KEY ?? "", parsed, category, currentStartISO, refinement),

@@ -15,6 +15,7 @@ import {
   LatLng,
   TravelLeg,
 } from "../schedule/travel";
+import { isMockMode, mockRerouteDeps } from "../_mock/fixtures";
 
 export interface Disruption {
   type: "transit_cancelled";
@@ -59,6 +60,8 @@ export interface RerouteDeps {
 }
 
 function realDeps(): RerouteDeps {
+  // e2e fixture seam — deterministic search/select/legs
+  if (isMockMode()) return mockRerouteDeps();
   return {
     searchPools: (parsed, categories) =>
       realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories),

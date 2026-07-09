@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { filterPools, ParsedPrompt, WeatherHour } from "./filter";
 import { searchPools } from "./searchPlaces";
+import { isMockMode, mockPools } from "../../_mock/fixtures";
 
 // Places API (New) — Text Search, driven by the parsed prompt from
 // /api/parse. Search core lives in searchPlaces.ts (shared with the
@@ -8,7 +9,7 @@ import { searchPools } from "./searchPlaces";
 // response. No LLM selection here.
 export async function POST(request: NextRequest) {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-  if (!apiKey) {
+  if (!apiKey && !isMockMode()) {
     return NextResponse.json(
       { error: "GOOGLE_PLACES_API_KEY is not set." },
       { status: 500 }
@@ -36,7 +37,11 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const rawPools = await searchPools(apiKey, parsed);
+    // fixture seam: swap the DATA SOURCE only — the objective filter
+    // below still runs for real over the fixture pools
+    const rawPools = isMockMode()
+      ? mockPools(parsed.category_signals ?? [])
+      : await searchPools(apiKey!, parsed);
     const { pools, dropLog, weatherBlocked } = filterPools(
       rawPools,
       parsed,

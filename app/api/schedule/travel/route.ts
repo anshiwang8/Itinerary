@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTravelLegs, LatLng } from "../travel";
+import { isMockMode, mockTravelLegs } from "../../_mock/fixtures";
 
 // POST { points: LatLng[], departureTime?: string } → { legs: TravelLeg[] }
 export async function POST(request: NextRequest) {
   const apiKey = process.env.GOOGLE_ROUTES_API_KEY;
-  if (!apiKey) {
+  if (!apiKey && !isMockMode()) {
     return NextResponse.json(
       { error: "GOOGLE_ROUTES_API_KEY is not set." },
       { status: 500 }
@@ -36,7 +37,11 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const legs = await getTravelLegs(apiKey, points, departureTime);
+    // fixture seam: deterministic distance-derived legs, no Routes call
+    if (isMockMode()) {
+      return NextResponse.json({ legs: mockTravelLegs(points) });
+    }
+    const legs = await getTravelLegs(apiKey!, points, departureTime);
     return NextResponse.json({ legs });
   } catch (err) {
     return NextResponse.json(

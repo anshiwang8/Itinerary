@@ -1,0 +1,79 @@
+// Shared e2e helpers. Two jobs:
+//  - planEvening: run the real pipeline from the empty state and land on
+//    the map stage (or fail fast with the app's own error text).
+//  - expectStripMatchesPin: THE desync check — a stop's start time on its
+//    strip card must equal the time on its map pin. The strip renders from
+//    React state, the pin from the map overlay; if the store, strip, and
+//    map ever disagree, this is where it shows.
+import { expect, Locator, Page } from "@playwright/test";
+
+/**
+ * Type a prompt into the empty state, plan it, and wait for the itinerary
+ * to render (strip + map pins). Live pipeline — allow up to ~90s.
+ * Throws with the interface's own message if the pipeline fails loud.
+ */
+export async function planEvening(page: Page, prompt: string): Promise<void> {
+  await page.goto("/");
+  await page.locator(".prompt__input").fill(prompt);
+  await page.locator(".prompt__go").click();
+
+  // success renders the strip; failure renders an error block — wait for
+  // whichever comes first so failures are fast and carry the real reason
+  await expect(page.locator(".lstrip, .empty__err, .stage__err").first()).toBeVisible({
+    timeout: 90_000,
+  });
+  const err = page.locator(".empty__err, .stage__err").first();
+  if (await err.isVisible()) {
+    throw new Error(`pipeline failed: ${(await err.innerText()).trim()}`);
+  }
+
+  // map pins appear once the Maps JS projection is live
+  await expect(page.locator(".chip").first()).toBeVisible({ timeout: 30_000 });
+}
+
+/** The strip card whose venue name contains `venueName`. */
+export function stripCard(page: Page, venueName: string): Locator {
+  return page.locator(".lstrip__stop", {
+    has: page.locator(".lstrip__name", { hasText: venueName }),
+  });
+}
+
+/** The map pin chip whose venue name contains `venueName`. */
+export function mapPin(page: Page, venueName: string): Locator {
+  return page.locator(".chip", {
+    has: page.locator(".chip__name", { hasText: venueName }),
+  });
+}
+
+// Effective start-time label of a card/pin. Both surfaces render the start
+// through formatStopTime (date prefix included), so the labels must be
+// string-identical. After a swap/reroute both show old struck + new settled
+// times — the settled `.new-time` is the effective one on both sides.
+async function startLabel(scope: Locator, kind: "strip" | "pin"): Promise<string> {
+  const settled = scope.locator(".new-time");
+  if ((await settled.count()) > 0) return (await settled.innerText()).trim();
+
+  if (kind === "pin") return (await scope.locator(".chip__time").innerText()).trim();
+
+  // strip: "be here 8:29 PM – 10:14 PM" (or "be here tomorrow, 8:29 PM – …")
+  const text = (await scope.locator(".lstrip__be").innerText()).trim();
+  const m = text.match(/^be here\s+(.+?)\s+–/);
+  if (!m) throw new Error(`couldn't parse a start time from strip text "${text}"`);
+  return m[1];
+}
+
+/**
+ * Assert a stop's start time in the strip card matches its map pin.
+ * Reuse this after every mutation (swap, reroute, time travel) — it's the
+ * strip/map/store agreement check.
+ */
+export async function expectStripMatchesPin(page: Page, venueName: string): Promise<void> {
+  const card = stripCard(page, venueName);
+  const pin = mapPin(page, venueName);
+  await expect(card, `strip card for "${venueName}"`).toBeVisible();
+  await expect(pin, `map pin for "${venueName}"`).toBeVisible();
+
+  const stripStart = await startLabel(card, "strip");
+  const pinStart = await startLabel(pin, "pin");
+  expect(pinStart, `map pin time for "${venueName}" desynced from its strip card`).toBe(stripStart);
+}

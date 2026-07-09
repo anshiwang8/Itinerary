@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isMockMode, mockParse } from "../_mock/fixtures";
 
 // Standalone LLM parse step: natural-language prompt → structured plan
 // parameters. Not connected to Places yet — this route only proves Groq
@@ -22,14 +23,6 @@ Respond with ONLY a single JSON object. No prose, no explanations, no markdown f
 }`;
 
 export async function POST(request: NextRequest) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "GROQ_API_KEY is not set." },
-      { status: 500 }
-    );
-  }
-
   let prompt: string;
   try {
     const body = await request.json();
@@ -44,6 +37,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "`prompt` (non-empty string) is required in the body." },
       { status: 400 }
+    );
+  }
+
+  // e2e fixture seam — deterministic parse, no Groq call, no key needed
+  if (isMockMode()) return NextResponse.json(mockParse(prompt));
+
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: "GROQ_API_KEY is not set." },
+      { status: 500 }
     );
   }
 
