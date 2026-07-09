@@ -52,7 +52,8 @@ function venue(
   rating: number,
   priceLevel: string,
   openH: number,
-  closeH: number
+  closeH: number,
+  desc: string
 ): Place {
   return {
     id,
@@ -62,29 +63,43 @@ function venue(
     priceLevel,
     currentOpeningHours: daily(openH, closeH),
     businessStatus: "OPERATIONAL",
+    editorialSummary: { text: desc },
   };
 }
 
-// ── the fixture pools (Ossington-strip coordinates) ──
+// ── the fixture pools (Ossington-strip coordinates). Descriptions double
+// as constraint evidence for mockSelect: "vegan" lives on Noodle
+// Letterpress, "patio" on The Standing Room — everything else fails those
+// constraints, deterministically. ──
 const DINNER: Place[] = [
   // top-rated but EXPENSIVE → the default pick; "cheaper" must beat it
-  venue("fx_dinner_velvet", "Velvet Fig", 43.6491, -79.4203, 4.8, "PRICE_LEVEL_EXPENSIVE", 17, 23),
-  venue("fx_dinner_corner", "The Corner Table", 43.6478, -79.4194, 4.5, "PRICE_LEVEL_MODERATE", 17, 23),
-  venue("fx_dinner_noodle", "Noodle Letterpress", 43.6502, -79.4211, 4.3, "PRICE_LEVEL_INEXPENSIVE", 11, 22),
+  venue("fx_dinner_velvet", "Velvet Fig", 43.6491, -79.4203, 4.8, "PRICE_LEVEL_EXPENSIVE", 17, 23,
+    "Dim-lit modern bistro known for fig-glazed duck and a serious wine list."),
+  venue("fx_dinner_corner", "The Corner Table", 43.6478, -79.4194, 4.5, "PRICE_LEVEL_MODERATE", 17, 23,
+    "Neighbourhood standby doing honest plates and warm service."),
+  venue("fx_dinner_noodle", "Noodle Letterpress", 43.6502, -79.4211, 4.3, "PRICE_LEVEL_INEXPENSIVE", 11, 22,
+    "Hand-pulled noodle counter with a deep vegan menu."),
   // closes at 8 PM → late dinners drop it / adapt away from it
-  venue("fx_dinner_early", "Early Bird Diner", 43.6468, -79.4186, 4.1, "PRICE_LEVEL_INEXPENSIVE", 8, 20),
+  venue("fx_dinner_early", "Early Bird Diner", 43.6468, -79.4186, 4.1, "PRICE_LEVEL_INEXPENSIVE", 8, 20,
+    "Sunny all-day diner that packs it in early."),
 ];
 const BAR: Place[] = [
   // top-rated but closes 10 PM → pushing drinks later fires the adapt path
-  venue("fx_bar_curfew", "Ten O'Clock Curfew", 43.6485, -79.4199, 4.7, "PRICE_LEVEL_EXPENSIVE", 16, 22),
-  venue("fx_bar_standing", "The Standing Room", 43.6495, -79.4207, 4.6, "PRICE_LEVEL_MODERATE", 17, 2),
-  venue("fx_bar_lantern", "Paper Lantern", 43.6473, -79.419, 4.4, "PRICE_LEVEL_INEXPENSIVE", 18, 2),
+  venue("fx_bar_curfew", "Ten O'Clock Curfew", 43.6485, -79.4199, 4.7, "PRICE_LEVEL_EXPENSIVE", 16, 22,
+    "Cocktail room with strict hours and stricter pours."),
+  venue("fx_bar_standing", "The Standing Room", 43.6495, -79.4207, 4.6, "PRICE_LEVEL_MODERATE", 17, 2,
+    "Snug standing bar with a lantern-lit patio out back."),
+  venue("fx_bar_lantern", "Paper Lantern", 43.6473, -79.419, 4.4, "PRICE_LEVEL_INEXPENSIVE", 18, 2,
+    "Cheap-and-cheerful late-night bar under red lanterns."),
 ];
 const DESSERT: Place[] = [
   // closes 9 PM — THE adapt trigger for late-shifted evenings
-  venue("fx_dessert_sundown", "Sundown Scoops", 43.6488, -79.4197, 4.5, "PRICE_LEVEL_INEXPENSIVE", 12, 21),
-  venue("fx_dessert_midnight", "Midnight Flour", 43.6497, -79.4209, 4.4, "PRICE_LEVEL_MODERATE", 10, 1),
-  venue("fx_dessert_glace", "Glacé Counter", 43.647, -79.4188, 4.2, "PRICE_LEVEL_INEXPENSIVE", 12, 23),
+  venue("fx_dessert_sundown", "Sundown Scoops", 43.6488, -79.4197, 4.5, "PRICE_LEVEL_INEXPENSIVE", 12, 21,
+    "Small-batch scoops, gone by sundown."),
+  venue("fx_dessert_midnight", "Midnight Flour", 43.6497, -79.4209, 4.4, "PRICE_LEVEL_MODERATE", 10, 1,
+    "Late-night bakery for the after-dinner crowd."),
+  venue("fx_dessert_glace", "Glacé Counter", 43.647, -79.4188, 4.2, "PRICE_LEVEL_INEXPENSIVE", 12, 23,
+    "French-leaning ice cream counter on the strip."),
 ];
 
 const POOL_RULES: Array<[RegExp, Place[]]> = [
@@ -101,9 +116,12 @@ function genericPool(category: string): Place[] {
   const slug = category.replace(/\W+/g, "_").toLowerCase();
   const label = category.charAt(0).toUpperCase() + category.slice(1);
   const pool = [
-    venue(`fx_${slug}_one`, `Fixture ${label} One`, 43.6493, -79.4201, 4.4, "PRICE_LEVEL_MODERATE", 10, 23),
-    venue(`fx_${slug}_two`, `Fixture ${label} Two`, 43.6481, -79.4192, 4.2, "PRICE_LEVEL_INEXPENSIVE", 10, 23),
-    venue(`fx_${slug}_three`, `Fixture ${label} Three`, 43.6505, -79.4214, 4.0, "PRICE_LEVEL_INEXPENSIVE", 10, 23),
+    venue(`fx_${slug}_one`, `Fixture ${label} One`, 43.6493, -79.4201, 4.4, "PRICE_LEVEL_MODERATE", 10, 23,
+      `A dependable ${category} option on the strip.`),
+    venue(`fx_${slug}_two`, `Fixture ${label} Two`, 43.6481, -79.4192, 4.2, "PRICE_LEVEL_INEXPENSIVE", 10, 23,
+      `A budget-friendly ${category} pick nearby.`),
+    venue(`fx_${slug}_three`, `Fixture ${label} Three`, 43.6505, -79.4214, 4.0, "PRICE_LEVEL_INEXPENSIVE", 10, 23,
+      `A quieter ${category} fallback around the corner.`),
   ];
   genericCache.set(category, pool);
   return pool;
@@ -123,15 +141,18 @@ export function mockPools(categories: string[]): Record<string, Place[]> {
   return Object.fromEntries(cats.map((c) => [c, poolFor(c)]));
 }
 
-// ── parse: keyword scan, deterministic, schema-complete ──
+// ── parse: keyword scan, deterministic, schema-complete. Nothing
+// recognized → the all-unspecified signature (what the real model returns
+// for nonsense), so the unparseable guard is exercisable in mock mode. ──
 export function mockParse(prompt: string): ParsedPrompt {
   const p = prompt.toLowerCase();
   const signals: string[] = [];
+  if (/brunch/.test(p)) signals.push("brunch");
+  if (/steak/.test(p)) signals.push("steakhouse");
   if (/dinner|restaurant|ramen|sushi|food|eat/.test(p)) signals.push("dinner");
   if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
   if (/dessert|ice\s*cream|gelato/.test(p)) signals.push("dessert");
   if (/coffee|caf[eé]/.test(p)) signals.push("coffee");
-  if (signals.length === 0) signals.push("dinner", "drinks");
 
   const clock = p.match(/\d{1,2}(?::\d{2})?\s*(?:am|pm)/);
   const time_window = clock
@@ -149,7 +170,7 @@ export function mockParse(prompt: string): ParsedPrompt {
   return {
     time_window,
     stop_count: null,
-    aesthetic: "unspecified",
+    aesthetic: /fancy|upscale|fine dining/.test(p) ? "fancy" : "unspecified",
     category_signals: signals,
     group_context: "unspecified",
     budget: /cheap|budget/.test(p) ? "cheap" : null,
@@ -158,12 +179,24 @@ export function mockParse(prompt: string): ParsedPrompt {
   };
 }
 
-// ── select: highest-rated wins; a stated cheap budget prefers non-$$$ ──
+// ── select: highest-rated wins; a stated cheap budget prefers non-$$$.
+// Hard constraints mirror the real contract: a candidate meets one only
+// when its name/description evidences it; none do → id:null +
+// unmetConstraint, never a hedged pick. ──
+function meetsConstraint(place: Place, constraint: string): boolean {
+  const hay = `${place.displayName?.text ?? ""} ${place.editorialSummary?.text ?? ""}`.toLowerCase();
+  const tokens = constraint.toLowerCase().split(/\W+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every((t) => hay.includes(t));
+}
+
 export function mockSelect(
   parsed: ParsedPrompt,
   poolsIn: Record<string, Place[]>
 ): Selection[] {
   const cheap = /cheap|budget/i.test(parsed.budget ?? "");
+  const constraints = (parsed.constraints ?? []).filter(
+    (c) => typeof c === "string" && c.trim() !== ""
+  );
   const out: Selection[] = [];
   for (const [category, places] of Object.entries(poolsIn)) {
     if (category.startsWith("_") || !Array.isArray(places)) continue;
@@ -171,7 +204,21 @@ export function mockSelect(
       out.push({ category, id: null, reason: "no venues survived filtering" });
       continue;
     }
-    const ranked = [...places].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+    let pool = places;
+    if (constraints.length > 0) {
+      const unmet = constraints.find((c) => !places.some((p) => meetsConstraint(p, c)));
+      if (unmet) {
+        out.push({
+          category,
+          id: null,
+          reason: `no ${category} candidate actually meets "${unmet}"`,
+          unmetConstraint: unmet,
+        });
+        continue;
+      }
+      pool = places.filter((p) => constraints.every((c) => meetsConstraint(p, c)));
+    }
+    const ranked = [...pool].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
     const pick = cheap
       ? ranked.find(
           (v) =>
@@ -185,6 +232,8 @@ export function mockSelect(
       reason: `A reliable ${category} spot that suits the evening.`,
       name: pick.displayName?.text,
       rating: pick.rating,
+      priceLevel: pick.priceLevel,
+      description: pick.editorialSummary?.text,
     });
   }
   return out;

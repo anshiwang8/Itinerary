@@ -38,11 +38,10 @@ The replan reuses the real pipeline via `searchPlaces.ts` and `selectVenues.ts` 
 Maintain the devlog. Every feature/fix lands as an entry: type label, then Goal / What should be done / What was done (technical) — each on its own line, plain English keeping technical terms.
 
 ## Currently in progress
-All three swap types (venue / time / duration) are SHIPPED and verified — engine, tests, and live runs. Current work, from manual testing:
-- **4 bugs**: (1) invalid-input fail-loud surface, (2) gibberish error message, (3) constraint enforcement, (4) price display refresh.
-- **2 UI items**: swap input spaces, venue description on the stop card.
-- Then: Playwright scenario tests covering those fixes, built on the mock fixtures (`E2E_MOCK`, `app/api/_mock/fixtures.ts`).
-GTFS remains deferred.
+The 4 manual-testing bugs (fail-loud surface, gibberish message, constraint enforcement, price refresh) and 2 UI items (swap input spaces, venue description) are SHIPPED and live-verified. Current work: **Playwright scenario tests** covering those fixes, on the mock fixtures — the deterministic triggers per scenario are listed in `e2e/README.md` ("Fail-loud guards" section). GTFS remains deferred.
+
+## Fail-loud surface (operational notes)
+`app/lib/planGuards.ts` is THE surface for bad input — every degenerate/impossible/contradictory prompt must land there (or in `resolveStartTimeChecked`'s band messages) with a reason + suggested fix; an empty map or a borrowed error from another branch is the bug. Guard order in `runPipeline`: degenerate prompt (pre-Groq) → unparseable parse → contradiction → time band → all-pools-empty net → unmet constraint. Constraints are enforced in `selectVenues`: no evidenced candidate → `id:null + unmet_constraint` (valid, no fallback), and a code-side hedge guard converts "worth confirming / may accommodate" picks into the same failure — never suggest a venue while telling the user to verify a constraint. `priceLevel` + `description` ride ON the stop (Selection → SelectionLike → ItineraryStop, set by swap's buildStop/finalize too); the strip must read the stop's own fields before any pools lookup, which goes stale after swaps.
 
 ## Shipped — swap engine (operational notes)
 Per-stop swap (`app/api/itinerary/swap.ts`, `POST /api/itinerary/[id]/swap`): user taps an UPCOMING stop, types a complaint, the engine acts on intent — VENUE (replace, hold slot), TIME (move the slot), DURATION (change how long), or CONSTRAINT (re-search). Distinct from reroute (external disruption → downstream replan). `floorTime()` shared from `store.ts` by both engines.

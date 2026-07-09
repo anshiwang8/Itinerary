@@ -28,6 +28,8 @@ export interface StripStop {
   end: string | null;
   rating?: number | null;
   price?: string | null;
+  /** one-line venue blurb (Places editorialSummary) */
+  description?: string | null;
   reason?: string | null;
   status?: "upcoming" | "active" | "completed" | "skipped";
   changed?: boolean;
@@ -134,6 +136,9 @@ function StopCard({
       aria-pressed={selected}
       onClick={onSelect}
       onKeyDown={(e) => {
+        // only keys aimed at the card itself — the inline swap input lives
+        // inside this "button", and preventDefault here would eat its spaces
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onSelect();
@@ -162,6 +167,7 @@ function StopCard({
         {stop.rating != null && <span className="lstrip__rating">{stop.rating.toFixed(1)}★</span>}
         {price && <span className="lstrip__price">{price}</span>}
       </div>
+      {stop.description && <div className="lstrip__desc">{stop.description}</div>}
       {selected && stop.reason && <div className="lstrip__reason">{stop.reason}</div>}
       {selected && swap?.canSwap && (
         <div className="lstrip__swap" onClick={(e) => e.stopPropagation()}>

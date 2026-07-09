@@ -536,7 +536,14 @@ async function venueSwap(
   const sel = selections.find((s) => s.category === poolKey);
   const pick = sel?.id ? candidates.find((p) => p.id === sel.id) : undefined;
   if (!sel || sel.id === null || !pick) {
-    return { swapped: false, reason: `Couldn't find another ${target.category} that fits — keeping ${target.name}.` };
+    // an unmet hard constraint gets named, never hedged around
+    const unmet = sel?.unmetConstraint;
+    return {
+      swapped: false,
+      reason: unmet
+        ? `Couldn't find a ${poolKey} that's really ${unmet} — keeping ${target.name}.`
+        : `Couldn't find another ${target.category} that fits — keeping ${target.name}.`,
+    };
   }
 
   return finalize(itinerary, stopIndex, target, pick, sel, poolKey, target.start_time!, now, deps, interp.path, sel.reason);
@@ -788,6 +795,8 @@ function buildStop(
     reason: picked ? picked.sel.reason : kept!.reason,
     ...(picked?.sel.fallback ? { fallback: true } : {}),
     rating: picked ? picked.pick.rating : kept!.rating,
+    priceLevel: picked ? picked.pick.priceLevel : kept!.priceLevel,
+    description: picked ? picked.pick.editorialSummary?.text : kept!.description,
     location: picked ? picked.pick.location : kept!.location,
     start_time: startISO,
     end_time: endISO,
@@ -863,6 +872,8 @@ async function finalize(
     reason: sel.reason,
     ...(sel.fallback ? { fallback: true } : {}),
     rating: pick.rating,
+    priceLevel: pick.priceLevel,
+    description: pick.editorialSummary?.text,
     location: newLoc,
     start_time: startISO,
     end_time: endISO,

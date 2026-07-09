@@ -12,6 +12,7 @@ const FIELD_MASK = [
   "places.priceLevel",
   "places.currentOpeningHours",
   "places.businessStatus",
+  "places.editorialSummary",
 ].join(",");
 
 // e.g. aesthetic="lively night out", category="bar", location="Ossington"

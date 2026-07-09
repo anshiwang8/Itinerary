@@ -12,6 +12,9 @@ export interface Place {
   priceLevel?: string;
   currentOpeningHours?: CurrentOpeningHours;
   businessStatus?: string;
+  /** one-line venue blurb — shown on the stop card, and constraint
+   * evidence for the selector */
+  editorialSummary?: { text: string };
 }
 
 // Shape returned by /api/parse.

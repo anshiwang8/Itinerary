@@ -100,13 +100,49 @@ export type StartResolution =
 export const IMPLAUSIBLE_TIME_MESSAGE =
   "Couldn't find a sensible time for this — add one, like “dinner at 7pm”.";
 
+function hour12(h: number): string {
+  const hh = ((h % 24) + 24) % 24;
+  return `${hh % 12 || 12} ${hh < 12 ? "AM" : "PM"}`;
+}
+
+function clock12(d: Date): string {
+  const m = d.getMinutes();
+  const num = `${d.getHours() % 12 || 12}${m ? `:${String(m).padStart(2, "0")}` : ""}`;
+  return `${num} ${d.getHours() < 12 ? "AM" : "PM"}`;
+}
+
+// User asked for an hour nothing plausibly serves ("brunch at 3am") —
+// name the category, its realistic window, and which direction to move.
+function implausibleExplicitReason(start: Date, categories: string[]): string {
+  let label: string | null = null;
+  let band = DEFAULT_PLAUSIBLE_BAND;
+  for (const c of categories) {
+    const hit = PLAUSIBLE_BANDS.find(([p]) => p.test(c));
+    if (hit) {
+      label = c;
+      band = hit[1];
+      break;
+    }
+  }
+  const h = start.getHours() + start.getMinutes() / 60;
+  // outside a non-wrapping band: before open → later; past close → earlier.
+  // A wrapped band's dead zone always sits before that day's opening.
+  const beforeOpen = band.startHour <= band.endHour ? h < band.startHour : true;
+  const suggest = beforeOpen ? "Try a later time?" : "Try an earlier time?";
+  if (!label) {
+    return `Couldn't plan that for ${clock12(start)} — nothing much is open then. Try a time between ${hour12(band.startHour)} and ${hour12(band.endHour)}?`;
+  }
+  return `Couldn't plan a ${clock12(start)} ${label} — ${label} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}. ${suggest}`;
+}
+
 /**
- * resolveStartTime + the fail-loud plausibility check. Explicit clock
- * times and stated day-parts are the user's call and always pass; only
- * inferred starts (category default or next-full-hour) must land inside
- * a plausible band for at least one of the categories (generic 8–23
- * band when nothing matches). Outside every band → ok: false with a
- * user-facing message instead of silently booking a 4 AM dinner.
+ * resolveStartTime + the fail-loud plausibility check. EVERY resolved
+ * start must land inside a plausible band for at least one category
+ * (generic 8–23 band when nothing matches). An explicit clock time or
+ * day-part that lands outside every band ("brunch at 3am") fails with a
+ * specific message naming the category's realistic window; an inferred
+ * start (category default / next-full-hour) outside every band fails
+ * with the generic add-a-time message.
  */
 export function resolveStartTimeChecked(
   timeWindow: string,
@@ -116,16 +152,17 @@ export function resolveStartTimeChecked(
   const start = resolveStartTime(timeWindow, now, categories);
   const tw = (timeWindow ?? "").toLowerCase();
 
-  const hasClockTime = parseTargetTime(tw, now) !== null;
-  const hasDayPart = Object.keys(DAY_PART_DEFAULTS).some((k) => tw.includes(k));
-  if (hasClockTime || hasDayPart) return { ok: true, start };
-
   const bands = categories
     .map((c) => PLAUSIBLE_BANDS.find(([p]) => p.test(c))?.[1])
     .filter((b): b is PlausibleBand => !!b);
   if (bands.length === 0) bands.push(DEFAULT_PLAUSIBLE_BAND);
-
   if (bands.some((b) => inBand(start, b))) return { ok: true, start };
+
+  const hasClockTime = parseTargetTime(tw, now) !== null;
+  const hasDayPart = Object.keys(DAY_PART_DEFAULTS).some((k) => tw.includes(k));
+  if (hasClockTime || hasDayPart) {
+    return { ok: false, reason: implausibleExplicitReason(start, categories) };
+  }
   return { ok: false, reason: IMPLAUSIBLE_TIME_MESSAGE };
 }
 
@@ -233,6 +270,11 @@ export interface SelectionLike {
   reason?: string;
   fallback?: boolean;
   rating?: number;
+  /** venue price level — carried on the stop so the strip's dollar signs
+   * survive swaps/reroutes (pools-only lookups go stale) */
+  priceLevel?: string;
+  /** one-line venue description (Places editorialSummary) */
+  description?: string;
   /** venue coordinates — passthrough; the reroute engine needs them */
   location?: { latitude: number; longitude: number };
 }

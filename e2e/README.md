@@ -27,14 +27,33 @@ mocked pipeline source.
 ## Fixtures worth knowing (for scenario tests)
 
 - Dinner pick is **Velvet Fig** (4.8, $$$) — a "cheaper" swap lands on
-  **The Corner Table** (4.5, $$).
+  **The Corner Table** (4.5, $$), and the strip's dollar signs must go
+  $$$ → $$ (the price rides on the stop, not a pools lookup).
 - Drinks pick is **Ten O'Clock Curfew** (4.7, closes 22:00) — pushing
   drinks past 10 PM fires the ADAPT path (→ The Standing Room, open to 2).
 - **Sundown Scoops** (dessert, closes 21:00) is the downstream adapt
   trigger for late-shifted evenings; **Midnight Flour** is its late
   replacement.
+- Every fixture has an `editorialSummary` (the card's description line).
+  Two double as **constraint evidence** for mockSelect: "vegan" lives on
+  **Noodle Letterpress** (dinner), "patio" on **The Standing Room** (bar).
+  A constraint with no evidence in the pool → id:null + unmetConstraint →
+  the fail-loud surface ("vegan steakhouse" fails; "vegan dinner" picks
+  Noodle Letterpress).
 - Unknown categories get a generated "Fixture <Category> One/Two/Three"
   pool. Weather is 24 calm hours (20°, precip 10%).
+
+## Fail-loud guards — deterministic in mock mode
+
+All of these produce their exact message with zero live calls:
+- `"."` / `"asdfghjkl"` → unparseable (pre-parse guard, mode-independent).
+- `"brunch at 3am"` / `"dinner at 4am"` → the category-window message
+  (mockParse extracts the clock time + category; the band check is code).
+- `"cheap fancy dinner"` → the contradiction message (prompt-level guard).
+- `"vegan steakhouse"` → unmet-constraint fail-loud (generic steakhouse
+  pool has no vegan evidence).
+- The all-pools-empty net needs a nudge to trigger in mock: raise
+  `mockWeather` precip above 50 for an outdoor-category prompt.
 
 ## Files
 

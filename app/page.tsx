@@ -10,6 +10,14 @@ import { TravelLeg } from "./api/schedule/travel";
 import { HOME, splitHomeLeg } from "./api/schedule/home";
 import { Itinerary } from "./api/itinerary/store";
 import { formatStopTime } from "./lib/timeLabels";
+import {
+  contradictionReason,
+  degeneratePromptReason,
+  emptyParseReason,
+  noVenuesReason,
+  unmetConstraintReason,
+  weatherBlockedReason,
+} from "./lib/planGuards";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, { StripHome, StripStop } from "./ItineraryStrip";
 
@@ -155,7 +163,18 @@ export default function Home() {
     setChangedIds(new Set());
     setOldStarts({});
     setSwapError(null);
+    // THE fail-loud surface: every degenerate/impossible/contradictory
+    // input lands here with a reason + a suggested fix — never an empty
+    // map, never a borrowed error from the wrong branch.
+    const fail = (reason: string) => {
+      setError(reason);
+      setLoadingText(null);
+    };
     try {
+      // nonsense never reaches the LLM ("." / "asdfghjkl")
+      const degenerate = degeneratePromptReason(q);
+      if (degenerate) return fail(degenerate);
+
       setLoadingText("Reading your evening…");
       const parseRes = await fetch("/api/parse", {
         method: "POST",
@@ -166,17 +185,22 @@ export default function Home() {
       if (!parseRes.ok) throw new Error(parseData.error ?? `parse failed (${parseRes.status})`);
       setParsedObj(parseData);
 
-      // fail loud on an implausible inferred time before spending calls
+      // parse extracted nothing → "couldn't understand", NOT a time error
+      const unparseable = emptyParseReason(parseData);
+      if (unparseable) return fail(unparseable);
+
+      // "cheap fancy dinner" — contradictory, not impossible: say so
+      const contradiction = contradictionReason(q, parseData);
+      if (contradiction) return fail(contradiction);
+
+      // fail loud on an implausible time (explicit "brunch at 3am" gets a
+      // specific reason; a senseless inferred time gets the add-a-time one)
       const check = resolveStartTimeChecked(
         parseData.time_window ?? "",
         new Date(),
         parseData.category_signals ?? []
       );
-      if (!check.ok) {
-        setError(check.reason);
-        setLoadingText(null);
-        return;
-      }
+      if (!check.ok) return fail(check.reason);
 
       let weather = null;
       try {
@@ -197,7 +221,22 @@ export default function Home() {
       const { _dropLog, _weatherBlocked, ...categories } = placesData;
       void _dropLog;
       setPools(categories as Pools);
-      setWeatherBlocks(Array.isArray(_weatherBlocked) ? _weatherBlocked : []);
+      const wxBlocks = Array.isArray(_weatherBlocked) ? _weatherBlocked : [];
+      setWeatherBlocks(wxBlocks);
+
+      // the empty-map net: EVERY pool came back empty → say why, don't
+      // render a map with nothing on it
+      const poolEntries = Object.entries(categories as Pools);
+      const allEmpty =
+        poolEntries.length === 0 ||
+        poolEntries.every(([, arr]) => !Array.isArray(arr) || arr.length === 0);
+      if (allEmpty) {
+        return fail(
+          wxBlocks.length >= poolEntries.length && wxBlocks.length > 0
+            ? weatherBlockedReason(wxBlocks)
+            : noVenuesReason(Object.keys(categories), formatStopTime(check.start))
+        );
+      }
 
       setLoadingText("Choosing the spots…");
       const selectRes = await fetch("/api/select", {
@@ -208,6 +247,13 @@ export default function Home() {
       const selectData = await selectRes.json();
       if (!selectRes.ok) throw new Error(selectData.error ?? `select failed (${selectRes.status})`);
       const sels = selectData.selections ?? [];
+
+      // a hard constraint nothing actually meets → fail loud, never a
+      // pick with a "check with the venue" hedge
+      const unmet = (sels as { category: string; unmetConstraint?: string }[]).find(
+        (s) => s.unmetConstraint
+      );
+      if (unmet) return fail(unmetConstraintReason(unmet.category, unmet.unmetConstraint!));
 
       setLoadingText("Timing the route…");
       const points = sels
@@ -479,7 +525,10 @@ export default function Home() {
         start: s.start_time,
         end: s.end_time,
         rating: s.rating ?? null,
-        price: priceById[s.id!] ?? null,
+        // the stop's own price wins — the pools lookup goes stale the
+        // moment a swap/reroute picks a venue that was never in them
+        price: s.priceLevel ?? priceById[s.id!] ?? null,
+        description: s.description ?? null,
         reason: s.reason ?? null,
         status: s.status,
         changed: changedIds.has(s.id!),

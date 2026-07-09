@@ -176,22 +176,66 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
-    "checked resolver: sane inferred times and explicit user times still pass",
+    "checked resolver: sane inferred, plausible explicit, and day-part times pass",
     () => {
       // 13:20 → next full hour 14:00, inside the generic band
       const NOW = new Date(2026, 6, 3, 13, 20, 0);
       const sane = resolveStartTimeChecked("unspecified", NOW, ["axe throwing"]);
       assert.strictEqual(sane.ok, true);
-      // explicit clock time is the user's call — even at a weird hour
+      // explicit clock time inside the category's band passes
       const fourAM = new Date(2026, 6, 3, 3, 0, 0);
-      const explicit = resolveStartTimeChecked("4am", fourAM, ["dinner"]);
+      const explicit = resolveStartTimeChecked("7pm", fourAM, ["dinner"]);
       assert.strictEqual(explicit.ok, true);
-      // stated day-part passes too
+      // stated day-part passes too (morning → 10:00, generic band)
       const dayPart = resolveStartTimeChecked("morning", fourAM, ["axe throwing"]);
       assert.strictEqual(dayPart.ok, true);
       // club at 22:00 is inside its own (midnight-wrapping) band
       const club = resolveStartTimeChecked("unspecified", fourAM, ["night club"]);
       assert.strictEqual(club.ok, true);
+      // 1 AM drinks: inside the bar band's past-midnight wrap
+      const lateBar = resolveStartTimeChecked("1am", fourAM, ["bar"]);
+      assert.strictEqual(lateBar.ok, true);
+    },
+  ],
+  [
+    "explicit implausible times fail loud with the category's window (BUG 1)",
+    () => {
+      const now = new Date(2026, 6, 3, 1, 0, 0);
+      // "brunch at 3am" — names brunch, its window, and says try LATER
+      const brunch = resolveStartTimeChecked("3am", now, ["brunch"]);
+      assert.strictEqual(brunch.ok, false);
+      if (!brunch.ok) {
+        assert.strictEqual(
+          brunch.reason,
+          "Couldn't plan a 3 AM brunch — brunch around here runs about 8 AM to 3 PM. Try a later time?"
+        );
+      }
+      // "dinner at 4am" — same surface, dinner's window
+      const dinner = resolveStartTimeChecked("4am", now, ["dinner"]);
+      assert.strictEqual(dinner.ok, false);
+      if (!dinner.ok) {
+        assert.strictEqual(
+          dinner.reason,
+          "Couldn't plan a 4 AM dinner — dinner around here runs about 11 AM to 11 PM. Try a later time?"
+        );
+      }
+      // past close (non-wrapping band) suggests EARLIER: brunch at 5 PM
+      const lateBrunch = resolveStartTimeChecked("5pm", now, ["brunch"]);
+      assert.strictEqual(lateBrunch.ok, false);
+      if (!lateBrunch.ok) assert.match(lateBrunch.reason, /Try an earlier time\?$/);
+      // explicit time, no banded category → generic honest message
+      const generic = resolveStartTimeChecked("4am", now, ["axe throwing"]);
+      assert.strictEqual(generic.ok, false);
+      if (!generic.ok) {
+        assert.strictEqual(
+          generic.reason,
+          "Couldn't plan that for 4 AM — nothing much is open then. Try a time between 8 AM and 11 PM?"
+        );
+      }
+      // implausible DAY-PART hits the same surface ("brunch tonight")
+      const evening = resolveStartTimeChecked("evening", now, ["brunch"]);
+      assert.strictEqual(evening.ok, false);
+      if (!evening.ok) assert.match(evening.reason, /brunch around here runs about 8 AM to 3 PM/);
     },
   ],
   [

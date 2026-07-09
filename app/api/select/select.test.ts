@@ -130,6 +130,71 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(data.selections[0].fallback, undefined);
     },
   ],
+  [
+    "unmet hard constraint → id:null + unmetConstraint, NO retry, NO fallback",
+    async () => {
+      groqCalls = [];
+      responder = () =>
+        JSON.stringify({
+          selections: [
+            { category: "cafe", id: null, reason: "", unmet_constraint: "vegan" },
+          ],
+        });
+      const res = await POST(
+        req({ parsed: { ...parsed, constraints: ["vegan"] }, pools })
+      );
+      const data = await res.json();
+      // an honest null is a VALID answer — no correction retry, no
+      // highest-rated fallback papering over the constraint
+      assert.strictEqual(groqCalls.length, 1, "honest null must not trigger a retry");
+      const sel = data.selections[0];
+      assert.strictEqual(sel.id, null);
+      assert.strictEqual(sel.unmetConstraint, "vegan");
+      assert.strictEqual(sel.fallback, undefined);
+      console.log("      result:", JSON.stringify(data));
+    },
+  ],
+  [
+    "hedged pick under constraints ('worth confirming') → converted to unmet constraint",
+    async () => {
+      groqCalls = [];
+      responder = () =>
+        JSON.stringify({
+          selections: [
+            {
+              category: "cafe",
+              id: "a",
+              reason: "Great spot, though the vegan options are worth confirming with them.",
+            },
+          ],
+        });
+      const res = await POST(
+        req({ parsed: { ...parsed, constraints: ["vegan"] }, pools })
+      );
+      const data = await res.json();
+      const sel = data.selections[0];
+      // never suggest a venue while telling the user to verify it
+      assert.strictEqual(sel.id, null);
+      assert.strictEqual(sel.unmetConstraint, "vegan");
+      console.log("      result:", JSON.stringify(data));
+    },
+  ],
+  [
+    "hedge guard is OFF without constraints — cautious phrasing keeps the pick",
+    async () => {
+      groqCalls = [];
+      responder = () =>
+        JSON.stringify({
+          selections: [
+            { category: "cafe", id: "a", reason: "Cozy — maybe check with friends first." },
+          ],
+        });
+      const res = await POST(req({ parsed, pools }));
+      const data = await res.json();
+      assert.strictEqual(data.selections[0].id, "a");
+      assert.strictEqual(data.selections[0].unmetConstraint, undefined);
+    },
+  ],
 ];
 
 // ── runner ──
