@@ -3,7 +3,14 @@
 // Run with: npx tsx app/api/itinerary/swap.test.ts
 import assert from "node:assert";
 import { createItinerary, withStatuses } from "./store";
-import { swapStop, SwapDeps, parseTimeExpr, TimeShift } from "./swap";
+import {
+  swapStop,
+  SwapDeps,
+  parseTimeExpr,
+  parseDurationExpr,
+  TimeShift,
+  DurationShift,
+} from "./swap";
 import { Place } from "../places/search/filter";
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
@@ -63,8 +70,9 @@ function mkVenue(id: string, name = `New ${id}`): Place {
 }
 
 interface Opts {
-  intent?: "venue" | "time" | "constraint";
+  intent?: "venue" | "time" | "constraint" | "duration";
   time?: TimeShift;
+  duration?: DurationShift;
   path?: "refilter" | "research";
   newCategory?: string;
   budget?: string | null;
@@ -80,10 +88,13 @@ interface Opts {
 function mkDeps(opts: Opts = {}): SwapDeps {
   return {
     interpret: async (parsed, category, _currentStartISO, refinement) => {
+      const localDuration = parseDurationExpr(refinement);
       const localTime = parseTimeExpr(refinement);
       const intent =
         opts.intent ??
-        (localTime
+        (localDuration
+          ? "duration"
+          : localTime
           ? "time"
           : /patio|outdoor|near/i.test(refinement)
           ? "constraint"
@@ -105,6 +116,7 @@ function mkDeps(opts: Opts = {}): SwapDeps {
             : parsed.budget,
         constraints: opts.constraints ?? (/patio/i.test(refinement) ? ["patio"] : parsed.constraints),
         time: intent === "time" ? opts.time ?? localTime ?? null : null,
+        duration: intent === "duration" ? opts.duration ?? localDuration ?? null : null,
       };
     },
     searchPools: async (parsed, cats) => {
@@ -373,6 +385,135 @@ const cases: Array<[string, () => Promise<void>]> = [
       if (!res.swapped) assert.match(res.reason, /4:00 AM|won't work|nothing's really open/);
       assert.strictEqual(it.stops[0].id, "d1");
       assert.strictEqual(it.stops[0].start_time, T(19, 0));
+    },
+  ],
+  [
+    "parseDurationExpr: absolute + relative (signed) + non-duration",
+    async () => {
+      assert.deepStrictEqual(parseDurationExpr("stay 2 hours"), { mode: "absolute", targetMinutes: 120 });
+      assert.deepStrictEqual(parseDurationExpr("make it 90 minutes"), { mode: "absolute", targetMinutes: 90 });
+      assert.deepStrictEqual(parseDurationExpr("just an hour"), { mode: "absolute", targetMinutes: 60 });
+      assert.deepStrictEqual(parseDurationExpr("stay longer"), { mode: "relative", deltaMinutes: 30 });
+      assert.deepStrictEqual(parseDurationExpr("a lot longer"), { mode: "relative", deltaMinutes: 60 });
+      assert.deepStrictEqual(parseDurationExpr("an extra hour"), { mode: "relative", deltaMinutes: 60 });
+      assert.deepStrictEqual(parseDurationExpr("shorter"), { mode: "relative", deltaMinutes: -30 });
+      assert.deepStrictEqual(parseDurationExpr("less time"), { mode: "relative", deltaMinutes: -30 });
+      assert.strictEqual(parseDurationExpr("an hour earlier"), null); // that's a TIME request
+      assert.strictEqual(parseDurationExpr("somewhere cheaper"), null);
+    },
+  ],
+  [
+    "DURATION 'stay 2 hours' extends the stop and reflows the tail",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(17, 0));
+      const res = await swapStop(
+        it, 0, "let's stay 2 hours", now,
+        mkDeps({ duration: { mode: "absolute", targetMinutes: 120 }, legMin: 10 })
+      );
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      assert.strictEqual(res.path, "duration");
+      assert.strictEqual(it.stops[0].start_time, T(19, 0)); // start stays put
+      assert.strictEqual(ms(it.stops[0].end_time), ms(T(21, 0))); // 19:00 + 120
+      assert.deepStrictEqual(res.downstreamShifted, [1, 2]);
+      assert.strictEqual(ms(it.stops[1].start_time), ms(T(21, 10))); // 21:00 + 10
+      assert.strictEqual(ms(it.stops[2].start_time), ms(T(22, 30))); // 22:20 + 10
+      assert.match(res.reason, /Extended dinner to 2 hours/);
+    },
+  ],
+  [
+    "DURATION 'stay longer' defaults to +30 (via the deterministic parser)",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(18, 0));
+      const res = await swapStop(it, 1, "can we stay longer", now, mkDeps({ legMin: 10 }));
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      assert.strictEqual(res.path, "duration");
+      assert.strictEqual(ms(it.stops[1].end_time), ms(T(22, 40))); // 21:00 + 100
+      assert.deepStrictEqual(res.downstreamShifted, [2]);
+      assert.strictEqual(ms(it.stops[2].start_time), ms(T(22, 50))); // 22:40 + 10
+    },
+  ],
+  [
+    "DURATION 'shorter' = -30 and pulls the tail earlier",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(18, 0));
+      const res = await swapStop(it, 1, "make it shorter", now, mkDeps({ legMin: 10 }));
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      assert.strictEqual(ms(it.stops[1].end_time), ms(T(21, 40))); // 21:00 + 40
+      assert.strictEqual(ms(it.stops[2].start_time), ms(T(21, 50))); // 21:40 + 10
+      assert.match(res.reason, /Shortened bar to 40 minutes/);
+    },
+  ],
+  [
+    "DURATION extension that closes a later venue → ADAPTS it",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(17, 0));
+      const res = await swapStop(
+        it, 0, "stay 2 hours", now,
+        mkDeps({ duration: { mode: "absolute", targetMinutes: 120 }, legMin: 10, unusableIds: ["s1"] })
+      );
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      assert.strictEqual(ms(it.stops[0].end_time), ms(T(21, 0)));
+      assert.notStrictEqual(it.stops[2].id, "s1"); // dessert replaced
+      assert.strictEqual(it.stops[2].id, "dessert_fresh");
+      assert.match(res.reason, /moved a later stop/i);
+    },
+  ],
+  [
+    "DURATION extension nothing can absorb → fails loud, nothing committed",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(17, 0));
+      const res = await swapStop(
+        it, 0, "stay 2 hours", now,
+        mkDeps({ duration: { mode: "absolute", targetMinutes: 120 }, legMin: 10, unusableIds: ["s1"], pool: [] })
+      );
+      assert.strictEqual(res.swapped, false);
+      if (!res.swapped) assert.match(res.reason, /Nothing similar to Dessert Spot is open/);
+      assert.strictEqual(it.stops[0].end_time, T(20, 45)); // dinner untouched
+    },
+  ],
+  [
+    "DURATION 'stay 20 hours' fails loud (cap), and '10 minute dinner' fails loud (min)",
+    async () => {
+      const tooLong = await swapStop(
+        mkItinerary(), 0, "stay 20 hours", new Date(T(17, 0)), mkDeps()
+      );
+      assert.strictEqual(tooLong.swapped, false);
+      if (!tooLong.swapped) assert.match(tooLong.reason, /under 6 hours|longer than a single stop/);
+
+      const it = mkItinerary();
+      const tooShort = await swapStop(
+        it, 0, "10 minute dinner", new Date(T(17, 0)),
+        mkDeps({ duration: { mode: "absolute", targetMinutes: 10 } })
+      );
+      assert.strictEqual(tooShort.swapped, false);
+      if (!tooShort.swapped) assert.match(tooShort.reason, /isn't enough time|at least/);
+      assert.strictEqual(it.stops[0].end_time, T(20, 45)); // untouched
+    },
+  ],
+  [
+    "DURATION never moves a locked downstream stop",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(18, 0));
+      it.stops[2].locked = true;
+      const res = await swapStop(
+        it, 1, "stay longer", now,
+        mkDeps({ duration: { mode: "relative", deltaMinutes: 30 }, legMin: 10 })
+      );
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      assert.strictEqual(ms(it.stops[1].end_time), ms(T(22, 40))); // bar extended
+      assert.strictEqual(it.stops[2].start_time, T(22, 20)); // locked dessert untouched
+      assert.ok(!res.downstreamShifted.includes(2));
     },
   ],
   [

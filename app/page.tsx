@@ -411,9 +411,14 @@ export default function Home() {
     setSelected(swapped.category);
     setSwapText("");
     setBannerFlat(false);
-    // time-path reasons are self-contained ("Moved dinner to 7:29 PM");
-    // venue-path reasons describe the pick, so they get the "Swapped" lead.
-    setBanner(data.path === "time" ? data.reason : `Swapped ${data.before.category} — ${data.reason}`);
+    // time/duration reasons are self-contained ("Moved dinner to 7:29 PM",
+    // "Extended dinner to 2 hours"); venue reasons describe the pick, so
+    // they get the "Swapped" lead.
+    setBanner(
+      data.path === "time" || data.path === "duration"
+        ? data.reason
+        : `Swapped ${data.before.category} — ${data.reason}`
+    );
   }
 
   // merge live status + changed flags (by venue id) onto the base map stops

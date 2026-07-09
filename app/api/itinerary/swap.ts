@@ -32,7 +32,7 @@ import { HOME, HOME_LEG_INDEX } from "../schedule/home";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "llama-3.3-70b-versatile";
 
-export type SwapIntent = "venue" | "time" | "constraint";
+export type SwapIntent = "venue" | "time" | "constraint" | "duration";
 
 // A parsed time request: relative ("an hour earlier" → -60) or absolute
 // ("after 8" → 20:00). Vague amounts default to a 30-min step upstream.
@@ -40,6 +40,14 @@ export interface TimeShift {
   mode: "relative" | "absolute";
   deltaMinutes?: number; // relative
   targetTime?: string; // absolute, 24h "HH:MM"
+}
+
+// A parsed duration request: relative ("stay longer" → +30) or absolute
+// ("stay 2 hours" → 120). Vague amounts default to a 30-min step.
+export interface DurationShift {
+  mode: "relative" | "absolute";
+  deltaMinutes?: number; // relative
+  targetMinutes?: number; // absolute
 }
 
 // How the complaint reshapes this one stop.
@@ -55,6 +63,8 @@ export interface SwapInterpretation {
   constraints: string[];
   // time intent only.
   time: TimeShift | null;
+  // duration intent only.
+  duration: DurationShift | null;
 }
 
 interface Snap {
@@ -69,7 +79,7 @@ export type SwapResult =
   | {
       swapped: true;
       stopIndex: number;
-      path: "refilter" | "research" | "time";
+      path: "refilter" | "research" | "time" | "duration";
       before: Snap;
       after: Snap;
       reason: string;
@@ -113,6 +123,9 @@ const REFINE_SYSTEM = `You adjust ONE stop of an existing day plan from a short 
 - "time": the complaint is about WHEN. Return a "time" object.
    - RELATIVE ("an hour earlier", "30 min later", "a bit earlier", "much later"): set { "mode": "relative", "deltaMinutes": N } where N is signed minutes (earlier is NEGATIVE, later is POSITIVE). Exact amounts parse exactly (an hour = 60, half an hour = 30, "45 min" = 45). Vague amounts ("a bit", "a little", "somewhat", "slightly") default to 30. "much"/"way" can be 60–90.
    - ABSOLUTE ("after 8", "at 7:30", "by 9", "make it 7"): set { "mode": "absolute", "targetTime": "HH:MM" } in 24h. Assume the plan's part of day (an evening plan means PM).
+- "duration": the complaint is about HOW LONG they stay at this stop. Return a "duration" object.
+   - ABSOLUTE ("stay 2 hours", "make it 90 minutes", "just an hour here"): set { "mode": "absolute", "targetMinutes": N }.
+   - RELATIVE ("stay longer", "more time here", "shorter", "less time", "an extra hour"): set { "mode": "relative", "deltaMinutes": N } (longer is POSITIVE, shorter NEGATIVE). "an extra hour" = 60, "a lot longer" = 60; vague "longer"/"shorter" default to ±30.
 - "constraint": the complaint needs a different KIND of venue by feature/location — "with a patio", "near the water", "somewhere quieter that's outdoors". Set path "research", fold the feature into "constraints".
 - "venue": the complaint is about the venue's quality/price/style in the SAME slot — "don't like it", "cheaper", "less fancy", "higher rated". Set path "refilter" (narrows the same pool) unless it needs different venues, then "research".
 
@@ -122,7 +135,7 @@ Rules:
 - Preserve still-relevant original constraints; drop ones the complaint overrides.
 
 Respond with ONLY this JSON, no prose:
-{ "intent": "venue"|"time"|"constraint", "path": "refilter"|"research", "category": string, "aesthetic": string, "budget": string|null, "constraints": string[], "time": { "mode": "relative"|"absolute", "deltaMinutes": number, "targetTime": string } | null }`;
+{ "intent": "venue"|"time"|"constraint"|"duration", "path": "refilter"|"research", "category": string, "aesthetic": string, "budget": string|null, "constraints": string[], "time": { "mode": "relative"|"absolute", "deltaMinutes": number, "targetTime": string } | null, "duration": { "mode": "relative"|"absolute", "deltaMinutes": number, "targetMinutes": number } | null }`;
 
 // Deterministic fallback for time expressions, so common relative phrases
 // resolve even if the model whiffs. Earlier is negative, later positive.
@@ -164,6 +177,48 @@ export function parseTimeExpr(text: string): TimeShift | null {
   return { mode: "relative", deltaMinutes: sign * 30 };
 }
 
+// Deterministic fallback for duration expressions ("stay 2 hours",
+// "longer", "an extra hour"). Longer is positive, shorter negative.
+export function parseDurationExpr(text: string): DurationShift | null {
+  const s = text.toLowerCase();
+  // a bare time direction with no duration word is a TIME request, not a
+  // duration one ("an hour earlier" must not read as "an hour").
+  const timeSignal = /\b(earlier|later|sooner|after|at|by|around)\b/.test(s);
+  const durationSignal =
+    /\b(stay|staying|spend|spending|longer|shorter|more time|less time|extra|quicker|linger|hang|another|for)\b/.test(s);
+  if (timeSignal && !durationSignal) return null;
+
+  const hasAmount =
+    /\b\d+\s*(h|hr|hrs|hour|hours|min|mins|minute|minutes)\b/.test(s) ||
+    /\b(an?\s+hour|half\s+an?\s+hour|hour and a half)\b/.test(s);
+  if (!durationSignal && !hasAmount) return null;
+
+  const amount = (): number | null => {
+    const m = s.match(/(\d+)\s*(h|hr|hrs|hour|hours|min|mins|minute|minutes)/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      return /^h|hour/.test(m[2]) ? n * 60 : n;
+    }
+    if (/\bhour and a half\b/.test(s)) return 90;
+    if (/\bhalf\s+an?\s+hour\b/.test(s)) return 30;
+    if (/\bhours?\b/.test(s)) return 60; // "an hour", "an extra hour", "another hour"
+    return null;
+  };
+
+  const longer = /\b(longer|more time|extra|linger|another)\b/.test(s);
+  const shorter = /\b(shorter|less time|quicker|cut (?:it )?short)\b/.test(s);
+  if (longer || shorter) {
+    const sign = shorter ? -1 : 1;
+    const amt = amount();
+    if (amt !== null) return { mode: "relative", deltaMinutes: sign * amt };
+    if (/\b(a lot|much|way)\b/.test(s)) return { mode: "relative", deltaMinutes: sign * 60 };
+    return { mode: "relative", deltaMinutes: sign * 30 }; // vague
+  }
+
+  const amt = amount();
+  return amt !== null ? { mode: "absolute", targetMinutes: amt } : null;
+}
+
 async function interpretRefinement(
   apiKey: string,
   parsed: ParsedPrompt,
@@ -179,10 +234,18 @@ async function interpretRefinement(
     budget: parsed.budget,
     constraints: [...(parsed.constraints ?? []), refinement],
     time: null,
+    duration: null,
   };
-  // If it reads like a time request, trust the local parser as the floor —
-  // the model can only refine it, never lose it.
+  // Trust the local parsers as the floor — the model can only refine
+  // arithmetic requests, never lose them. Duration wins over time.
+  const localDuration = parseDurationExpr(refinement);
   const localTime = parseTimeExpr(refinement);
+  const localFallback = (): SwapInterpretation =>
+    localDuration
+      ? { ...fallback, intent: "duration", duration: localDuration }
+      : localTime
+      ? { ...fallback, intent: "time", time: localTime }
+      : fallback;
   try {
     const res = await fetch(GROQ_URL, {
       method: "POST",
@@ -211,13 +274,15 @@ async function interpretRefinement(
       cache: "no-store",
     });
     const data = await res.json();
-    if (!res.ok) return localTime ? { ...fallback, intent: "time", time: localTime } : fallback;
+    if (!res.ok) return localFallback();
     const out = JSON.parse(data?.choices?.[0]?.message?.content ?? "{}");
-    let intent: SwapIntent =
-      out.intent === "time" || out.intent === "constraint" ? out.intent : "venue";
-    // the local time parser overrides classification — a time phrase is a
-    // time request even if the model called it a venue swap
-    if (localTime) intent = "time";
+    let intent: SwapIntent = ["time", "constraint", "duration"].includes(out.intent)
+      ? out.intent
+      : "venue";
+    // the deterministic parsers override classification — an arithmetic
+    // phrase is a duration/time request even if the model called it a venue
+    if (localDuration) intent = "duration";
+    else if (localTime) intent = "time";
 
     let time: TimeShift | null = null;
     if (intent === "time") {
@@ -227,7 +292,18 @@ async function interpretRefinement(
       } else if (t?.mode === "absolute" && typeof t.targetTime === "string" && /^\d{1,2}:\d{2}$/.test(t.targetTime)) {
         time = { mode: "absolute", targetTime: t.targetTime };
       }
-      time = time ?? localTime; // fall back to the deterministic parse
+      time = time ?? localTime;
+    }
+
+    let duration: DurationShift | null = null;
+    if (intent === "duration") {
+      const dd = out.duration;
+      if (dd?.mode === "relative" && typeof dd.deltaMinutes === "number") {
+        duration = { mode: "relative", deltaMinutes: dd.deltaMinutes };
+      } else if (dd?.mode === "absolute" && typeof dd.targetMinutes === "number") {
+        duration = { mode: "absolute", targetMinutes: dd.targetMinutes };
+      }
+      duration = duration ?? localDuration;
     }
 
     return {
@@ -240,9 +316,10 @@ async function interpretRefinement(
         ? out.constraints.filter((c: unknown): c is string => typeof c === "string")
         : fallback.constraints,
       time,
+      duration,
     };
   } catch {
-    return localTime ? { ...fallback, intent: "time", time: localTime } : fallback;
+    return localFallback();
   }
 }
 
@@ -331,7 +408,93 @@ export async function swapStop(
   if (interp.intent === "time") {
     return timeChange(itinerary, stopIndex, target, interp, base, floor, now, deps);
   }
+  if (interp.intent === "duration") {
+    return durationChange(itinerary, stopIndex, target, interp, base, floor, now, deps);
+  }
   return venueSwap(itinerary, stopIndex, target, interp, base, floor, now, deps);
+}
+
+function durLabel(mins: number): string {
+  if (mins % 60 === 0) return `${mins / 60} hour${mins === 60 ? "" : "s"}`;
+  if (mins < 120) return `${mins} minutes`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
+
+// ── DURATION: change how long the stop lasts, then resettle the tail. The
+// start stays put; only the end (and everything after) moves. Reuses the
+// same try → adapt → notify ladder as time-swaps. ──
+async function durationChange(
+  itinerary: Itinerary,
+  stopIndex: number,
+  target: ItineraryStop,
+  interp: SwapInterpretation,
+  base: ParsedPrompt,
+  floor: Date,
+  now: Date,
+  deps: SwapDeps
+): Promise<SwapResult> {
+  const category = target.category;
+  const dur = interp.duration;
+  if (!dur) {
+    return { swapped: false, reason: "Couldn't tell how long you meant — try “stay 2 hours” or “a bit longer”." };
+  }
+
+  const d = getDuration(category);
+  const defaultTotal = d.baseMinutes + d.bufferMinutes;
+  const currentTotal = target.durationMinutes?.total ?? defaultTotal;
+  const newTotal = Math.round(
+    dur.mode === "absolute" ? dur.targetMinutes ?? currentTotal : currentTotal + (dur.deltaMinutes ?? 0)
+  );
+
+  // sane bounds — cap at 6 hours, floor at the category's realistic minimum
+  const MAX = 360;
+  const categoryMin = Math.max(15, Math.round(defaultTotal * 0.4));
+  if (newTotal > MAX) {
+    return { swapped: false, reason: `${durLabel(newTotal)} is longer than a single stop makes sense — keep it under 6 hours.` };
+  }
+  if (newTotal < categoryMin) {
+    return {
+      swapped: false,
+      reason: `A ${durLabel(newTotal)} ${category} isn't enough time — give it at least ${durLabel(categoryMin)}.`,
+    };
+  }
+
+  const startISO = target.start_time!;
+  const anchorEnd = new Date(new Date(startISO).getTime() + newTotal * 60_000);
+
+  const timedIdx: number[] = [];
+  itinerary.stops.forEach((s, i) => {
+    if (s.start_time) timedIdx.push(i);
+  });
+  const used = new Set<string>(itinerary.stops.map((s) => s.id).filter((id): id is string => !!id));
+
+  // resettle downstream from the new end (start + venue unchanged, so the
+  // inbound leg into this stop is untouched)
+  const settle = await resettleTail(itinerary, stopIndex, timedIdx, anchorEnd, target.location ?? null, floor, now, base, deps, used);
+  if (!settle.ok) return { swapped: false, reason: settle.reason };
+
+  const before = snap(target);
+  const anchorOutbound = settle.changes[0]?.inbound ?? target.travelToNext ?? null;
+  itinerary.stops[stopIndex] = buildStop(category, startISO, { keep: target }, anchorOutbound, newTotal);
+  commitTail(itinerary, settle.changes);
+  itinerary.legs = itinerary.stops.filter((s) => s.start_time && s.travelToNext).map((s) => s.travelToNext!);
+  withStatuses(itinerary, now);
+
+  const grew = newTotal >= currentTotal;
+  let reason = `${grew ? "Extended" : "Shortened"} ${category} to ${durLabel(newTotal)}`;
+  if (settle.changes.length) reason += ` — everything after shifted ${grew ? "later" : "earlier"}`;
+  if (settle.changes.some((c) => c.venue)) reason += ` (moved a later stop to a spot that's still open)`;
+  reason += ".";
+
+  return {
+    swapped: true,
+    stopIndex,
+    path: "duration",
+    before,
+    after: snap(itinerary.stops[stopIndex]),
+    reason,
+    downstreamShifted: settle.changes.map((c) => c.stopIndex),
+  };
 }
 
 // ── VENUE / CONSTRAINT: replace the venue, hold the slot ──
@@ -499,6 +662,7 @@ async function timeChange(
 interface TailChange {
   stopIndex: number;
   startISO: string;
+  totalMinutes: number; // this stop's duration (preserved when kept)
   inbound: TravelLeg; // leg into this stop from its predecessor
   venue?: Place; // set only when the stop was adapted
   sel?: Selection;
@@ -547,9 +711,13 @@ async function resettleTail(
       startMs = prevEndMs + inbound.totalMinutes * 60_000;
     }
 
+    // keep the stop's own duration when it's kept (a prior duration-swap
+    // must survive a later reflow); an adapted venue takes the default.
     const { baseMinutes, bufferMinutes } = getDuration(stop.category);
-    const endMs = startMs + (baseMinutes + bufferMinutes) * 60_000;
-    changes.push({ stopIndex: di, startISO: toTorontoISO(new Date(startMs)), inbound, venue, sel });
+    const defaultTotal = baseMinutes + bufferMinutes;
+    const totalMinutes = venue ? defaultTotal : stop.durationMinutes?.total ?? defaultTotal;
+    const endMs = startMs + totalMinutes * 60_000;
+    changes.push({ stopIndex: di, startISO: toTorontoISO(new Date(startMs)), totalMinutes, inbound, venue, sel });
     prevEndMs = endMs;
     prevLoc = venue?.location ?? stop.location;
   }
@@ -564,7 +732,8 @@ function commitTail(itinerary: Itinerary, changes: TailChange[]) {
       existing.category,
       ch.startISO,
       ch.venue ? { pick: ch.venue, sel: ch.sel! } : { keep: existing },
-      outbound
+      outbound,
+      ch.totalMinutes
     );
   });
 }
@@ -592,14 +761,20 @@ async function findReplacement(
 }
 
 // Build a stop object from a fresh pick or a kept venue, at startISO.
+// durationOverride sets a custom total (a duration-swap); its base is the
+// override minus the category's buffer, so the buffer is preserved.
 function buildStop(
   category: string,
   startISO: string,
   src: { pick: Place; sel: Selection } | { keep: ItineraryStop },
-  outbound: TravelLeg | null
+  outbound: TravelLeg | null,
+  durationOverride?: number
 ): ItineraryStop {
-  const { baseMinutes, bufferMinutes } = getDuration(category);
-  const total = baseMinutes + bufferMinutes;
+  const def = getDuration(category);
+  const total = durationOverride ?? def.baseMinutes + def.bufferMinutes;
+  const buffer = durationOverride ? Math.min(def.bufferMinutes, total) : def.bufferMinutes;
+  const baseMinutes = total - buffer;
+  const bufferMinutes = buffer;
   const endISO = toTorontoISO(new Date(new Date(startISO).getTime() + total * 60_000));
   const picked = "pick" in src ? src : null;
   const kept = "keep" in src ? src.keep : null;
