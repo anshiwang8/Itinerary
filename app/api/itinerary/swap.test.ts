@@ -6,6 +6,7 @@ import { createItinerary, withStatuses } from "./store";
 import {
   swapStop,
   SwapDeps,
+  interpretRefinement,
   parseTimeExpr,
   parseDurationExpr,
   TimeShift,
@@ -90,12 +91,14 @@ function mkDeps(opts: Opts = {}): SwapDeps {
     interpret: async (parsed, category, _currentStartISO, refinement) => {
       const localDuration = parseDurationExpr(refinement);
       const localTime = parseTimeExpr(refinement);
+      // mirrors the real interpret: a time parse routes to time (carrying
+      // any duration half); duration-only routes to duration
       const intent =
         opts.intent ??
-        (localDuration
-          ? "duration"
-          : localTime
+        (localTime
           ? "time"
+          : localDuration
+          ? "duration"
           : /patio|outdoor|near/i.test(refinement)
           ? "constraint"
           : "venue");
@@ -116,7 +119,12 @@ function mkDeps(opts: Opts = {}): SwapDeps {
             : parsed.budget,
         constraints: opts.constraints ?? (/patio/i.test(refinement) ? ["patio"] : parsed.constraints),
         time: intent === "time" ? opts.time ?? localTime ?? null : null,
-        duration: intent === "duration" ? opts.duration ?? localDuration ?? null : null,
+        duration:
+          intent === "duration"
+            ? opts.duration ?? localDuration ?? null
+            : intent === "time"
+            ? opts.duration ?? localDuration ?? null
+            : null,
       };
     },
     searchPools: async (parsed, cats) => {
@@ -262,10 +270,10 @@ const cases: Array<[string, () => Promise<void>]> = [
     async () => {
       assert.deepStrictEqual(parseTimeExpr("an hour earlier"), { mode: "relative", deltaMinutes: -60 });
       assert.deepStrictEqual(parseTimeExpr("30 min later"), { mode: "relative", deltaMinutes: 30 });
-      assert.deepStrictEqual(parseTimeExpr("a bit later"), { mode: "relative", deltaMinutes: 30 });
-      assert.deepStrictEqual(parseTimeExpr("a little earlier"), { mode: "relative", deltaMinutes: -30 });
+      assert.deepStrictEqual(parseTimeExpr("a bit later"), { mode: "relative", deltaMinutes: 30, vague: true });
+      assert.deepStrictEqual(parseTimeExpr("a little earlier"), { mode: "relative", deltaMinutes: -30, vague: true });
       assert.deepStrictEqual(parseTimeExpr("half an hour earlier"), { mode: "relative", deltaMinutes: -30 });
-      assert.deepStrictEqual(parseTimeExpr("much later"), { mode: "relative", deltaMinutes: 60 });
+      assert.deepStrictEqual(parseTimeExpr("much later"), { mode: "relative", deltaMinutes: 60, vague: true });
       assert.deepStrictEqual(parseTimeExpr("after 8"), { mode: "absolute", targetTime: "20:00" });
       assert.deepStrictEqual(parseTimeExpr("at 7:30"), { mode: "absolute", targetTime: "19:30" });
       assert.deepStrictEqual(parseTimeExpr("make it 7"), { mode: "absolute", targetTime: "19:00" });
@@ -628,6 +636,138 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(ms(it.stops[1].end_time), ms(T(22, 45))); // 21:00 + 105
       // shorter than before → dessert (23:10) isn't overflowed, stays put
       assert.strictEqual(ms(it.stops[2].start_time), ms(T(23, 10)));
+    },
+  ],
+  [
+    "REGRESSION A: 'start at 6pm' phrasings are TIME, never duration",
+    async () => {
+      for (const p of ["start at 6pm", "make it start at 6pm"]) {
+        assert.strictEqual(parseDurationExpr(p), null, `"${p}" must not parse as duration`);
+        assert.deepStrictEqual(parseTimeExpr(p), { mode: "absolute", targetTime: "18:00" });
+      }
+      // the duration-unit guard: a number owned by "hours" is not a clock time
+      assert.strictEqual(parseTimeExpr("make it 2 hours"), null);
+      assert.deepStrictEqual(parseDurationExpr("make it 2 hours"), { mode: "absolute", targetMinutes: 120 });
+      // through the engine: start moves, duration untouched
+      const it = mkItinerary();
+      const res = await swapStop(it, 0, "make it start at 6pm", new Date(T(16, 0)), mkDeps({ legMin: 10 }));
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      assert.strictEqual(res.path, "time");
+      assert.strictEqual(ms(it.stops[0].start_time), ms(T(18, 0)));
+      assert.strictEqual(it.stops[0].durationMinutes?.total, 105, "duration unchanged");
+    },
+  ],
+  [
+    "REGRESSION A2: compound 'start at 6pm for 2 hours' applies BOTH halves",
+    async () => {
+      assert.deepStrictEqual(parseTimeExpr("start at 6pm for 2 hours"), { mode: "absolute", targetTime: "18:00" });
+      assert.deepStrictEqual(parseDurationExpr("start at 6pm for 2 hours"), { mode: "absolute", targetMinutes: 120 });
+      const it = mkItinerary();
+      const res = await swapStop(it, 0, "start at 6pm for 2 hours", new Date(T(16, 0)), mkDeps({ legMin: 10 }));
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      assert.strictEqual(res.path, "time");
+      assert.strictEqual(ms(it.stops[0].start_time), ms(T(18, 0)));
+      assert.strictEqual(it.stops[0].durationMinutes?.total, 120);
+      assert.strictEqual(ms(it.stops[0].end_time), ms(T(20, 0)));
+      assert.match(res.reason, /Moved dinner to 6:00 PM for 2 hours/);
+    },
+  ],
+  [
+    "REGRESSION B: explicit '6am' is honored — 06:00, meridiem never flipped",
+    async () => {
+      assert.deepStrictEqual(parseTimeExpr("6am"), { mode: "absolute", targetTime: "06:00" });
+      assert.deepStrictEqual(parseTimeExpr("start at 6am"), { mode: "absolute", targetTime: "06:00" });
+      assert.deepStrictEqual(parseTimeExpr("move it to 6am"), { mode: "absolute", targetTime: "06:00" });
+      // bare times still assume PM ("6" alone, "at 6")
+      assert.deepStrictEqual(parseTimeExpr("6"), { mode: "absolute", targetTime: "18:00" });
+      assert.deepStrictEqual(parseTimeExpr("at 6"), { mode: "absolute", targetTime: "18:00" });
+      // a 6 AM move on a morning-plausible category actually lands
+      const it = createItinerary(
+        [{ ...mkStops()[0], category: "breakfast", name: "Breakfast Spot", start_time: T(10, 0), end_time: T(11, 45) }],
+        [],
+        { time_window: "morning", stop_count: null, aesthetic: "unspecified", category_signals: ["breakfast"], group_context: "solo", budget: null, constraints: [], location: "Ossington" }
+      );
+      const res = await swapStop(it, 0, "move it to 6am", new Date(T(4, 0)), mkDeps({ legMin: 10 }));
+      assert.ok(res.swapped, `expected 6am breakfast to land, got: ${JSON.stringify(res)}`);
+      assert.strictEqual(ms(it.stops[0].start_time), ms(T(6, 0)));
+    },
+  ],
+  [
+    "REGRESSION C: multi-swap sequence stays coherent — no drift",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(16, 0));
+      const steps: Array<[string, number, number, number]> = [
+        // refinement, expected start h/m, expected total
+        ["make it 2 hours", 19, 0, 120],
+        ["make it start at 6pm", 18, 0, 120],
+        ["an hour earlier", 17, 0, 120],
+        ["a bit later", 17, 30, 120],
+      ];
+      for (const [refinement, h, m, total] of steps) {
+        const res = await swapStop(it, 0, refinement, now, mkDeps({ legMin: 10 }));
+        assert.ok(res.swapped, `"${refinement}" refused: ${JSON.stringify(res)}`);
+        assert.strictEqual(ms(it.stops[0].start_time), ms(T(h, m)), `start after "${refinement}"`);
+        assert.strictEqual(it.stops[0].durationMinutes?.total, total, `total after "${refinement}"`);
+      }
+      assert.strictEqual(ms(it.stops[0].end_time), ms(T(19, 30))); // 17:30 + 120
+    },
+  ],
+  [
+    "interpret floor holds against a lying model (classification, meridiem, garbage deltas)",
+    async () => {
+      // stub Groq to return deliberately wrong output per call
+      const realFetch = globalThis.fetch;
+      let modelOut = "{}";
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("api.groq.com")) {
+          return new Response(
+            JSON.stringify({ choices: [{ message: { content: modelOut } }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      const parsed = {
+        time_window: "evening", stop_count: null, aesthetic: "lively",
+        category_signals: ["dinner"], group_context: "date",
+        budget: null, constraints: [], location: "Ossington",
+      };
+      const model = (o: object) => (modelOut = JSON.stringify(o));
+      const run = (refinement: string) =>
+        interpretRefinement("test-key", parsed, "dinner", T(19, 0), refinement);
+      try {
+        // model misclassifies the start request as duration-120 → floor forces time 18:00
+        model({ intent: "duration", path: "refilter", category: "dinner", duration: { mode: "absolute", targetMinutes: 120 }, time: null });
+        const a = await run("make it start at 6pm");
+        assert.strictEqual(a.intent, "time");
+        assert.deepStrictEqual(a.time, { mode: "absolute", targetTime: "18:00" });
+        assert.strictEqual(a.duration, null);
+
+        // model flips 6am to 18:00 → local explicit meridiem wins
+        model({ intent: "time", path: "refilter", category: "dinner", time: { mode: "absolute", targetTime: "18:00" }, duration: null });
+        const b = await run("move it to 6am");
+        assert.deepStrictEqual(b.time, { mode: "absolute", targetTime: "06:00" });
+
+        // model returns a garbage delta for an EXACT local relative → local wins
+        model({ intent: "time", path: "refilter", category: "dinner", time: { mode: "relative", deltaMinutes: -540 }, duration: null });
+        const c = await run("an hour earlier");
+        assert.deepStrictEqual(c.time, { mode: "relative", deltaMinutes: -60 });
+
+        // model flips the SIGN of a vague relative → rejected, local default kept
+        model({ intent: "time", path: "refilter", category: "dinner", time: { mode: "relative", deltaMinutes: 30 }, duration: null });
+        const d = await run("a bit earlier");
+        assert.deepStrictEqual(d.time, { mode: "relative", deltaMinutes: -30 });
+
+        // a SANE model refinement of a vague relative is still allowed
+        model({ intent: "time", path: "refilter", category: "dinner", time: { mode: "relative", deltaMinutes: -45 }, duration: null });
+        const e = await run("a bit earlier");
+        assert.deepStrictEqual(e.time, { mode: "relative", deltaMinutes: -45 });
+      } finally {
+        globalThis.fetch = realFetch;
+      }
     },
   ],
   [

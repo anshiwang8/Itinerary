@@ -352,13 +352,15 @@ export function mockSwapDeps(
   return {
     interpret: async (parsed, category, _startISO, refinement) => {
       const duration = parseDuration(refinement);
-      const time = duration ? null : parseTime(refinement);
+      const time = parseTime(refinement);
       const constraintish = /patio|outdoor|rooftop|terrace|near /i.test(refinement);
       const cheap = /cheap|budget/i.test(refinement);
-      const intent: SwapIntent = duration
-        ? "duration"
-        : time
+      // same routing as the real interpret: both halves ("start at 6pm for
+      // 2 hours") go to time, which applies the duration alongside
+      const intent: SwapIntent = time
         ? "time"
+        : duration
+        ? "duration"
         : constraintish
         ? "constraint"
         : "venue";
@@ -371,8 +373,8 @@ export function mockSwapDeps(
         constraints: constraintish
           ? [...(parsed.constraints ?? []), refinement.trim()]
           : parsed.constraints ?? [],
-        time,
-        duration,
+        time: intent === "time" ? time : null,
+        duration: intent === "duration" || intent === "time" ? duration : null,
       };
     },
     searchPools: async (_parsed, categories) => mockPools(categories),
