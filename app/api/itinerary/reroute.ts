@@ -35,6 +35,10 @@ export type RerouteResult =
   | {
       rerouted: true;
       floor_time: string;
+      /** the instant the replanned chain actually departs from — the later
+       * of floor and the previous kept stop's committed end. The banner
+       * shows this; floor_time stays the guarantee value. */
+      anchor_time: string;
       changed: ChangedStop[];
       unchanged: number[];
     };
@@ -112,19 +116,40 @@ export async function rerouteItinerary(
   // floor_time = max(now, end of the active stop); no active stop → now.
   const floor = floorTime(itinerary, now);
 
-  // Affected: strictly after the floor AND never locked. Locked /
-  // active / completed / skipped stops are untouchable.
-  const affectedIdx: number[] = [];
+  // Timed-stop bookkeeping first — legs join timed pairs, and the
+  // disruption's blast radius is defined in timed positions.
+  const timedIdx: number[] = [];
   itinerary.stops.forEach((s, i) => {
+    if (s.start_time) timedIdx.push(i);
+  });
+
+  // Affected: strictly DOWNSTREAM of the broken leg (leg k joins timed
+  // stops k → k+1, so positions ≥ k+1), strictly after the floor, and
+  // never locked. Stops upstream of the break keep their COMMITTED times
+  // even when the outing hasn't started — a reroute reflows the tail, it
+  // never re-derives the schedule from `now`.
+  const firstDownstreamPos = Math.max(0, disruption.legIndex) + 1;
+  const affectedIdx: number[] = [];
+  timedIdx.forEach((stopIdx, pos) => {
+    const s = itinerary.stops[stopIdx];
     if (
+      pos >= firstDownstreamPos &&
       s.status !== "skipped" &&
       !s.locked &&
-      s.start_time &&
-      new Date(s.start_time).getTime() > floor.getTime()
+      new Date(s.start_time!).getTime() > floor.getTime()
     ) {
-      affectedIdx.push(i);
+      affectedIdx.push(stopIdx);
     }
   });
+
+  // observability at the apply step: where is the plan anchored, what
+  // does the engine think is affected — a reroute that re-derives times
+  // from `now` instead of the committed schedule is visible right here
+  console.log(
+    `[reroute-apply] leg=${disruption.legIndex} now=${now.toISOString()} floor=${floor.toISOString()} | ` +
+      `committed: ${itinerary.stops.map((s) => `${s.category}@${s.start_time ?? "-"}`).join(" ")} | ` +
+      `affected=[${affectedIdx.join(",")}]`
+  );
 
   if (affectedIdx.length === 0) {
     return {
@@ -133,12 +158,6 @@ export async function rerouteItinerary(
     };
   }
 
-  // Timed-stop bookkeeping (legs index timed pairs, skipped stops don't
-  // participate).
-  const timedIdx: number[] = [];
-  itinerary.stops.forEach((s, i) => {
-    if (s.start_time) timedIdx.push(i);
-  });
   const firstAffectedTimedPos = timedIdx.indexOf(affectedIdx[0]);
   const prevTimedStop =
     firstAffectedTimedPos > 0
@@ -192,7 +211,14 @@ export async function rerouteItinerary(
   // ── Travel: inbound leg (last kept timed stop → first new venue),
   // then legs between the new venues. The cancelled transit leg is
   // re-fetched with transit excluded so the dead route can't return.
-  const departISO = floor.toISOString();
+  // Departure = the later of the floor and the previous kept stop's
+  // COMMITTED end — the committed schedule is the source of truth; the
+  // clock only wins once it has actually overtaken the plan.
+  const departMs = Math.max(
+    floor.getTime(),
+    prevTimedStop?.end_time ? new Date(prevTimedStop.end_time).getTime() : 0
+  );
+  const departISO = new Date(departMs).toISOString();
   const timedPicks = withLocations.filter((s) => s.id && s.location);
 
   let inbound: TravelLeg | null = null;
@@ -221,11 +247,9 @@ export async function rerouteItinerary(
     );
   }
 
-  // ── Schedule the replanned chain, anchored at floor (+ inbound travel
-  // when the user has to get there from the current stop).
-  const chainStart = new Date(
-    floor.getTime() + (inbound?.totalMinutes ?? 0) * 60_000
-  );
+  // ── Schedule the replanned chain, anchored at the departure instant
+  // (+ inbound travel when the user has to get there from the kept stop).
+  const chainStart = new Date(departMs + (inbound?.totalMinutes ?? 0) * 60_000);
   const { stops: newSched } = buildSchedule(
     withLocations,
     "",
@@ -262,6 +286,10 @@ export async function rerouteItinerary(
 
   withStatuses(itinerary, now);
 
+  console.log(
+    `[reroute-apply] after: ${itinerary.stops.map((s) => `${s.category}@${s.start_time ?? "-"}`).join(" ")}`
+  );
+
   const changed: ChangedStop[] = affectedIdx.map((stopIdx, j) => ({
     stopIndex: stopIdx,
     before: beforeSnaps[j],
@@ -275,6 +303,7 @@ export async function rerouteItinerary(
   return {
     rerouted: true,
     floor_time: floor.toISOString(),
+    anchor_time: departISO,
     changed,
     unchanged,
   };

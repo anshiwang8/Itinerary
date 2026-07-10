@@ -13,6 +13,7 @@ parse → weather fetch → Places search (one per category) → objective filte
 
 ## Non-negotiable invariants
 - **Reroute floor_time:** floor_time = max(now, active stop's end). Stops at or before floor_time NEVER change. Locked stops never change. If any change violates this, STOP and flag it — do not paper over it.
+- **Reroute blast radius + anchor:** a reroute replans ONLY stops strictly downstream of the disrupted leg (timed positions ≥ legIndex+1); stops upstream of the break keep their COMMITTED times even when the outing hasn't started. The replanned chain departs at max(floor, previous kept stop's committed end) — never re-derive the schedule from `now`; the clock only wins once it has overtaken the plan. `anchor_time` (that departure instant) is what the banner shows; `floor_time` stays the guarantee value. The `[reroute-apply]` log prints committed starts, floor, affected set, and post-reroute starts — check it first when a reroute moves the wrong stops.
 - **Locked ratchet:** a stop locks when active or past, and never unlocks — survives completion and backwards time travel.
 - **Keep-on-missing-data:** never drop a venue for missing data (no price, no hours, no rating = keep). Applies to every filter rule.
 - **ID validation on select:** the LLM picks by venue ID only; invalid ID → one retry with correction → highest-rated fallback flagged. It can never invent a venue.

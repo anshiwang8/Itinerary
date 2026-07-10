@@ -237,19 +237,50 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "cancelled leg deeper in the chain: only that pair excludes transit",
+    "cancelled leg deeper in the chain: upstream stops kept, only the dead pair excludes transit",
     async () => {
       const it = mkItinerary();
       const legCalls: LegCall[] = [];
       const now = new Date(T(19, 30));
-      // leg 1 (bar→dessert) cancelled; inbound (pair 0) keeps transit
+      // leg 1 (bar→dessert) cancelled — the bar itself is UPSTREAM of the
+      // break and reachable exactly as planned, so it is kept, not replanned
       const res = await rerouteItinerary(it, { type: "transit_cancelled", legIndex: 1 }, now, mkDeps(legCalls));
       assert.ok(res.rerouted);
-      assert.strictEqual(legCalls.length, 2);
-      const [inbound, inter] = legCalls;
-      assert.strictEqual(inbound.excludeTransit, false);
-      assert.strictEqual(inter.excludeTransit, true);
+      if (!res.rerouted) return;
+      assert.strictEqual(it.stops[1].name, "Bar Spot");
+      assert.strictEqual(it.stops[1].start_time, T(21, 0));
+      assert.deepStrictEqual(res.changed.map((c) => c.stopIndex), [2]);
+      // one fetched leg: bar → new dessert, transit excluded (the dead pair)
+      assert.strictEqual(legCalls.length, 1);
+      assert.strictEqual(legCalls[0].excludeTransit, true);
       assert.strictEqual(it.stops[1].travelToNext?.mode, "walk");
+      // dessert replans from the bar's COMMITTED end: 22:10 + 10 walk
+      assert.strictEqual(new Date(it.stops[2].start_time!).getTime(), new Date(T(22, 20)).getTime());
+    },
+  ],
+  [
+    "UNSTARTED itinerary: cancelled mid leg keeps committed times, only downstream reflows",
+    async () => {
+      const it = mkItinerary();
+      const legCalls: LegCall[] = [];
+      // planned for 19:00, disruption fires at 13:03 — nothing started,
+      // no active stop, no locked floor
+      const now = new Date(T(13, 3));
+      const res = await rerouteItinerary(it, { type: "transit_cancelled", legIndex: 0 }, now, mkDeps(legCalls));
+      assert.ok(res.rerouted);
+      if (!res.rerouted) return;
+      // dinner is UPSTREAM of the broken leg — its committed 19:00 holds;
+      // the schedule must never re-anchor to the current clock
+      assert.strictEqual(it.stops[0].start_time, T(19, 0), "dinner re-anchored off its committed start");
+      assert.strictEqual(it.stops[0].end_time, T(20, 45));
+      assert.strictEqual(it.stops[0].name, "Dinner Spot");
+      assert.ok(res.unchanged.includes(0));
+      // downstream replans anchor at dinner's COMMITTED end (20:45) + the
+      // 10-min no-transit inbound → bar 20:55, dessert 22:20
+      assert.strictEqual(new Date(res.anchor_time).getTime(), new Date(T(20, 45)).getTime());
+      assert.deepStrictEqual(res.changed.map((c) => c.stopIndex), [1, 2]);
+      assert.strictEqual(new Date(it.stops[1].start_time!).getTime(), new Date(T(20, 55)).getTime());
+      assert.strictEqual(new Date(it.stops[2].start_time!).getTime(), new Date(T(22, 20)).getTime());
     },
   ],
   [

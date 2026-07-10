@@ -390,7 +390,9 @@ export default function Home() {
     const firstChanged = (data.changed as { stopIndex: number }[])[0];
     if (firstChanged) setSelected(updated.stops[firstChanged.stopIndex].category);
 
-    const floorLabel = formatStopTime(data.floor_time);
+    // the banner shows the instant the new chain actually departs from —
+    // for an unstarted plan that's the kept stop's committed end, not `now`
+    const floorLabel = formatStopTime(data.anchor_time ?? data.floor_time);
     const kept = updated.stops.find((s) => s.status === "active" || s.status === "completed");
     setBannerFlat(false);
     setBanner(
