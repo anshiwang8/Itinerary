@@ -143,19 +143,41 @@ Respond with ONLY this JSON, no prose:
 export function parseTimeExpr(text: string): TimeShift | null {
   const s = text.toLowerCase();
 
-  // absolute: "after 8", "at 7:30", "by 9(pm)"
-  const abs = s.match(/\b(?:after|at|by|around|make it)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
-  if (abs) {
-    let h = parseInt(abs[1], 10);
-    const m = abs[2] ? parseInt(abs[2], 10) : 0;
-    const ap = abs[3];
-    if (ap === "pm" && h < 12) h += 12;
-    else if (ap === "am" && h === 12) h = 0;
-    // no am/pm and a small hour on an evening plan → assume PM
+  // hour/minute (+ optional meridiem) → "HH:MM"; null when out of range so
+  // callers can fall through (e.g. "by 30 minutes" is relative, not 30:00)
+  const absolute = (h: number, m: number, ap: "am" | "pm" | null): TimeShift | null => {
+    if (ap === "pm" && h < 12) h += 12; // 6pm → 18
+    else if (ap === "am" && h === 12) h = 0; // 12am → midnight
+    // no meridiem: this is an outing planner — a small hour means
+    // afternoon/evening ("3:30" is 15:30, "at 7" is 19:00); 12 stays noon
     else if (!ap && h >= 1 && h <= 11) h += 12;
-    if (h >= 0 && h <= 24 && m >= 0 && m < 60) {
-      return { mode: "absolute", targetTime: `${String(h % 24).padStart(2, "0")}:${String(m).padStart(2, "0")}` };
-    }
+    if (h < 0 || h > 24 || m < 0 || m >= 60) return null;
+    return {
+      mode: "absolute",
+      targetTime: `${String(h % 24).padStart(2, "0")}:${String(m).padStart(2, "0")}`,
+    };
+  };
+
+  // 1) an explicit meridiem anywhere ("6pm", "6 pm", "12:30am") is exact —
+  //    no preposition needed, and the stated am/pm always wins
+  const mer = s.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
+  if (mer) {
+    const r = absolute(parseInt(mer[1], 10), mer[2] ? parseInt(mer[2], 10) : 0, mer[3] as "am" | "pm");
+    if (r) return r;
+  }
+
+  // 2) preposition-anchored bare time: "after 8", "at 7:30", "move it to 6"
+  const abs = s.match(/\b(?:after|at|by|around|to|make it)\s+(\d{1,2})(?::(\d{2}))?\b/);
+  if (abs) {
+    const r = absolute(parseInt(abs[1], 10), abs[2] ? parseInt(abs[2], 10) : 0, null);
+    if (r) return r;
+  }
+
+  // 3) a bare colon time ("3:30") is unambiguously a clock time
+  const bare = s.match(/\b(\d{1,2}):(\d{2})\b/);
+  if (bare) {
+    const r = absolute(parseInt(bare[1], 10), parseInt(bare[2], 10), null);
+    if (r) return r;
   }
 
   // relative direction
@@ -293,7 +315,10 @@ async function interpretRefinement(
       } else if (t?.mode === "absolute" && typeof t.targetTime === "string" && /^\d{1,2}:\d{2}$/.test(t.targetTime)) {
         time = { mode: "absolute", targetTime: t.targetTime };
       }
-      time = time ?? localTime;
+      // the model may refine a vague relative ("twenty minutes earlier"),
+      // but an explicit clock time parsed from the text is exact — the
+      // deterministic floor wins ("6pm" must never become the model's 06:00)
+      time = localTime?.mode === "absolute" ? localTime : time ?? localTime;
     }
 
     let duration: DurationShift | null = null;
@@ -408,13 +433,31 @@ export async function swapStop(
   const base = itinerary.parsed ?? FALLBACK_PARSED;
   const interp = await deps.interpret(base, target.category, target.start_time, refinement);
 
+  // observability at the apply step (like the weather-gate log): parsed
+  // intent + the stop's start/duration before vs after, so a swap that
+  // silently rewrites the wrong field is visible in the server log
+  const beforeStart = target.start_time;
+  const beforeTotal = target.durationMinutes?.total ?? null;
+
+  let result: SwapResult;
   if (interp.intent === "time") {
-    return timeChange(itinerary, stopIndex, target, interp, base, floor, now, deps);
+    result = await timeChange(itinerary, stopIndex, target, interp, base, floor, now, deps);
+  } else if (interp.intent === "duration") {
+    result = await durationChange(itinerary, stopIndex, target, interp, base, floor, now, deps);
+  } else {
+    result = await venueSwap(itinerary, stopIndex, target, interp, base, floor, now, deps);
   }
-  if (interp.intent === "duration") {
-    return durationChange(itinerary, stopIndex, target, interp, base, floor, now, deps);
-  }
-  return venueSwap(itinerary, stopIndex, target, interp, base, floor, now, deps);
+
+  const after = result.swapped ? itinerary.stops[result.stopIndex] : null;
+  console.log(
+    `[swap-apply] refinement="${refinement}" intent=${interp.intent} ` +
+      `time=${JSON.stringify(interp.time)} duration=${JSON.stringify(interp.duration)} | ` +
+      `before start=${beforeStart} total=${beforeTotal} | ` +
+      (after
+        ? `after start=${after.start_time} total=${after.durationMinutes?.total ?? null}`
+        : `REFUSED: ${(result as { reason: string }).reason}`)
+  );
+  return result;
 }
 
 function durLabel(mins: number): string {
@@ -609,8 +652,15 @@ async function timeChange(
     used.add(anchorPick.id);
   }
   const anchorLoc = anchorPick?.location ?? target.location ?? null;
+  // A time-swap moves the slot — it never resizes it. Once customized, the
+  // stop's own duration is the source of truth; only an adapted replacement
+  // venue resets to the category default (same convention as resettleTail).
   const { baseMinutes, bufferMinutes } = getDuration(category);
-  const anchorEnd = new Date(newStartMs + (baseMinutes + bufferMinutes) * 60_000);
+  const defaultTotal = baseMinutes + bufferMinutes;
+  const anchorTotal = anchorPick
+    ? defaultTotal
+    : target.durationMinutes?.total ?? defaultTotal;
+  const anchorEnd = new Date(newStartMs + anchorTotal * 60_000);
 
   // (b) resettle the downstream tail from the anchor's new end (try →
   // adapt → notify). Reusable — duration-swaps will call this too.
@@ -634,7 +684,8 @@ async function timeChange(
     category,
     toTorontoISO(nd),
     anchorPick ? { pick: anchorPick, sel: anchorSel! } : { keep: target },
-    anchorOutbound
+    anchorOutbound,
+    anchorTotal
   );
   if (prevStop && anchorInbound) {
     prevStop.travelToNext = anchorInbound;
@@ -837,8 +888,18 @@ async function finalize(
   reason: string
 ): Promise<SwapResult> {
   const before = snap(target);
-  const { baseMinutes, bufferMinutes } = getDuration(category);
-  const total = baseMinutes + bufferMinutes;
+  // Same rule as timeChange: once customized, the stop's own duration is
+  // the source of truth — a venue swap holds the WHOLE slot, length
+  // included. A category change ("dinner" → "bar") invalidates the old
+  // length, so it falls back to the new category's default.
+  const def = getDuration(category);
+  const defaultTotal = def.baseMinutes + def.bufferMinutes;
+  const total =
+    category === target.category
+      ? target.durationMinutes?.total ?? defaultTotal
+      : defaultTotal;
+  const bufferMinutes = Math.min(def.bufferMinutes, total);
+  const baseMinutes = total - bufferMinutes;
   const newLoc = pick.location ?? target.location;
   const endISO = toTorontoISO(new Date(new Date(startISO).getTime() + total * 60_000));
 

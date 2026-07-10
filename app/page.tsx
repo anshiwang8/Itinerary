@@ -581,12 +581,7 @@ export default function Home() {
     return (
       <main className="empty">
         <div className="empty__mark">Itinerary</div>
-        <div className="eyebrow empty__kicker">Ossington, Toronto · tonight</div>
-        <h1 className="empty__title">What&rsquo;s your evening?</h1>
-        <p className="empty__sub">
-          One night out, planned end to end — real places, real times, real transit — that
-          fixes itself when a route falls through.
-        </p>
+        <h1 className="empty__title">Plan your day</h1>
         <div className="prompt">
           <input
             className="prompt__input"

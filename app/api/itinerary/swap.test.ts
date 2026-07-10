@@ -517,6 +517,120 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "parseTimeExpr: meridiem is applied — 6pm is 18:00, never 6 AM",
+    async () => {
+      assert.deepStrictEqual(parseTimeExpr("6pm"), { mode: "absolute", targetTime: "18:00" });
+      assert.deepStrictEqual(parseTimeExpr("6 pm"), { mode: "absolute", targetTime: "18:00" });
+      assert.deepStrictEqual(parseTimeExpr("6PM"), { mode: "absolute", targetTime: "18:00" });
+      assert.deepStrictEqual(parseTimeExpr("9am"), { mode: "absolute", targetTime: "09:00" });
+      // the classic edges
+      assert.deepStrictEqual(parseTimeExpr("12pm"), { mode: "absolute", targetTime: "12:00" });
+      assert.deepStrictEqual(parseTimeExpr("12am"), { mode: "absolute", targetTime: "00:00" });
+      // bare colon time, no meridiem → afternoon/evening assumption
+      assert.deepStrictEqual(parseTimeExpr("3:30"), { mode: "absolute", targetTime: "15:30" });
+      // "to" phrasing must reach the parser — this was falling through to
+      // the model, which dropped the PM
+      assert.deepStrictEqual(parseTimeExpr("move it to 6pm"), { mode: "absolute", targetTime: "18:00" });
+      assert.deepStrictEqual(parseTimeExpr("move it to 6:15pm"), { mode: "absolute", targetTime: "18:15" });
+    },
+  ],
+  [
+    "COMPOSE: 'make it 2 hours' then 'an hour earlier' keeps the 2-hour duration",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(17, 0));
+      // 1) duration → 120: dinner 19:00–21:00
+      const r1 = await swapStop(it, 0, "make it 2 hours", now, mkDeps({ legMin: 10 }));
+      assert.ok(r1.swapped);
+      assert.strictEqual(it.stops[0].durationMinutes?.total, 120);
+      assert.strictEqual(ms(it.stops[0].end_time), ms(T(21, 0)));
+      // 2) time → -60: start shifts, the CUSTOM duration is the source of truth
+      const r2 = await swapStop(it, 0, "an hour earlier", now, mkDeps({ legMin: 10 }));
+      assert.ok(r2.swapped);
+      if (!r2.swapped) return;
+      assert.strictEqual(r2.path, "time");
+      assert.strictEqual(ms(it.stops[0].start_time), ms(T(18, 0)));
+      assert.strictEqual(
+        it.stops[0].durationMinutes?.total,
+        120,
+        "customized duration must survive a later time-swap"
+      );
+      assert.strictEqual(ms(it.stops[0].end_time), ms(T(20, 0))); // 18:00 + 120, NOT +105
+      // downstream chains off the preserved end: bar at 20:00 + 10 leg
+      assert.strictEqual(ms(it.stops[1].start_time), ms(T(20, 10)));
+    },
+  ],
+  [
+    "ABSOLUTE: 'move it to 6pm' lands the stop at 18:00 (not 6 AM)",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(16, 0));
+      // no injected time — the deterministic parser must carry the PM
+      const res = await swapStop(it, 0, "move it to 6pm", now, mkDeps({ legMin: 10 }));
+      assert.ok(res.swapped, `expected a swap, got: ${JSON.stringify(res)}`);
+      if (!res.swapped) return;
+      assert.strictEqual(res.path, "time");
+      assert.strictEqual(ms(it.stops[0].start_time), ms(T(18, 0)));
+    },
+  ],
+  [
+    "VENUE swap preserves a customized duration when the category is unchanged",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(17, 0));
+      // customize dinner to 2 hours: 19:00–21:00, bar reflows to 21:10
+      const r1 = await swapStop(it, 0, "make it 2 hours", now, mkDeps({ legMin: 10 }));
+      assert.ok(r1.swapped);
+      assert.strictEqual(it.stops[0].durationMinutes?.total, 120);
+      // venue swap "cheaper" (refilter, same category) — the WHOLE slot
+      // holds, length included
+      const r2 = await swapStop(it, 0, "somewhere cheaper", now, mkDeps({ legMin: 10 }));
+      assert.ok(r2.swapped);
+      if (!r2.swapped) return;
+      assert.strictEqual(r2.path, "refilter");
+      assert.strictEqual(it.stops[0].id, "dinner_fresh"); // new venue
+      assert.strictEqual(it.stops[0].start_time, T(19, 0)); // slot held
+      assert.strictEqual(
+        it.stops[0].durationMinutes?.total,
+        120,
+        "customized duration must survive a venue swap"
+      );
+      assert.strictEqual(ms(it.stops[0].end_time), ms(T(21, 0))); // 19:00 + 120
+      // buffer preserved, base absorbs the customization (buildStop semantics)
+      assert.strictEqual(it.stops[0].durationMinutes?.buffer, 15);
+      assert.strictEqual(it.stops[0].durationMinutes?.base, 105);
+      // bar already sits at 21:10 (from the reflow) → no further shift
+      assert.strictEqual(ms(it.stops[1].start_time), ms(T(21, 10)));
+    },
+  ],
+  [
+    "VENUE swap that CHANGES category drops the old duration for the new default",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(17, 0));
+      // customize the bar to 2 hours: 21:00–23:00, dessert reflows to 23:10
+      const r1 = await swapStop(it, 1, "stay 2 hours", now, mkDeps({ legMin: 10 }));
+      assert.ok(r1.swapped);
+      assert.strictEqual(it.stops[1].durationMinutes?.total, 120);
+      // research swap into a different KIND of place → restaurant default (105)
+      const r2 = await swapStop(
+        it, 1, "make it a proper restaurant instead", now,
+        mkDeps({ path: "research", newCategory: "restaurant", legMin: 10 })
+      );
+      assert.ok(r2.swapped);
+      if (!r2.swapped) return;
+      assert.strictEqual(it.stops[1].category, "restaurant");
+      assert.strictEqual(
+        it.stops[1].durationMinutes?.total,
+        105,
+        "a category change takes the new category's default"
+      );
+      assert.strictEqual(ms(it.stops[1].end_time), ms(T(22, 45))); // 21:00 + 105
+      // shorter than before → dessert (23:10) isn't overflowed, stays put
+      assert.strictEqual(ms(it.stops[2].start_time), ms(T(23, 10)));
+    },
+  ],
+  [
     "no better candidate → honest refusal, original kept",
     async () => {
       const it = mkItinerary();
