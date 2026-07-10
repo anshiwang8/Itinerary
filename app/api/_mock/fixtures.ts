@@ -53,7 +53,7 @@ function venue(
   priceLevel: string,
   openH: number,
   closeH: number,
-  desc: string
+  desc?: string
 ): Place {
   return {
     id,
@@ -63,7 +63,8 @@ function venue(
     priceLevel,
     currentOpeningHours: daily(openH, closeH),
     businessStatus: "OPERATIONAL",
-    editorialSummary: { text: desc },
+    // omitted when absent — the keep-on-missing/description-less case
+    ...(desc ? { editorialSummary: { text: desc } } : {}),
   };
 }
 
@@ -93,9 +94,9 @@ const BAR: Place[] = [
     "Cheap-and-cheerful late-night bar under red lanterns."),
 ];
 const DESSERT: Place[] = [
-  // closes 9 PM — THE adapt trigger for late-shifted evenings
-  venue("fx_dessert_sundown", "Sundown Scoops", 43.6488, -79.4197, 4.5, "PRICE_LEVEL_INEXPENSIVE", 12, 21,
-    "Small-batch scoops, gone by sundown."),
+  // closes 9 PM — THE adapt trigger for late-shifted evenings. Deliberately
+  // has NO description: the dessert card is the absent-description case.
+  venue("fx_dessert_sundown", "Sundown Scoops", 43.6488, -79.4197, 4.5, "PRICE_LEVEL_INEXPENSIVE", 12, 21),
   venue("fx_dessert_midnight", "Midnight Flour", 43.6497, -79.4209, 4.4, "PRICE_LEVEL_MODERATE", 10, 1,
     "Late-night bakery for the after-dinner crowd."),
   venue("fx_dessert_glace", "Glacé Counter", 43.647, -79.4188, 4.2, "PRICE_LEVEL_INEXPENSIVE", 12, 23,
@@ -153,6 +154,7 @@ export function mockParse(prompt: string): ParsedPrompt {
   if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
   if (/dessert|ice\s*cream|gelato/.test(p)) signals.push("dessert");
   if (/coffee|caf[eé]/.test(p)) signals.push("coffee");
+  if (/walk|park|stroll|hike|picnic/.test(p)) signals.push("park walk");
 
   const clock = p.match(/\d{1,2}(?::\d{2})?\s*(?:am|pm)/);
   const time_window = clock
@@ -297,17 +299,24 @@ export function mockTravelLegs(points: LatLng[]): TravelLeg[] {
   return points.slice(0, -1).map((from, i) => mockLeg(i, from, points[i + 1]));
 }
 
-// ── weather: 24 calm hours from now. To exercise the weather gate in a
-// scenario, raise precipProbability above 50 for the plan's target hour. ──
+// ── weather: 48 calm hours from now, EXCEPT a fixed daily rain window at
+// 3 PM local (precip 80) — the deterministic trigger for the weather gate
+// and the all-pools-empty net: plan an outdoor category "at 3pm" and it
+// blocks, today or rolled to tomorrow. Every other hour stays calm. ──
+export const MOCK_RAIN_HOUR = 15;
 export function mockWeather(): WeatherHour[] {
   const start = new Date();
   start.setMinutes(0, 0, 0);
-  return Array.from({ length: 24 }, (_, i) => ({
-    hourISO: new Date(start.getTime() + i * 3_600_000).toISOString(),
-    tempC: 20,
-    precipProbability: 10,
-    condition: "Clear",
-  }));
+  return Array.from({ length: 48 }, (_, i) => {
+    const d = new Date(start.getTime() + i * 3_600_000);
+    const rain = d.getHours() === MOCK_RAIN_HOUR;
+    return {
+      hourISO: d.toISOString(),
+      tempC: 20,
+      precipProbability: rain ? 80 : 10,
+      condition: rain ? "Rain" : "Clear",
+    };
+  });
 }
 
 // ── availability seam, mock flavor: stored stops carry no hours, so look

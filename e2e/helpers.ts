@@ -31,6 +31,36 @@ export async function planEvening(page: Page, prompt: string): Promise<void> {
   await expect(page.locator(".chip").first()).toBeVisible({ timeout: 30_000 });
 }
 
+/**
+ * The inverse of planEvening: plan a prompt that SHOULD fail loud, assert
+ * the fail-loud surface renders (and no itinerary strip behind it), and
+ * return the message so the spec can pin its exact text.
+ */
+export async function planExpectingProblem(page: Page, prompt: string): Promise<string> {
+  await page.goto("/");
+  await page.locator(".prompt__input").fill(prompt);
+  await page.locator(".prompt__go").click();
+
+  const err = page.locator(".empty__err, .stage__err").first();
+  await expect(err, "expected the fail-loud surface").toBeVisible({ timeout: 30_000 });
+  // the whole point: an honest message, never an empty map
+  await expect(page.locator(".lstrip")).toHaveCount(0);
+  return (await err.innerText()).trim();
+}
+
+/**
+ * Drive the inline swap prompt on a stop card: select the card, type the
+ * refinement, submit. The caller asserts the outcome (new venue card,
+ * banner text) — this only performs the interaction.
+ */
+export async function swapOn(page: Page, venueName: string, refinement: string): Promise<void> {
+  await stripCard(page, venueName).click();
+  const input = page.locator(".lstrip__swapinput");
+  await expect(input, `swap input under "${venueName}"`).toBeVisible();
+  await input.fill(refinement);
+  await page.locator(".lstrip__swapgo").click();
+}
+
 /** The strip card whose venue name contains `venueName`. */
 export function stripCard(page: Page, venueName: string): Locator {
   return page.locator(".lstrip__stop", {

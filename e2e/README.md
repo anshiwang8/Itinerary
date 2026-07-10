@@ -34,14 +34,18 @@ mocked pipeline source.
 - **Sundown Scoops** (dessert, closes 21:00) is the downstream adapt
   trigger for late-shifted evenings; **Midnight Flour** is its late
   replacement.
-- Every fixture has an `editorialSummary` (the card's description line).
-  Two double as **constraint evidence** for mockSelect: "vegan" lives on
-  **Noodle Letterpress** (dinner), "patio" on **The Standing Room** (bar).
-  A constraint with no evidence in the pool → id:null + unmetConstraint →
-  the fail-loud surface ("vegan steakhouse" fails; "vegan dinner" picks
-  Noodle Letterpress).
+- Fixtures carry an `editorialSummary` (the card's description line) —
+  EXCEPT **Sundown Scoops**, deliberately description-less (the
+  absent-description case). Two summaries double as **constraint
+  evidence** for mockSelect: "vegan" lives on **Noodle Letterpress**
+  (dinner), "patio" on **The Standing Room** (bar). A constraint with no
+  evidence in the pool → id:null + unmetConstraint → the fail-loud
+  surface ("vegan steakhouse" fails; "vegan dinner" picks Noodle
+  Letterpress).
 - Unknown categories get a generated "Fixture <Category> One/Two/Three"
-  pool. Weather is 24 calm hours (20°, precip 10%).
+  pool. Weather is 48 calm hours (20°, precip 10%) with a built-in daily
+  **rain window at 3 PM local** (precip 80, `MOCK_RAIN_HOUR`) — plan an
+  outdoor category "at 3pm" to trigger the weather gate / empty-pool net.
 
 ## Fail-loud guards — deterministic in mock mode
 
@@ -52,8 +56,10 @@ All of these produce their exact message with zero live calls:
 - `"cheap fancy dinner"` → the contradiction message (prompt-level guard).
 - `"vegan steakhouse"` → unmet-constraint fail-loud (generic steakhouse
   pool has no vegan evidence).
-- The all-pools-empty net needs a nudge to trigger in mock: raise
-  `mockWeather` precip above 50 for an outdoor-category prompt.
+- `"a walk in the park at 3pm"` → the all-pools-empty net via the built-in
+  3 PM rain window.
+
+All of the above are pinned exact-text in `failloud.spec.ts`.
 
 ## Files
 
@@ -61,6 +67,16 @@ All of these produce their exact message with zero live calls:
   stop cards render with names/times, runs the desync check.
 - `fixtures.spec.ts` (@mock) — guards the seam: deterministic picks,
   fixture transit line, canned weather.
-- `helpers.ts` — `planEvening(page, prompt)` and
-  `expectStripMatchesPin(page, venueName)` — the strip↔map agreement
+- `failloud.spec.ts` (@mock) — every bad-input message pinned exact-text
+  (impossible times, contradiction, gibberish, weather net, unmet
+  constraint + the positive vegan pick).
+- `scenarios.spec.ts` (@mock) — interacting state: price refresh on a
+  cheaper swap ($$$ → $$), description present/absent, swap input takes
+  real keystrokes with spaces, repeated swaps (cheaper → fancier →
+  cheaper), swap-then-reroute (locked swapped stop survives), active-stop
+  swap rejection. Uses the dev time-sim (`simAt`) for status control.
+- `helpers.ts` — `planEvening(page, prompt)`,
+  `planExpectingProblem(page, prompt)` (fail-loud counterpart — asserts
+  the surface, returns the message), `swapOn(page, venue, refinement)`,
+  and `expectStripMatchesPin(page, venueName)` — the strip↔map agreement
   check. Reuse it after every mutation (swap, reroute, time travel).
