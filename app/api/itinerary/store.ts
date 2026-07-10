@@ -39,6 +39,86 @@ export interface Itinerary {
 const g = globalThis as { __itineraryStore?: Map<string, Itinerary> };
 const store: Map<string, Itinerary> = (g.__itineraryStore ??= new Map());
 
+// ── Persistence seam (same discipline as the mock layer: a data-source
+// swap, not a rewrite). The in-memory Map is fine for dev/e2e where one
+// long-lived process serves every request — but on serverless (Vercel)
+// each route invocation can land on a different instance, so globalThis
+// does NOT survive between the POST that stores an itinerary and the
+// GET/swap/reroute that read it. When a Redis REST endpoint is configured
+// (Vercel KV or Upstash env vars), loadItinerary/saveItinerary go through
+// it and Redis is the single source of truth; otherwise they collapse to
+// the Map. Routes use ONLY these two; the engines never touch the store. ──
+const KV_TTL_SECONDS = 7 * 24 * 60 * 60; // itineraries are ephemeral demos
+
+function kvEnv(): { url: string; token: string } | null {
+  const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
+  return url && token ? { url, token } : null;
+}
+
+/** True when a persistent (Redis REST) store is configured. */
+export function kvConfigured(): boolean {
+  return kvEnv() !== null;
+}
+
+// Serverless without a persistent store = silent 404s mid-demo. Refuse
+// loudly instead: the deploy checklist says to set the KV env vars.
+function requirePersistenceOnServerless() {
+  if (process.env.VERCEL && !kvConfigured()) {
+    throw new Error(
+      "No persistent store configured: itineraries can't survive serverless invocations in memory. " +
+        "Set KV_REST_API_URL + KV_REST_API_TOKEN (Vercel KV / Upstash Redis) — see DEPLOY.md."
+    );
+  }
+}
+
+// One Upstash/Vercel-KV REST command, e.g. ["SET", key, value, "EX", ttl].
+async function redis(cmd: (string | number)[]): Promise<unknown> {
+  const kv = kvEnv()!;
+  const res = await fetch(kv.url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${kv.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(cmd),
+    cache: "no-store",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`KV request failed (${res.status}): ${data?.error ?? "unknown"}`);
+  }
+  return data?.result;
+}
+
+const kvKey = (id: string) => `itin:${id}`;
+
+/**
+ * Fetch an itinerary for a route handler. KV mode always reads Redis (a
+ * per-instance memory copy could be stale the moment another instance
+ * writes); memory mode reads the Map. Mutating routes MUST follow up with
+ * saveItinerary — object identity alone persists nothing under KV.
+ */
+export async function loadItinerary(id: string): Promise<Itinerary | undefined> {
+  requirePersistenceOnServerless();
+  if (kvConfigured()) {
+    const raw = await redis(["GET", kvKey(id)]);
+    return typeof raw === "string" ? (JSON.parse(raw) as Itinerary) : undefined;
+  }
+  return store.get(id);
+}
+
+/** Write an itinerary back after creation or any mutation (statuses/lock
+ * ratchet included — withStatuses mutates). Memory mode: Map upsert. */
+export async function saveItinerary(itinerary: Itinerary): Promise<void> {
+  requirePersistenceOnServerless();
+  if (kvConfigured()) {
+    await redis(["SET", kvKey(itinerary.id), JSON.stringify(itinerary), "EX", KV_TTL_SECONDS]);
+    return;
+  }
+  store.set(itinerary.id, itinerary);
+}
+
 /**
  * Pure status derivation against a reference time t:
  *   t < start          → upcoming

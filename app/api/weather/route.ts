@@ -7,6 +7,11 @@ import { isMockMode, mockWeather } from "../_mock/fixtures";
 const FORECAST_URL = "https://weather.googleapis.com/v1/forecast/hours:lookup";
 const OSSINGTON = { latitude: 43.6479, longitude: -79.4197 };
 
+// A parameterless GET would otherwise be rendered statically at BUILD
+// time (stale forecast baked into the deploy). Force per-request
+// execution; the fetch below keeps its own 10-minute data cache.
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   // fixture seam: 24 calm deterministic hours, no Weather call
   if (isMockMode()) return NextResponse.json(mockWeather());

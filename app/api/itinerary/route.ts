@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createItinerary } from "./store";
+import { createItinerary, saveItinerary } from "./store";
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
 import { ParsedPrompt } from "../places/search/filter";
@@ -32,5 +32,13 @@ export async function POST(request: NextRequest) {
   }
 
   const itinerary = createItinerary(stops, legs, parsed, homeLeg);
+  try {
+    await saveItinerary(itinerary);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
+  }
   return NextResponse.json({ id: itinerary.id });
 }

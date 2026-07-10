@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getItinerary } from "../../store";
+import { loadItinerary, saveItinerary } from "../../store";
 import { swapStop } from "../../swap";
 
 // POST /api/itinerary/[id]/swap
@@ -8,7 +8,15 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const itinerary = getItinerary(params.id);
+  let itinerary;
+  try {
+    itinerary = await loadItinerary(params.id);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
+  }
   if (!itinerary) {
     return NextResponse.json(
       { error: `No itinerary with id "${params.id}".` },
@@ -52,6 +60,8 @@ export async function POST(
 
   try {
     const result = await swapStop(itinerary, stopIndex, refinement.trim(), now);
+    // statuses/lock ratchet mutate even on a refusal — always write back
+    await saveItinerary(itinerary);
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json(
