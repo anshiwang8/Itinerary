@@ -167,6 +167,72 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "CONTRACT (mentor repro): 'plan a lunch' at 11:20 AM → SAME-DAY noon",
+    () => {
+      // real Groq for "plan a lunch" returns time_window "unspecified" (or
+      // "today, lunchtime"), categories ["lunch"] — both must land noon today
+      const at1120 = new Date(2026, 6, 11, 11, 20, 0);
+      for (const tw of ["unspecified", "today, lunchtime", "lunch"]) {
+        const r = resolveStartTimeChecked(tw, at1120, ["lunch"]);
+        assert.strictEqual(r.ok, true, `"${tw}" refused`);
+        if (r.ok) {
+          assert.strictEqual(
+            r.start.toISOString(),
+            new Date(2026, 6, 11, 12, 0, 0).toISOString(),
+            `"${tw}" resolved off same-day noon`
+          );
+        }
+      }
+    },
+  ],
+  [
+    "CONTRACT (mentor repro): 'plan a lunch' at 9 PM → NEXT-DAY noon",
+    () => {
+      const at9pm = new Date(2026, 6, 11, 21, 0, 0);
+      const r = resolveStartTimeChecked("unspecified", at9pm, ["lunch"]);
+      assert.strictEqual(r.ok, true);
+      if (r.ok) {
+        assert.strictEqual(
+          r.start.toISOString(),
+          new Date(2026, 6, 12, 12, 0, 0).toISOString()
+        );
+      }
+    },
+  ],
+  [
+    "CONTRACT: past-resolving time references roll forward on BOTH branches",
+    () => {
+      const at5pm = new Date(2026, 6, 11, 17, 0, 0);
+      // day-part branch: "afternoon" (14:00) asked at 5 PM → tomorrow 14:00
+      assert.strictEqual(
+        resolveStartTime("afternoon", at5pm, []).toISOString(),
+        new Date(2026, 6, 12, 14, 0, 0).toISOString()
+      );
+      // category-inferred branch: brunch (10:30) asked at 5 PM → tomorrow 10:30
+      assert.strictEqual(
+        resolveStartTime("unspecified", at5pm, ["brunch"]).toISOString(),
+        new Date(2026, 6, 12, 10, 30, 0).toISOString()
+      );
+    },
+  ],
+  [
+    "CONTRACT: no time signal + no category match → next full hour (immediate)",
+    () => {
+      const t = new Date(2026, 6, 11, 13, 20, 0);
+      assert.strictEqual(
+        resolveStartTime("unspecified", t, ["axe throwing"]).toISOString(),
+        new Date(2026, 6, 11, 14, 0, 0).toISOString()
+      );
+      // KNOWN INTERACTION (flagged for the ambiguous-prompt work, not fixed
+      // here): late at night the immediate slot falls outside the generic
+      // 8–23 band and the checked resolver refuses it — a vague prompt at
+      // 11:30 PM cannot get an immediate itinerary today.
+      const late = new Date(2026, 6, 11, 23, 30, 0);
+      const r = resolveStartTimeChecked("unspecified", late, ["axe throwing"]);
+      assert.strictEqual(r.ok, false);
+    },
+  ],
+  [
     "4 AM 'axe throwing' (no default): plausible-band check fails loud",
     () => {
       const fourAM = new Date(2026, 6, 3, 4, 0, 0);

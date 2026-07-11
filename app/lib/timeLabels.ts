@@ -4,26 +4,49 @@
 // time-only. Decision is per-instant against a reference "now", so a
 // schedule crossing midnight labels only the post-midnight stops.
 // No scheduling logic here — display formatting only.
+//
+// EVERYTHING renders in the plan's home timezone (America/Toronto),
+// NEVER the viewer's. The itinerary is a Toronto evening; a viewer in a
+// UTC+8 browser must still read "12:00 PM", not their local "12:00 AM"
+// (that exact off-by-a-timezone rendering shipped as the
+// midnight-itinerary-for-lunch bug).
+const HOME_TZ = "America/Toronto";
 
 type DateInput = Date | string;
 const toDate = (x: DateInput): Date => (typeof x === "string" ? new Date(x) : x);
 
-function timeOnly(d: Date): string {
-  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const dayPartsFmt = new Intl.DateTimeFormat("en-CA", {
+  timeZone: HOME_TZ,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+// The instant's calendar day IN HOME_TZ, as a comparable UTC-ms value.
+function calendarDay(d: Date): number {
+  const p = Object.fromEntries(dayPartsFmt.formatToParts(d).map((x) => [x.type, x.value]));
+  return Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day));
 }
 
-// Whole calendar days from ref's local date to d's local date.
+function timeOnly(d: Date): string {
+  return d.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: HOME_TZ,
+  });
+}
+
+// Whole calendar days from ref's HOME_TZ date to d's HOME_TZ date.
 function dayOffset(d: Date, ref: Date): number {
-  const a = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const b = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate()).getTime();
-  return Math.round((a - b) / 86_400_000);
+  return Math.round((calendarDay(d) - calendarDay(ref)) / 86_400_000);
 }
 
 // "Sat Jul 6" — weekday + month + day, no comma (matches the spec).
 function shortDate(d: Date): string {
-  const wd = d.toLocaleDateString("en-US", { weekday: "short" });
-  const mo = d.toLocaleDateString("en-US", { month: "short" });
-  return `${wd} ${mo} ${d.getDate()}`;
+  const wd = d.toLocaleDateString("en-US", { weekday: "short", timeZone: HOME_TZ });
+  const mo = d.toLocaleDateString("en-US", { month: "short", timeZone: HOME_TZ });
+  const p = Object.fromEntries(dayPartsFmt.formatToParts(d).map((x) => [x.type, x.value]));
+  return `${wd} ${mo} ${Number(p.day)}`;
 }
 
 /**
