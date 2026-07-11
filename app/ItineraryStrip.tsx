@@ -1,6 +1,7 @@
 "use client";
 
 import { formatStopRange, formatStopTime } from "./lib/timeLabels";
+import { resolveCategory } from "./api/schedule/durations";
 
 // Horizontal itinerary strip — the primary surface, sitting just under
 // the search bar. Reads left to right like a transit-app trip view:
@@ -166,6 +167,11 @@ function StopCard({
       <div className="lstrip__facts">
         {stop.rating != null && <span className="lstrip__rating">{stop.rating.toFixed(1)}★</span>}
         {price && <span className="lstrip__price">{price}</span>}
+        {/* parks with no price data are free — say so instead of a blank
+            (keep-on-missing elsewhere: unknown price on a venue stays silent) */}
+        {!price && resolveCategory(stop.category) === "park" && (
+          <span className="lstrip__price">Free</span>
+        )}
       </div>
       {stop.description && <div className="lstrip__desc">{stop.description}</div>}
       {selected && stop.reason && <div className="lstrip__reason">{stop.reason}</div>}

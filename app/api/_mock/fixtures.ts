@@ -154,7 +154,13 @@ export function mockParse(prompt: string): ParsedPrompt {
   if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
   if (/dessert|ice\s*cream|gelato/.test(p)) signals.push("dessert");
   if (/coffee|caf[eé]/.test(p)) signals.push("coffee");
-  if (/walk|park|stroll|hike|picnic/.test(p)) signals.push("park walk");
+  // passive outdoor/nature enjoyment normalizes to "park" (mirrors the
+  // real parse prompt's normalization rule)
+  if (/bench|scenery|greenery|fresh air|people.watching|calm outside|nature/.test(p)) {
+    signals.push("park");
+  } else if (/walk|park|stroll|hike|picnic/.test(p)) {
+    signals.push("park walk");
+  }
 
   const clock = p.match(/\d{1,2}(?::\d{2})?\s*(?:am|pm)/);
   const time_window = clock

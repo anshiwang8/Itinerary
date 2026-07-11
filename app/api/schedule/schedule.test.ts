@@ -216,6 +216,24 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "park prompts anchor immediately and pass their dawn-to-dusk band",
+    () => {
+      // no category default → next full hour; the park band (6–22) accepts
+      // early-morning and daytime immediate slots the generic band refused
+      const at5am = new Date(2026, 6, 11, 5, 10, 0);
+      const early = resolveStartTimeChecked("unspecified", at5am, ["park"]);
+      assert.strictEqual(early.ok, true);
+      if (early.ok) {
+        assert.strictEqual(early.start.toISOString(), new Date(2026, 6, 11, 6, 0, 0).toISOString());
+      }
+      const midday = resolveStartTimeChecked("unspecified", new Date(2026, 6, 11, 12, 20, 0), ["park"]);
+      assert.strictEqual(midday.ok, true);
+      // a midnight park sit still honestly refuses
+      const late = resolveStartTimeChecked("unspecified", new Date(2026, 6, 11, 23, 30, 0), ["park"]);
+      assert.strictEqual(late.ok, false);
+    },
+  ],
+  [
     "explicit 'now' → next full hour, overriding category defaults",
     () => {
       const t = new Date(2026, 6, 11, 15, 20, 0); // 3:20 PM

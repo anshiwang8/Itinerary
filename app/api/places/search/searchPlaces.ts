@@ -33,7 +33,22 @@ export function buildQuery(parsed: ParsedPrompt, category: string): string {
     .join(" ");
 }
 
-async function searchText(apiKey: string, textQuery: string): Promise<Place[]> {
+// Green-space categories get a hard Places type filter (includedType:
+// "park") so a "scenic lounge" or view-restaurant can't leak into the
+// pool — free-text relevance alone can't guarantee a genuine public
+// park. Pattern aligned with the park resolver in durations.ts.
+const PARK_PATTERN = /park|trail|garden|green\s*space|greenspace|beach|bench|stroll|hike|\bwalk\b/i;
+
+/** Places type filter for a category, when one applies. */
+export function includedTypeFor(category: string): string | undefined {
+  return PARK_PATTERN.test(category ?? "") ? "park" : undefined;
+}
+
+async function searchText(
+  apiKey: string,
+  textQuery: string,
+  includedType?: string
+): Promise<Place[]> {
   const res = await fetch(SEARCH_TEXT_URL, {
     method: "POST",
     headers: {
@@ -41,7 +56,7 @@ async function searchText(apiKey: string, textQuery: string): Promise<Place[]> {
       "X-Goog-Api-Key": apiKey,
       "X-Goog-FieldMask": FIELD_MASK,
     },
-    body: JSON.stringify({ textQuery }),
+    body: JSON.stringify({ textQuery, ...(includedType ? { includedType } : {}) }),
     cache: "no-store",
   });
   const data = await res.json();
@@ -73,7 +88,9 @@ export async function searchPools(
   }
 
   const results = await Promise.all(
-    categories.map((category) => searchText(apiKey, buildQuery(parsed, category)))
+    categories.map((category) =>
+      searchText(apiKey, buildQuery(parsed, category), includedTypeFor(category))
+    )
   );
   const pools: Record<string, Place[]> = {};
   categories.forEach((category, i) => {

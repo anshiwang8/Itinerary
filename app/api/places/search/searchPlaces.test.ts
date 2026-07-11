@@ -1,7 +1,7 @@
 // buildQuery unit tests — constraints must shape the search query.
 // Run with: npx tsx app/api/places/search/searchPlaces.test.ts
 import assert from "node:assert";
-import { buildQuery } from "./searchPlaces";
+import { buildQuery, includedTypeFor } from "./searchPlaces";
 import { ParsedPrompt } from "./filter";
 
 function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
@@ -51,6 +51,23 @@ const cases: Array<[string, () => void]> = [
     () => {
       const q = buildQuery(mkParsed({ aesthetic: "lively night out" }), "bar");
       assert.strictEqual(q, "lively night out bar Ossington Toronto");
+    },
+  ],
+  [
+    "park-biased search: green-space categories get includedType 'park'",
+    () => {
+      // the hard type filter keeps scenic lounges/restaurants out of the pool
+      assert.strictEqual(includedTypeFor("park"), "park");
+      assert.strictEqual(includedTypeFor("park walk"), "park");
+      assert.strictEqual(includedTypeFor("garden"), "park");
+      assert.strictEqual(includedTypeFor("quiet trail"), "park");
+      // commercial categories stay unfiltered free-text searches
+      assert.strictEqual(includedTypeFor("bar"), undefined);
+      assert.strictEqual(includedTypeFor("dinner"), undefined);
+      assert.strictEqual(includedTypeFor("boardwalk cafe"), undefined); // \bwalk\b — a boardwalk CAFE is commercial
+      // the text query itself is unchanged for parks (type filter does the work)
+      const q = buildQuery(mkParsed({ aesthetic: "quiet" }), "park");
+      assert.strictEqual(q, "quiet park Ossington Toronto");
     },
   ],
 ];
