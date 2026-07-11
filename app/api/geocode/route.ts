@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { zoneFromLatLng } from "../../lib/zoneTime";
 import { isMockMode, mockGeocode } from "../_mock/fixtures";
 
 // POST /api/geocode { query } → { label, location: { latitude, longitude } }
@@ -57,9 +58,12 @@ export async function POST(request: NextRequest) {
         { status: 404 }
       );
     }
+    const { latitude, longitude } = top.location;
     return NextResponse.json({
       label: top.displayName?.text ?? top.formattedAddress ?? query.trim(),
-      location: { latitude: top.location.latitude, longitude: top.location.longitude },
+      location: { latitude, longitude },
+      // resolve the plan's timezone from the geocoded coords (offline)
+      timeZone: zoneFromLatLng(latitude, longitude),
     });
   } catch (err) {
     return NextResponse.json(

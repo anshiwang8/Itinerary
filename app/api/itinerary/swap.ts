@@ -20,7 +20,8 @@ import { filterPools, ParsedPrompt, Place } from "../places/search/filter";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
 import { selectVenues as realSelectVenues, Selection } from "../select/selectVenues";
 import { getDuration } from "../schedule/durations";
-import { toTorontoISO, isPlausibleAt } from "../schedule/schedule";
+import { toZonedISO, isPlausibleAt } from "../schedule/schedule";
+import { DEFAULT_ZONE, instantAtWallClock, wallClockParts } from "../../lib/zoneTime";
 import { isOpenAt } from "../places/search/hours";
 import {
   getSingleLeg as realGetSingleLeg,
@@ -439,12 +440,12 @@ function snap(s: ItineraryStop): Snap {
   return { name: s.name ?? null, start: s.start_time, end: s.end_time, category: s.category };
 }
 
-function clockLabel(d: Date): string {
-  let h = d.getHours();
-  const m = d.getMinutes();
-  const ap = h < 12 ? "AM" : "PM";
-  h = h % 12 || 12;
-  return `${h}:${String(m).padStart(2, "0")} ${ap}`;
+// "4:00 AM" in the plan's zone — swap reasons quote the venue's local time.
+function clockLabel(d: Date, timeZone: string = DEFAULT_ZONE): string {
+  const { hour, minute } = wallClockParts(d, timeZone);
+  const ap = hour < 12 ? "AM" : "PM";
+  const h = hour % 12 || 12;
+  return `${h}:${String(minute).padStart(2, "0")} ${ap}`;
 }
 
 export async function swapStop(
@@ -548,6 +549,7 @@ async function durationChange(
   now: Date,
   deps: SwapDeps
 ): Promise<SwapResult> {
+  const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const category = target.category;
   const dur = interp.duration;
   if (!dur) {
@@ -574,7 +576,7 @@ async function durationChange(
 
   const before = snap(target);
   const anchorOutbound = settle.changes[0]?.inbound ?? target.travelToNext ?? null;
-  itinerary.stops[stopIndex] = buildStop(category, startISO, { keep: target }, anchorOutbound, newTotal);
+  itinerary.stops[stopIndex] = buildStop(category, startISO, { keep: target }, anchorOutbound, newTotal, tz);
   commitTail(itinerary, settle.changes);
   itinerary.legs = itinerary.stops.filter((s) => s.start_time && s.travelToNext).map((s) => s.travelToNext!);
   withStatuses(itinerary, now);
@@ -614,8 +616,9 @@ async function venueSwap(
       : scoped(base, { aesthetic: interp.aesthetic, budget: interp.budget, constraints: interp.constraints }, poolKey);
   const judgeParsed = scoped(base, { aesthetic: interp.aesthetic, budget: interp.budget, constraints: interp.constraints }, poolKey);
 
+  const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const rawPools = await deps.searchPools(searchParsed, [poolKey]);
-  const { pools: filtered } = filterPools(rawPools, judgeParsed, null, now, new Date(target.start_time!));
+  const { pools: filtered } = filterPools(rawPools, judgeParsed, null, now, new Date(target.start_time!), tz);
 
   // never re-pick the rejected venue, nor anything already used elsewhere
   const excluded = new Set<string>(
@@ -656,24 +659,28 @@ async function timeChange(
   now: Date,
   deps: SwapDeps
 ): Promise<SwapResult> {
+  const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const category = target.category;
   const shift = interp.time;
   if (!shift) {
     return { swapped: false, reason: "Couldn't tell what time you meant — try “after 8” or “an hour earlier”." };
   }
 
-  const nd = new Date(target.start_time!);
+  let nd = new Date(target.start_time!);
   if (shift.mode === "relative") {
-    nd.setMinutes(nd.getMinutes() + (shift.deltaMinutes ?? 0));
+    // relative shift is a real-minute delta on the absolute instant
+    nd = new Date(nd.getTime() + (shift.deltaMinutes ?? 0) * 60_000);
   } else if (shift.targetTime) {
+    // absolute "to 6pm" sets the wall-clock hour in the PLAN's zone (not
+    // the server's) on the stop's own local date
     const [h, m] = shift.targetTime.split(":").map(Number);
-    nd.setHours(h, m, 0, 0);
+    nd = instantAtWallClock(nd, tz, h, m, 0, false);
   }
   const newStartMs = nd.getTime();
 
   // guards (plausible hour first so "dinner at 4am" gives the real reason)
-  if (!isPlausibleAt(nd, [category])) {
-    return { swapped: false, reason: `A ${clockLabel(nd)} ${category} won't work — nothing's really open then.` };
+  if (!isPlausibleAt(nd, [category], tz)) {
+    return { swapped: false, reason: `A ${clockLabel(nd, tz)} ${category} won't work — nothing's really open then.` };
   }
   if (newStartMs <= floor.getTime()) {
     return { swapped: false, reason: `Can't move ${target.name} earlier than where the evening already is.` };
@@ -695,9 +702,9 @@ async function timeChange(
   let anchorPick: Place | undefined;
   let anchorSel: Selection | undefined;
   if (!deps.isUsableAt(placeOf(target), nd, category)) {
-    const repl = await findReplacement(category, nd, used, base, now, deps);
+    const repl = await findReplacement(category, nd, used, base, now, deps, tz);
     if (!repl) {
-      return { swapped: false, reason: `Nothing similar to ${target.name} is open around ${clockLabel(nd)}.` };
+      return { swapped: false, reason: `Nothing similar to ${target.name} is open around ${clockLabel(nd, tz)}.` };
     }
     anchorPick = repl.pick;
     anchorSel = repl.sel;
@@ -743,10 +750,11 @@ async function timeChange(
   const anchorOutbound = settle.changes[0]?.inbound ?? null;
   itinerary.stops[stopIndex] = buildStop(
     category,
-    toTorontoISO(nd),
+    toZonedISO(nd, tz),
     anchorPick ? { pick: anchorPick, sel: anchorSel! } : { keep: target },
     anchorOutbound,
-    anchorTotal
+    anchorTotal,
+    tz
   );
   if (prevStop && anchorInbound) {
     prevStop.travelToNext = anchorInbound;
@@ -759,7 +767,7 @@ async function timeChange(
   itinerary.legs = itinerary.stops.filter((s) => s.start_time && s.travelToNext).map((s) => s.travelToNext!);
   withStatuses(itinerary, now);
 
-  let reason = `Moved ${category} to ${clockLabel(nd)}`;
+  let reason = `Moved ${category} to ${clockLabel(nd, tz)}`;
   if (requestedTotal && !anchorPick) reason += ` for ${durLabel(requestedTotal)}`;
   if (anchorPick) reason += `, now ${anchorPick.displayName?.text ?? "a spot that's open then"}`;
   if (settle.changes.some((c) => c.venue)) reason += ` (and moved a later stop to something open then)`;
@@ -803,6 +811,7 @@ async function resettleTail(
   deps: SwapDeps,
   used: Set<string>
 ): Promise<{ ok: true; changes: TailChange[] } | { ok: false; reason: string }> {
+  const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const anchorPos = timedIdx.indexOf(anchorIndex);
   const changes: TailChange[] = [];
   let prevEndMs = anchorEnd.getTime();
@@ -823,9 +832,9 @@ async function resettleTail(
 
     // try the existing venue; adapt if it isn't usable by the new arrival
     if (!deps.isUsableAt(placeOf(stop), new Date(startMs), stop.category)) {
-      const repl = await findReplacement(stop.category, new Date(startMs), used, base, now, deps);
+      const repl = await findReplacement(stop.category, new Date(startMs), used, base, now, deps, tz);
       if (!repl) {
-        return { ok: false, reason: `Nothing similar to ${stop.name} is open by ${clockLabel(new Date(startMs))}.` };
+        return { ok: false, reason: `Nothing similar to ${stop.name} is open by ${clockLabel(new Date(startMs), tz)}.` };
       }
       venue = repl.pick;
       sel = repl.sel;
@@ -840,7 +849,7 @@ async function resettleTail(
     const defaultTotal = baseMinutes + bufferMinutes;
     const totalMinutes = venue ? defaultTotal : stop.durationMinutes?.total ?? defaultTotal;
     const endMs = startMs + totalMinutes * 60_000;
-    changes.push({ stopIndex: di, startISO: toTorontoISO(new Date(startMs)), totalMinutes, inbound, venue, sel });
+    changes.push({ stopIndex: di, startISO: toZonedISO(new Date(startMs), tz), totalMinutes, inbound, venue, sel });
     prevEndMs = endMs;
     prevLoc = venue?.location ?? stop.location;
   }
@@ -848,6 +857,7 @@ async function resettleTail(
 }
 
 function commitTail(itinerary: Itinerary, changes: TailChange[]) {
+  const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   changes.forEach((ch, k) => {
     const existing = itinerary.stops[ch.stopIndex];
     const outbound = changes[k + 1]?.inbound ?? existing.travelToNext ?? null;
@@ -856,7 +866,8 @@ function commitTail(itinerary: Itinerary, changes: TailChange[]) {
       ch.startISO,
       ch.venue ? { pick: ch.venue, sel: ch.sel! } : { keep: existing },
       outbound,
-      ch.totalMinutes
+      ch.totalMinutes,
+      tz
     );
   });
 }
@@ -868,11 +879,12 @@ async function findReplacement(
   excluded: Set<string>,
   base: ParsedPrompt,
   now: Date,
-  deps: SwapDeps
+  deps: SwapDeps,
+  timeZone: string = DEFAULT_ZONE
 ): Promise<{ sel: Selection; pick: Place } | null> {
   const parsed = scoped(base, {}, category);
   const rawPools = await deps.searchPools(parsed, [category]);
-  const { pools } = filterPools(rawPools, parsed, null, now, when);
+  const { pools } = filterPools(rawPools, parsed, null, now, when, timeZone);
   const candidates = (pools[category] ?? []).filter(
     (p) => !excluded.has(p.id) && deps.isUsableAt(p, when, category)
   );
@@ -891,14 +903,15 @@ function buildStop(
   startISO: string,
   src: { pick: Place; sel: Selection } | { keep: ItineraryStop },
   outbound: TravelLeg | null,
-  durationOverride?: number
+  durationOverride?: number,
+  timeZone: string = DEFAULT_ZONE
 ): ItineraryStop {
   const def = getDuration(category);
   const total = durationOverride ?? def.baseMinutes + def.bufferMinutes;
   const buffer = durationOverride ? Math.min(def.bufferMinutes, total) : def.bufferMinutes;
   const baseMinutes = total - buffer;
   const bufferMinutes = buffer;
-  const endISO = toTorontoISO(new Date(new Date(startISO).getTime() + total * 60_000));
+  const endISO = toZonedISO(new Date(new Date(startISO).getTime() + total * 60_000), timeZone);
   const picked = "pick" in src ? src : null;
   const kept = "keep" in src ? src.keep : null;
   return {
@@ -949,6 +962,7 @@ async function finalize(
   path: "refilter" | "research" | "time",
   reason: string
 ): Promise<SwapResult> {
+  const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const before = snap(target);
   // Same rule as timeChange: once customized, the stop's own duration is
   // the source of truth — a venue swap holds the WHOLE slot, length
@@ -963,7 +977,7 @@ async function finalize(
   const bufferMinutes = Math.min(def.bufferMinutes, total);
   const baseMinutes = total - bufferMinutes;
   const newLoc = pick.location ?? target.location;
-  const endISO = toTorontoISO(new Date(new Date(startISO).getTime() + total * 60_000));
+  const endISO = toZonedISO(new Date(new Date(startISO).getTime() + total * 60_000), tz);
 
   const timedIdx: number[] = [];
   itinerary.stops.forEach((s, i) => {
@@ -1022,8 +1036,8 @@ async function finalize(
       for (let k = tp + 1; k < timedIdx.length; k++) {
         const s = itinerary.stops[timedIdx[k]];
         if (s.locked || !s.start_time || new Date(s.start_time).getTime() <= floor.getTime()) continue;
-        s.start_time = toTorontoISO(new Date(new Date(s.start_time).getTime() + deltaMs));
-        if (s.end_time) s.end_time = toTorontoISO(new Date(new Date(s.end_time).getTime() + deltaMs));
+        s.start_time = toZonedISO(new Date(new Date(s.start_time).getTime() + deltaMs), tz);
+        if (s.end_time) s.end_time = toZonedISO(new Date(new Date(s.end_time).getTime() + deltaMs), tz);
         downstreamShifted.push(timedIdx[k]);
       }
     }

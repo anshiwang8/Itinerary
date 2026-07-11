@@ -167,6 +167,37 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "MULTI-CITY: 'lunch now' resolves to a LOCAL noon-ish hour per city, not Toronto's",
+    () => {
+      // one absolute instant: 2026-07-11 16:20 UTC = 12:20 EDT Toronto / 09:20 PDT Vancouver
+      const inst = new Date("2026-07-11T16:20:00Z");
+      // Toronto: lunch default 12:00 already passed (12:20) → rolls to tomorrow noon EDT
+      const tor = resolveStartTime("unspecified", inst, ["lunch"], "America/Toronto");
+      assert.strictEqual(tor.toISOString(), "2026-07-12T16:00:00.000Z"); // noon EDT next day
+      // Vancouver: it's only 09:20 there → lunch noon TODAY, Pacific
+      const van = resolveStartTime("unspecified", inst, ["lunch"], "America/Vancouver");
+      assert.strictEqual(van.toISOString(), "2026-07-11T19:00:00.000Z"); // 12:00 PDT today
+      // sanity: the Vancouver start's LOCAL hour is noon, not Toronto's 15:00
+      assert.strictEqual(
+        van.toLocaleString("en-US", { timeZone: "America/Vancouver", hour: "numeric", hour12: false }),
+        "12"
+      );
+    },
+  ],
+  [
+    "MULTI-CITY: plausibility band judged in the plan's zone (independent of runner TZ)",
+    () => {
+      // an explicit 8pm dinner is fine in Vancouver's own clock
+      const inst = new Date("2026-07-11T16:00:00Z");
+      const ok = resolveStartTimeChecked("8pm", inst, ["dinner"], "America/Vancouver");
+      assert.strictEqual(ok.ok, true);
+      // 4am dinner refused, and the message quotes the LOCAL hour "4 AM"
+      const bad = resolveStartTimeChecked("4am", inst, ["dinner"], "America/Vancouver");
+      assert.strictEqual(bad.ok, false);
+      if (!bad.ok) assert.match(bad.reason, /Couldn't plan a 4 AM dinner/);
+    },
+  ],
+  [
     "CONTRACT (mentor repro): 'plan a lunch' at 11:20 AM → SAME-DAY noon",
     () => {
       // real Groq for "plan a lunch" returns time_window "unspecified" (or

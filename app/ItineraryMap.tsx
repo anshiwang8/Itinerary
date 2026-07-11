@@ -79,10 +79,12 @@ interface Props {
   stops: MapStop[];
   home?: MapHome | null;
   selected: string | null;
+  /** the plan's zone — pin times render in it (default Toronto) */
+  timeZone?: string;
   onSelect: (category: string) => void;
 }
 
-export default function ItineraryMap({ stops, home, selected, onSelect }: Props) {
+export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect }: Props) {
   const mapDivRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const projRef = useRef<google.maps.MapCanvasProjection | null>(null);
@@ -312,11 +314,11 @@ export default function ItineraryMap({ stops, home, selected, onSelect }: Props)
                   <span className="chip__time">
                     {s.changed && s.oldStart ? (
                       <>
-                        <span className="old-time">{formatStopTime(s.oldStart)}</span>
-                        <span className="new-time">{formatStopTime(s.startTime)}</span>
+                        <span className="old-time">{formatStopTime(s.oldStart, new Date(), timeZone)}</span>
+                        <span className="new-time">{formatStopTime(s.startTime, new Date(), timeZone)}</span>
                       </>
                     ) : (
-                      formatStopTime(s.startTime)
+                      formatStopTime(s.startTime, new Date(), timeZone)
                     )}
                   </span>
                 )}

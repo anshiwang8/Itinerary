@@ -3,6 +3,7 @@
 // aggressiveness stays visible. Weather gating is a later step.
 import { CurrentOpeningHours, isOpenAt, TargetTime } from "./hours";
 import { resolveStartTime } from "../../schedule/schedule";
+import { DEFAULT_ZONE, wallClockParts } from "../../../lib/zoneTime";
 
 export interface Place {
   id: string;
@@ -77,12 +78,16 @@ export function isOutdoorCategory(raw: string): boolean {
   return OUTDOOR_PATTERN.test(raw ?? "");
 }
 
-function hourLabel(d: Date): string {
-  const h = d.getHours();
+// weather-block reason hour, in the venue's local zone ("rain at 8pm")
+function hourLabel(d: Date, timeZone: string = DEFAULT_ZONE): string {
+  const h = wallClockParts(d, timeZone).hour;
   return `${h % 12 || 12}${h < 12 ? "am" : "pm"}`;
 }
 
-/** Forecast hour covering the target instant, if within the horizon. */
+/** Forecast hour covering the target instant, if within the horizon.
+ *  Zone-safe as-is: compares ABSOLUTE epoch instants (getTime), never
+ *  wall-clock components — the forecast bucket for an instant is the same
+ *  regardless of which zone names that instant. */
 function forecastAt(
   weather: WeatherHour[],
   target: Date
@@ -125,7 +130,10 @@ export function filterPools(
   now: Date = new Date(),
   // reroute engine anchors the replan at floor_time instead of the
   // original time_window resolution
-  targetOverride?: Date
+  targetOverride?: Date,
+  // the plan's zone — the hours target (day/hour/minute) is the VENUE's
+  // local wall clock, not the server's (default Toronto)
+  timeZone: string = DEFAULT_ZONE
 ): {
   pools: Record<string, Place[]>;
   dropLog: DropEntry[];
@@ -144,12 +152,13 @@ export function filterPools(
   // can never disagree on the target time again.
   const startInstant =
     targetOverride ??
-    resolveStartTime(parsed.time_window ?? "", now, Object.keys(pools));
-  const target: TargetTime = {
-    day: startInstant.getDay(),
-    hour: startInstant.getHours(),
-    minute: startInstant.getMinutes(),
-  };
+    resolveStartTime(parsed.time_window ?? "", now, Object.keys(pools), timeZone);
+  // day-of-week/hour/minute in the VENUE's zone — a city far enough from
+  // Toronto's offset can be a different weekday at the same instant, which
+  // would silently look up the wrong day's opening hours. NOTE: TargetTime.day
+  // is the day-of-WEEK (0=Sun), so use `weekday`, not the day-of-month.
+  const { weekday, hour, minute } = wallClockParts(startInstant, timeZone);
+  const target: TargetTime = { day: weekday, hour, minute };
   // No usable weather data → weather rule skipped entirely (same
   // keep-on-missing policy as hours/price).
   const forecast =
@@ -169,12 +178,12 @@ export function filterPools(
           forecast.precipProbability !== null &&
           forecast.precipProbability > PRECIP_BLOCK_THRESHOLD
         ) {
-          reason = `rain likely at ${hourLabel(startInstant)}`;
+          reason = `rain likely at ${hourLabel(startInstant, timeZone)}`;
         } else if (
           forecast.tempC !== null &&
           forecast.tempC < COLD_BLOCK_THRESHOLD_C
         ) {
-          reason = `too cold at ${hourLabel(startInstant)} (${forecast.tempC}°C)`;
+          reason = `too cold at ${hourLabel(startInstant, timeZone)} (${forecast.tempC}°C)`;
         }
         console.log(
           `[weather-gate] category="${category}" target=${startInstant.toISOString()} precip=${forecast.precipProbability}% (block >${PRECIP_BLOCK_THRESHOLD}%) tempC=${forecast.tempC} (block <${COLD_BLOCK_THRESHOLD_C}) verdict=${reason ? `BLOCK — ${reason}` : "ALLOW"}`

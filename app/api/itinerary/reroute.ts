@@ -10,6 +10,7 @@ import { filterPools, ParsedPrompt, Place } from "../places/search/filter";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
 import { selectVenues as realSelectVenues, Selection } from "../select/selectVenues";
 import { buildSchedule } from "../schedule/schedule";
+import { DEFAULT_ZONE } from "../../lib/zoneTime";
 import {
   getSingleLeg as realGetSingleLeg,
   LatLng,
@@ -109,6 +110,7 @@ export async function rerouteItinerary(
   depsIn: Partial<RerouteDeps> = {}
 ): Promise<RerouteResult> {
   const deps = { ...realDeps(), ...depsIn };
+  const tz = itinerary.timeZone ?? DEFAULT_ZONE;
 
   // Current statuses + locked ratchet against the reference time.
   withStatuses(itinerary, now);
@@ -173,7 +175,7 @@ export async function rerouteItinerary(
   const rawPools = await deps.searchPools(parsed, categories);
   // TODO: thread live weather through the reroute filter (null skips
   // the weather gate, matching the keep-on-missing policy).
-  const { pools } = filterPools(rawPools, parsed, null, now, floor);
+  const { pools } = filterPools(rawPools, parsed, null, now, floor, tz);
 
   // Venues already used by kept stops must not be re-proposed.
   const keptIds = new Set(
@@ -255,7 +257,9 @@ export async function rerouteItinerary(
     "",
     now,
     interLegs,
-    chainStart
+    chainStart,
+    null,
+    tz
   );
 
   // ── Write back: replace affected stops in place, renumber leg

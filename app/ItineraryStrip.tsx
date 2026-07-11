@@ -68,7 +68,7 @@ function TransitIcon({ mode }: { mode: StripLeg["mode"] }) {
   );
 }
 
-function LegCard({ leg }: { leg: StripLeg }) {
+function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
   const isTransit = leg.mode === "transit";
   return (
     <div className="lstrip__leg" aria-label={isTransit ? "transit leg" : "walking leg"}>
@@ -86,7 +86,7 @@ function LegCard({ leg }: { leg: StripLeg }) {
           </div>
           {(leg.boardISO || leg.arriveISO) && (
             <div className="lstrip__legtimes">
-              board {formatStopTime(leg.boardISO ?? "")} · arrive {formatStopTime(leg.arriveISO ?? "")}
+              board {formatStopTime(leg.boardISO ?? "", new Date(), timeZone)} · arrive {formatStopTime(leg.arriveISO ?? "", new Date(), timeZone)}
             </div>
           )}
         </>
@@ -115,12 +115,14 @@ function StopCard({
   selected,
   onSelect,
   swap,
+  timeZone,
 }: {
   stop: StripStop;
   index: number;
   selected: boolean;
   onSelect: () => void;
   swap?: SwapInline | null;
+  timeZone: string;
 }) {
   const price = stop.price ? PRICE_LABEL[stop.price] ?? null : null;
   const cls =
@@ -156,11 +158,11 @@ function StopCard({
         <div className="lstrip__be">
           {stop.changed && stop.oldStart ? (
             <>
-              <span className="old-time">{formatStopTime(stop.oldStart)}</span>
-              <span className="new-time">{formatStopTime(stop.start)}</span>
+              <span className="old-time">{formatStopTime(stop.oldStart, new Date(), timeZone)}</span>
+              <span className="new-time">{formatStopTime(stop.start, new Date(), timeZone)}</span>
             </>
           ) : (
-            <>be here {formatStopRange(stop.start, stop.end)}</>
+            <>be here {formatStopRange(stop.start, stop.end, new Date(), timeZone)}</>
           )}
         </div>
       )}
@@ -210,12 +212,14 @@ export default function ItineraryStrip({
   selected,
   onSelect,
   swap,
+  timeZone = "America/Toronto",
 }: {
   home?: StripHome | null;
   stops: StripStop[];
   selected: string | null;
   onSelect: (category: string) => void;
   swap?: SwapInline | null;
+  timeZone?: string;
 }) {
   if (stops.length === 0) return null;
   return (
@@ -232,7 +236,7 @@ export default function ItineraryStrip({
           {home.leaveBy && <div className="lstrip__be">leave by {home.leaveBy}</div>}
         </div>
       )}
-      {home?.leg && <LegCard leg={home.leg} />}
+      {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} />}
       {stops.map((s, i) => (
         <div key={s.id} className="lstrip__pair" role="listitem" style={{ display: "contents" }}>
           <StopCard
@@ -241,8 +245,9 @@ export default function ItineraryStrip({
             selected={selected === s.category}
             onSelect={() => onSelect(s.category)}
             swap={selected === s.category ? swap : null}
+            timeZone={timeZone}
           />
-          {s.legToNext && <LegCard leg={s.legToNext} />}
+          {s.legToNext && <LegCard leg={s.legToNext} timeZone={timeZone} />}
         </div>
       ))}
     </div>

@@ -103,6 +103,32 @@ const cases: Array<[string, () => void]> = [
   ],
 ];
 
+cases.push([
+  "MULTI-CITY: a stop renders in the PLAN's zone for every viewer (both bugs closed)",
+  () => {
+    // one absolute instant: 2026-07-11 19:00 UTC
+    const inst = "2026-07-11T19:00:00Z";
+    const ref = new Date("2026-07-11T17:00:00Z");
+    // Toronto plan → 3:00 PM EDT; Vancouver plan → 12:00 PM PDT.
+    // Neither depends on the runner's TZ (this suite is also run under
+    // TZ=UTC) nor the viewer's browser (Phase-1 bug) — the zone is the
+    // plan's, passed explicitly.
+    assert.strictEqual(formatStopTime(inst, ref, "America/Toronto"), "3:00 PM");
+    assert.strictEqual(formatStopTime(inst, ref, "America/Vancouver"), "12:00 PM");
+    // a range in each zone
+    assert.strictEqual(
+      formatStopRange(inst, "2026-07-11T20:45:00Z", ref, "America/Vancouver"),
+      "12:00 PM – 1:45 PM"
+    );
+    // day-crossing: 2026-07-12 02:30 UTC is still "today" (Fri Jul 11) in
+    // Vancouver (19:30 PDT) but "tomorrow" would be wrong — prove the date
+    // prefix is computed in the plan zone, not UTC's already-Saturday
+    const lateInst = "2026-07-12T02:30:00Z"; // 22:30 EDT / 19:30 PDT, same calendar day as ref in both
+    assert.strictEqual(formatStopTime(lateInst, ref, "America/Vancouver"), "7:30 PM");
+    assert.strictEqual(formatStopTime(lateInst, ref, "America/Toronto"), "10:30 PM");
+  },
+]);
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

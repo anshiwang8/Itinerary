@@ -222,6 +222,37 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "MULTI-CITY hours: the day-of-week is the VENUE's, not the server's, at a day-crossing instant",
+    () => {
+      // Sat-only venue (open ONLY Saturday). targetOverride pins the exact
+      // instant (bypassing resolveStartTime's roll-forward) to isolate the
+      // day-of-week lookup — the corruption the fix prevents.
+      const satOnly = {
+        periods: [{ open: { day: 6, hour: 0, minute: 0 }, close: { day: 6, hour: 23, minute: 59 } }],
+      };
+      // 2026-07-11 03:00 UTC = 12:00 SATURDAY in Tokyo (UTC+9) but
+      // 23:00 FRIDAY in Toronto (EDT −4) — the same instant, two weekdays.
+      const inst = new Date("2026-07-11T03:00:00Z");
+      const parsed = mkParsed({ category_signals: ["cafe"] });
+
+      // Tokyo plan: Saturday there → venue OPEN → survives
+      const tokyo = filterPools(
+        { cafe: [mkPlace("sat", { currentOpeningHours: satOnly })] },
+        parsed, null, inst, inst, "Asia/Tokyo"
+      );
+      assert.deepStrictEqual(tokyo.pools.cafe.map((p) => p.id), ["sat"], "Tokyo: Saturday → open");
+
+      // Toronto plan, SAME instant: Friday 23:00 there → Sat-only venue
+      // CLOSED → dropped. Without the fix both would use the server's day.
+      const toronto = filterPools(
+        { cafe: [mkPlace("sat", { currentOpeningHours: satOnly })] },
+        parsed, null, inst, inst, "America/Toronto"
+      );
+      assert.strictEqual(toronto.pools.cafe.length, 0, "Toronto: Friday → closed");
+      assert.deepStrictEqual(rulesFor(toronto.dropLog, "sat"), ["hours"]);
+    },
+  ],
+  [
     "rating below floor dropped, boundary rating kept (rule: rating)",
     () => {
       const { pools, dropLog } = filterPools(

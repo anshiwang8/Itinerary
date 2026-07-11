@@ -1,8 +1,20 @@
 // Pure stop-time scheduling (step 6a). Travel legs are a placeholder —
 // the Routes API step inserts real travel time later.
+//
+// ZONE-AWARE: every plan carries one resolved IANA timeZone (default
+// America/Toronto). "now", "today", "which hour" and the ISO output are
+// all computed in THAT zone via app/lib/zoneTime — never the server's
+// wall clock. Toronto plans are byte-identical to the pre-Phase-5 code.
 import { parseTargetTime } from "../places/search/hours";
 import { getDuration } from "./durations";
 import { TravelLeg } from "./travel";
+import {
+  DEFAULT_ZONE,
+  instantAtWallClock,
+  nextFullHourInZone,
+  toZonedISO as toZonedISOImpl,
+  wallClockParts,
+} from "../../lib/zoneTime";
 
 // Day-part → representative default start, applied IN CODE when
 // time_window has no clock time. Closes the "tonight parses to nothing"
@@ -76,8 +88,12 @@ export const PLAUSIBLE_BANDS: Array<[RegExp, PlausibleBand]> = [
 ];
 export const DEFAULT_PLAUSIBLE_BAND: PlausibleBand = { startHour: 8, endHour: 23 };
 
-function inBand(d: Date, band: PlausibleBand): boolean {
-  const h = d.getHours() + d.getMinutes() / 60;
+// The band check reads the WALL-CLOCK hour in the plan's zone — a 7 PM
+// Vancouver dinner must be judged against 19:00 Pacific, not the server's
+// or Toronto's hour for that same instant.
+function inBand(d: Date, band: PlausibleBand, timeZone: string = DEFAULT_ZONE): boolean {
+  const { hour, minute } = wallClockParts(d, timeZone);
+  const h = hour + minute / 60;
   if (band.startHour <= band.endHour) return h >= band.startHour && h < band.endHour;
   return h >= band.startHour || h < band.endHour; // wraps midnight
 }
@@ -91,10 +107,14 @@ export function bandForCategories(categories: string[]): PlausibleBand {
   return DEFAULT_PLAUSIBLE_BAND;
 }
 
-/** Is `d` a sensible hour for these categories? Reused by the swap engine
- * to reject implausible time changes ("dinner at 4am"). */
-export function isPlausibleAt(d: Date, categories: string[]): boolean {
-  return inBand(d, bandForCategories(categories));
+/** Is `d` a sensible hour for these categories, in the plan's zone? Reused
+ * by the swap engine to reject implausible time changes ("dinner at 4am"). */
+export function isPlausibleAt(
+  d: Date,
+  categories: string[],
+  timeZone: string = DEFAULT_ZONE
+): boolean {
+  return inBand(d, bandForCategories(categories), timeZone);
 }
 
 export type StartResolution =
@@ -109,15 +129,19 @@ function hour12(h: number): string {
   return `${hh % 12 || 12} ${hh < 12 ? "AM" : "PM"}`;
 }
 
-function clock12(d: Date): string {
-  const m = d.getMinutes();
-  const num = `${d.getHours() % 12 || 12}${m ? `:${String(m).padStart(2, "0")}` : ""}`;
-  return `${num} ${d.getHours() < 12 ? "AM" : "PM"}`;
+function clock12(d: Date, timeZone: string = DEFAULT_ZONE): string {
+  const { hour, minute } = wallClockParts(d, timeZone);
+  const num = `${hour % 12 || 12}${minute ? `:${String(minute).padStart(2, "0")}` : ""}`;
+  return `${num} ${hour < 12 ? "AM" : "PM"}`;
 }
 
 // User asked for an hour nothing plausibly serves ("brunch at 3am") —
 // name the category, its realistic window, and which direction to move.
-function implausibleExplicitReason(start: Date, categories: string[]): string {
+function implausibleExplicitReason(
+  start: Date,
+  categories: string[],
+  timeZone: string = DEFAULT_ZONE
+): string {
   let label: string | null = null;
   let band = DEFAULT_PLAUSIBLE_BAND;
   for (const c of categories) {
@@ -128,15 +152,16 @@ function implausibleExplicitReason(start: Date, categories: string[]): string {
       break;
     }
   }
-  const h = start.getHours() + start.getMinutes() / 60;
+  const { hour, minute } = wallClockParts(start, timeZone);
+  const h = hour + minute / 60;
   // outside a non-wrapping band: before open → later; past close → earlier.
   // A wrapped band's dead zone always sits before that day's opening.
   const beforeOpen = band.startHour <= band.endHour ? h < band.startHour : true;
   const suggest = beforeOpen ? "Try a later time?" : "Try an earlier time?";
   if (!label) {
-    return `Couldn't plan that for ${clock12(start)} — nothing much is open then. Try a time between ${hour12(band.startHour)} and ${hour12(band.endHour)}?`;
+    return `Couldn't plan that for ${clock12(start, timeZone)} — nothing much is open then. Try a time between ${hour12(band.startHour)} and ${hour12(band.endHour)}?`;
   }
-  return `Couldn't plan a ${clock12(start)} ${label} — ${label} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}. ${suggest}`;
+  return `Couldn't plan a ${clock12(start, timeZone)} ${label} — ${label} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}. ${suggest}`;
 }
 
 /**
@@ -151,16 +176,17 @@ function implausibleExplicitReason(start: Date, categories: string[]): string {
 export function resolveStartTimeChecked(
   timeWindow: string,
   now: Date = new Date(),
-  categories: string[] = []
+  categories: string[] = [],
+  timeZone: string = DEFAULT_ZONE
 ): StartResolution {
-  const start = resolveStartTime(timeWindow, now, categories);
+  const start = resolveStartTime(timeWindow, now, categories, timeZone);
   const tw = (timeWindow ?? "").toLowerCase();
 
   const bands = categories
     .map((c) => PLAUSIBLE_BANDS.find(([p]) => p.test(c))?.[1])
     .filter((b): b is PlausibleBand => !!b);
   if (bands.length === 0) bands.push(DEFAULT_PLAUSIBLE_BAND);
-  if (bands.some((b) => inBand(start, b))) return { ok: true, start };
+  if (bands.some((b) => inBand(start, b, timeZone))) return { ok: true, start };
 
   const hasClockTime = parseTargetTime(tw, now) !== null;
   const hasDayPart = Object.keys(DAY_PART_DEFAULTS).some((k) => tw.includes(k));
@@ -168,38 +194,22 @@ export function resolveStartTimeChecked(
   // refusal must say "nothing's open then", never "add a time" (they just did)
   const hasExplicitNow = /\bnow\b/.test(tw);
   if (hasClockTime || hasDayPart || hasExplicitNow) {
-    return { ok: false, reason: implausibleExplicitReason(start, categories) };
+    return { ok: false, reason: implausibleExplicitReason(start, categories, timeZone) };
   }
   return { ok: false, reason: IMPLAUSIBLE_TIME_MESSAGE };
 }
 
-// NOTE: date components are built with server-local Date math; the
-// prototype assumes the server runs in America/Toronto (true for local
-// dev). The offset in the ISO output is computed properly per-date.
+/** Format an absolute instant as an ISO string in `timeZone` (default
+ *  America/Toronto). Byte-identical to the old hand-rolled Toronto
+ *  formatter for the default zone across DST. */
+export function toZonedISO(d: Date, timeZone: string = DEFAULT_ZONE): string {
+  return toZonedISOImpl(d, timeZone);
+}
+
+/** Toronto-zoned ISO — the pre-Phase-5 name, kept for callers that don't
+ *  (yet) thread a plan zone. Equivalent to toZonedISO(d, DEFAULT_ZONE). */
 export function toTorontoISO(d: Date): string {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: "America/Toronto",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23",
-    })
-      .formatToParts(d)
-      .map((p) => [p.type, p.value])
-  );
-  const zone =
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Toronto",
-      timeZoneName: "longOffset",
-    })
-      .formatToParts(d)
-      .find((p) => p.type === "timeZoneName")?.value ?? "GMT";
-  const offset = zone === "GMT" ? "+00:00" : zone.replace("GMT", "");
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${offset}`;
+  return toZonedISOImpl(d, DEFAULT_ZONE);
 }
 
 /**
@@ -215,40 +225,29 @@ export function toTorontoISO(d: Date): string {
 export function resolveStartTime(
   timeWindow: string,
   now: Date = new Date(),
-  categories: string[] = []
+  categories: string[] = [],
+  timeZone: string = DEFAULT_ZONE
 ): Date {
   const tw = (timeWindow ?? "").toLowerCase();
-
-  // A start in the past is never a valid plan: "this afternoon" asked at
-  // 6pm, or "6am" asked at noon, means the next occurrence.
-  const rollForward = (d: Date): Date => {
-    if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1);
-    return d;
-  };
+  // "tomorrow" shifts one local day; the clock branch's daysAhead is only
+  // ever 0/1 (parseTargetTime has no weekday names), so this single offset
+  // captures every branch's day math — computed in the PLAN's zone.
+  const dayOffset = tw.includes("tomorrow") ? 1 : 0;
 
   // explicit "now" (a clarify answer, or user phrasing like "right now")
   // → the immediate slot: next full hour, ignoring category defaults
   if (/\bnow\b/.test(tw)) {
-    const d = new Date(now);
-    d.setMinutes(0, 0, 0);
-    d.setHours(d.getHours() + 1);
-    return d;
+    return nextFullHourInZone(now, timeZone);
   }
 
   const target = parseTargetTime(tw, now);
   if (target) {
-    const daysAhead = (target.day - now.getDay() + 7) % 7;
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysAhead);
-    d.setHours(target.hour, target.minute, 0, 0);
-    return rollForward(d);
+    return instantAtWallClock(now, timeZone, target.hour, target.minute, dayOffset, true);
   }
 
   for (const [keyword, t] of Object.entries(DAY_PART_DEFAULTS)) {
     if (tw.includes(keyword)) {
-      const dayOffset = tw.includes("tomorrow") ? 1 : 0;
-      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset);
-      d.setHours(t.hour, t.minute, 0, 0);
-      return rollForward(d);
+      return instantAtWallClock(now, timeZone, t.hour, t.minute, dayOffset, true);
     }
   }
 
@@ -266,17 +265,11 @@ export function resolveStartTime(
     }
   }
   if (inferred) {
-    const dayOffset = tw.includes("tomorrow") ? 1 : 0;
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset);
-    d.setHours(inferred.hour, inferred.minute, 0, 0);
-    return rollForward(d);
+    return instantAtWallClock(now, timeZone, inferred.hour, inferred.minute, dayOffset, true);
   }
 
   // unspecified → next full hour
-  const d = new Date(now);
-  d.setMinutes(0, 0, 0);
-  d.setHours(d.getHours() + 1);
-  return d;
+  return nextFullHourInZone(now, timeZone);
 }
 
 export interface SelectionLike {
@@ -324,11 +317,14 @@ export function buildSchedule(
   travelLegs: TravelLeg[] = [],
   // reroute engine anchors the replanned chain at an explicit instant
   startOverride?: Date,
-  homeLeg?: TravelLeg | null
+  homeLeg?: TravelLeg | null,
+  // the plan's zone — stop ISO times render in it (default Toronto)
+  timeZone: string = DEFAULT_ZONE
 ): { startISO: string; stops: ScheduledStop[] } {
+  const iso = (d: Date) => toZonedISOImpl(d, timeZone);
   const start =
     startOverride ??
-    resolveStartTime(timeWindow, now, selections.map((s) => s.category));
+    resolveStartTime(timeWindow, now, selections.map((s) => s.category), timeZone);
   const cursor = new Date(start);
   if (homeLeg) cursor.setMinutes(cursor.getMinutes() + homeLeg.totalMinutes);
 
@@ -347,8 +343,8 @@ export function buildSchedule(
     const leg = travelLegs.find((l) => l.fromIndex === timedIndex);
     timed.push({
       ...sel,
-      start_time: toTorontoISO(stopStart),
-      end_time: toTorontoISO(cursor),
+      start_time: iso(stopStart),
+      end_time: iso(cursor),
       durationMinutes: { base: baseMinutes, buffer: bufferMinutes, total },
       travelMinutesToNext: leg?.totalMinutes ?? 0,
       ...(leg ? { travelToNext: leg } : {}),
@@ -367,5 +363,5 @@ export function buildSchedule(
     }
   }
 
-  return { startISO: toTorontoISO(start), stops: timed };
+  return { startISO: iso(start), stops: timed };
 }

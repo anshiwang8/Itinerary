@@ -34,6 +34,11 @@ export interface Itinerary {
   /** the plan's origin point (geocoded starting address / city centre);
    * absent on pre-multi-city itineraries → engines fall back to HOME */
   home?: HomePoint;
+  /** the plan's resolved IANA timezone (e.g. "America/Vancouver"). ALL
+   * scheduling math and display labels for this plan use it — persisted so
+   * every read (GET/swap/reroute/dev-sim) uses the SAME zone. Absent →
+   * America/Toronto (pre-multi-city plans, Toronto, unresolvable). */
+  timeZone?: string;
   /** original parse output — the reroute engine re-runs the pipeline with it */
   parsed?: ParsedPrompt;
 }
@@ -150,7 +155,8 @@ export function createItinerary(
   legs: TravelLeg[],
   parsed?: ParsedPrompt,
   homeLeg?: TravelLeg | null,
-  home?: HomePoint | null
+  home?: HomePoint | null,
+  timeZone?: string | null
 ): Itinerary {
   const itinerary: Itinerary = {
     id: crypto.randomUUID(),
@@ -165,6 +171,7 @@ export function createItinerary(
     legs,
     ...(homeLeg ? { homeLeg } : {}),
     ...(home ? { home } : {}),
+    ...(timeZone ? { timeZone } : {}),
     ...(parsed ? { parsed } : {}),
   };
   store.set(itinerary.id, itinerary);

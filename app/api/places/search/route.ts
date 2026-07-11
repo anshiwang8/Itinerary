@@ -19,11 +19,14 @@ export async function POST(request: NextRequest) {
 
   let parsed: ParsedPrompt;
   let weather: WeatherHour[] | null;
+  let timeZone: string | undefined;
   try {
     const body = await request.json();
     parsed = body?.parsed;
     // optional; missing/invalid weather just skips the weather gate
     weather = Array.isArray(body?.weather) ? body.weather : null;
+    // the plan's zone — the hours filter checks the VENUE's local wall clock
+    timeZone = typeof body?.timeZone === "string" ? body.timeZone : undefined;
   } catch {
     return NextResponse.json(
       { error: "Request body must be JSON." },
@@ -45,11 +48,11 @@ export async function POST(request: NextRequest) {
       const cats = (parsed.category_signals ?? []).filter(
         (c): c is string => typeof c === "string" && c.trim() !== ""
       );
-      const resolved = resolveStartTime(parsed.time_window ?? "", new Date(), cats);
+      const resolved = resolveStartTime(parsed.time_window ?? "", new Date(), cats, timeZone);
       console.log(
         `[schedule-resolve] time_window=${JSON.stringify(parsed.time_window)} ` +
-          `categories=${JSON.stringify(cats)} resolved=${resolved.toISOString()} ` +
-          `(server-local ${resolved.toString().slice(0, 24)}) TZ=${process.env.TZ ?? "(unset)"}`
+          `categories=${JSON.stringify(cats)} zone=${timeZone ?? "(default Toronto)"} ` +
+          `resolved=${resolved.toISOString()} TZ=${process.env.TZ ?? "(unset)"}`
       );
     }
 
@@ -61,7 +64,10 @@ export async function POST(request: NextRequest) {
     const { pools, dropLog, weatherBlocked } = filterPools(
       rawPools,
       parsed,
-      weather
+      weather,
+      new Date(),
+      undefined,
+      timeZone
     );
     return NextResponse.json({
       ...pools,

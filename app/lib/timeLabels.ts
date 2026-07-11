@@ -5,66 +5,69 @@
 // schedule crossing midnight labels only the post-midnight stops.
 // No scheduling logic here — display formatting only.
 //
-// EVERYTHING renders in the plan's home timezone (America/Toronto),
-// NEVER the viewer's. The itinerary is a Toronto evening; a viewer in a
-// UTC+8 browser must still read "12:00 PM", not their local "12:00 AM"
-// (that exact off-by-a-timezone rendering shipped as the
-// midnight-itinerary-for-lunch bug).
-const HOME_TZ = "America/Toronto";
+// EVERYTHING renders in the PLAN's own timezone (its resolved IANA zone,
+// default America/Toronto), NEVER the viewer's browser zone and NEVER
+// unconditionally Toronto:
+//   - viewer's zone was the original Phase-1 bug (noon Toronto showed as
+//     the viewer's midnight);
+//   - always-Toronto was Phase 4's bug (a Vancouver plan showed Toronto
+//     times). A Vancouver stop shows Vancouver's wall clock to every
+//     viewer everywhere; a Toronto stop shows Toronto's.
+// Callers pass the itinerary's zone; it defaults to Toronto so every
+// pre-Phase-5 call site and all Toronto plans are byte-identical.
+import { DateTime } from "luxon";
+import { DEFAULT_ZONE, normalizeZone } from "./zoneTime";
 
 type DateInput = Date | string;
 const toDate = (x: DateInput): Date => (typeof x === "string" ? new Date(x) : x);
 
-const dayPartsFmt = new Intl.DateTimeFormat("en-CA", {
-  timeZone: HOME_TZ,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-// The instant's calendar day IN HOME_TZ, as a comparable UTC-ms value.
-function calendarDay(d: Date): number {
-  const p = Object.fromEntries(dayPartsFmt.formatToParts(d).map((x) => [x.type, x.value]));
-  return Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day));
+function zdt(d: Date, timeZone: string): DateTime {
+  return DateTime.fromJSDate(d).setZone(normalizeZone(timeZone));
 }
 
-function timeOnly(d: Date): string {
-  return d.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: HOME_TZ,
-  });
+function timeOnly(d: Date, timeZone: string): string {
+  // "7:00 PM" — byte-identical to the old toLocaleTimeString("en-US",
+  // {hour:"numeric", minute:"2-digit"}) output (verified, incl. the space).
+  return zdt(d, timeZone).toFormat("h:mm a");
 }
 
-// Whole calendar days from ref's HOME_TZ date to d's HOME_TZ date.
-function dayOffset(d: Date, ref: Date): number {
-  return Math.round((calendarDay(d) - calendarDay(ref)) / 86_400_000);
+// Whole calendar days from ref's zone-date to d's zone-date.
+function dayOffset(d: Date, ref: Date, timeZone: string): number {
+  const a = zdt(d, timeZone).startOf("day");
+  const b = zdt(ref, timeZone).startOf("day");
+  return Math.round(a.diff(b, "days").days);
 }
 
 // "Sat Jul 6" — weekday + month + day, no comma (matches the spec).
-function shortDate(d: Date): string {
-  const wd = d.toLocaleDateString("en-US", { weekday: "short", timeZone: HOME_TZ });
-  const mo = d.toLocaleDateString("en-US", { month: "short", timeZone: HOME_TZ });
-  const p = Object.fromEntries(dayPartsFmt.formatToParts(d).map((x) => [x.type, x.value]));
-  return `${wd} ${mo} ${Number(p.day)}`;
+function shortDate(d: Date, timeZone: string): string {
+  return zdt(d, timeZone).toFormat("ccc LLL d");
 }
 
 /**
- * Date prefix for a start instant relative to `ref` (default: real now):
+ * Date prefix for a start instant relative to `ref` (default: real now),
+ * both read in `timeZone`:
  *   today / past → ""            (time-only)
  *   +1 day       → "tomorrow, "
  *   further out  → "Sat Jul 6, "
  */
-export function datePrefix(input: DateInput, ref: Date = new Date()): string {
-  const off = dayOffset(toDate(input), ref);
+export function datePrefix(
+  input: DateInput,
+  ref: Date = new Date(),
+  timeZone: string = DEFAULT_ZONE
+): string {
+  const off = dayOffset(toDate(input), ref, timeZone);
   if (off <= 0) return "";
   if (off === 1) return "tomorrow, ";
-  return `${shortDate(toDate(input))}, `;
+  return `${shortDate(toDate(input), timeZone)}, `;
 }
 
 /** Single labeled time (floor time, leave-home time): "tomorrow, 9:58 AM". */
-export function formatStopTime(input: DateInput, ref: Date = new Date()): string {
-  return `${datePrefix(input, ref)}${timeOnly(toDate(input))}`;
+export function formatStopTime(
+  input: DateInput,
+  ref: Date = new Date(),
+  timeZone: string = DEFAULT_ZONE
+): string {
+  return `${datePrefix(input, ref, timeZone)}${timeOnly(toDate(input), timeZone)}`;
 }
 
 /**
@@ -78,9 +81,11 @@ export function formatStopTime(input: DateInput, ref: Date = new Date()): string
 export function formatStopRange(
   startInput: DateInput,
   endInput: DateInput,
-  ref: Date = new Date()
+  ref: Date = new Date(),
+  timeZone: string = DEFAULT_ZONE
 ): string {
-  return `${datePrefix(startInput, ref)}${timeOnly(toDate(startInput))} – ${timeOnly(
-    toDate(endInput)
+  return `${datePrefix(startInput, ref, timeZone)}${timeOnly(toDate(startInput), timeZone)} – ${timeOnly(
+    toDate(endInput),
+    timeZone
   )}`;
 }

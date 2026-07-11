@@ -121,6 +121,8 @@ export default function Home() {
   const [city, setCity] = useState("Toronto");
   const [startAddress, setStartAddress] = useState("");
   const [homePoint, setHomePoint] = useState<{ label: string; location: { latitude: number; longitude: number } } | null>(null);
+  // the plan's resolved IANA zone — all scheduling + labels use it
+  const [planZone, setPlanZone] = useState("America/Toronto");
   const [pools, setPools] = useState<Pools>({});
   const [parsedObj, setParsedObj] = useState<Record<string, unknown> | null>(null);
   const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
@@ -257,18 +259,11 @@ export default function Home() {
     };
     try {
       setLoadingText("Reading your evening…");
-      // fail loud on an implausible time (explicit "brunch at 3am" gets a
-      // specific reason; a senseless inferred time gets the add-a-time one)
-      const check = resolveStartTimeChecked(
-        parseData.time_window ?? "",
-        new Date(),
-        parseData.category_signals ?? []
-      );
-      if (!check.ok) return fail(check.reason);
-
-      // ── geocode the city + starting address (plain text queries — real
-      // location services are deliberately future work). Never silently
-      // fall back: a city the geocoder can't place fails loud. ──
+      // ── geocode the city + starting address FIRST (plain text queries —
+      // real location services are deliberately future work). This resolves
+      // the plan's timezone, which the plausibility check below needs — a
+      // Vancouver lunch must be judged against Vancouver's clock. Never
+      // silently fall back: a city the geocoder can't place fails loud. ──
       setLoadingText("Finding your city…");
       const cityQ = city.trim();
       if (!cityQ) return fail("Add a city so I know where to plan.");
@@ -281,6 +276,9 @@ export default function Home() {
       if (!cityRes.ok) {
         return fail(cityData.error ?? `Couldn't find "${cityQ}" — check the spelling?`);
       }
+      // the plan's resolved zone (geocoder-derived); fail-soft to Toronto —
+      // a missing zone must not block a plan, but it's surfaced (banner + log)
+      let planZone: string = cityData.timeZone ?? "America/Toronto";
       let hp: { label: string; location: { latitude: number; longitude: number } } = {
         label: `Start · ${cityQ} centre`,
         location: cityData.location,
@@ -297,8 +295,25 @@ export default function Home() {
           return fail(addrData.error ?? `Couldn't find "${addrQ}" — check the spelling?`);
         }
         hp = { label: `Start · ${addrData.label ?? addrQ}`, location: addrData.location };
+        if (addrData.timeZone) planZone = addrData.timeZone;
+      }
+      if (!cityData.timeZone) {
+        // fail-soft, but never silent
+        console.warn(`[timezone] no zone resolved for "${cityQ}" — defaulting to America/Toronto`);
       }
       setHomePoint(hp);
+      setPlanZone(planZone);
+
+      // fail loud on an implausible time, judged in the PLAN's zone (explicit
+      // "brunch at 3am" gets a specific reason; a senseless inferred time
+      // gets the add-a-time one)
+      const check = resolveStartTimeChecked(
+        parseData.time_window ?? "",
+        new Date(),
+        parseData.category_signals ?? [],
+        planZone
+      );
+      if (!check.ok) return fail(check.reason);
 
       let weather = null;
       try {
@@ -318,7 +333,7 @@ export default function Home() {
       const placesRes = await fetch("/api/places/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parsed: parseData, weather }),
+        body: JSON.stringify({ parsed: parseData, weather, timeZone: planZone }),
       });
       const placesData = await placesRes.json();
       if (!placesRes.ok) throw new Error(placesData.error ?? `places failed (${placesRes.status})`);
@@ -338,7 +353,7 @@ export default function Home() {
         return fail(
           wxBlocks.length >= poolEntries.length && wxBlocks.length > 0
             ? weatherBlockedReason(wxBlocks)
-            : noVenuesReason(Object.keys(categories), formatStopTime(check.start))
+            : noVenuesReason(Object.keys(categories), formatStopTime(check.start, new Date(), planZone))
         );
       }
 
@@ -370,7 +385,7 @@ export default function Home() {
       let legs: TravelLeg[] = [];
       let hl: TravelLeg | null = null;
       if (points.length >= 1 && points.every(Boolean)) {
-        const { startISO } = buildSchedule(sels, parseData.time_window ?? "");
+        const { startISO } = buildSchedule(sels, parseData.time_window ?? "", new Date(), [], undefined, null, planZone);
         const travelRes = await fetch("/api/schedule/travel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -383,7 +398,7 @@ export default function Home() {
         legs = split.interLegs;
       }
 
-      const { stops } = buildSchedule(sels, parseData.time_window ?? "", new Date(), legs, undefined, hl);
+      const { stops } = buildSchedule(sels, parseData.time_window ?? "", new Date(), legs, undefined, hl, planZone);
       setSchedule(stops);
       setTravelLegs(legs);
       setHomeLeg(hl);
@@ -392,7 +407,7 @@ export default function Home() {
       setSelected(ms[0]?.category ?? null);
 
       // auto-store the itinerary so the live/reroute controls work at once
-      await storeItinerary(stops, legs, hl, parseData, categories as Pools, "", hp);
+      await storeItinerary(stops, legs, hl, parseData, categories as Pools, "", hp, planZone);
       setLoadingText(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -407,7 +422,8 @@ export default function Home() {
     parsed: Record<string, unknown>,
     poolsIn: Pools,
     simValue: string,
-    home?: { label: string; location: { latitude: number; longitude: number } } | null
+    home?: { label: string; location: { latitude: number; longitude: number } } | null,
+    timeZone?: string
   ) {
     const enriched = sched.map((st) => {
       const loc = st.id ? (poolsIn[st.category] ?? []).find((p) => p.id === st.id)?.location : undefined;
@@ -416,7 +432,14 @@ export default function Home() {
     const res = await fetch("/api/itinerary", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stops: enriched, legs, parsed, homeLeg: hl, ...(home ? { home } : {}) }),
+      body: JSON.stringify({
+        stops: enriched,
+        legs,
+        parsed,
+        homeLeg: hl,
+        ...(home ? { home } : {}),
+        ...(timeZone ? { timeZone } : {}),
+      }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -497,7 +520,7 @@ export default function Home() {
 
     // the banner shows the instant the new chain actually departs from —
     // for an unstarted plan that's the kept stop's committed end, not `now`
-    const floorLabel = formatStopTime(data.anchor_time ?? data.floor_time);
+    const floorLabel = formatStopTime(data.anchor_time ?? data.floor_time, new Date(), itinerary.timeZone ?? planZone);
     const kept = updated.stops.find((s) => s.status === "active" || s.status === "completed");
     setBannerFlat(false);
     setBanner(
@@ -591,13 +614,15 @@ export default function Home() {
 
   // the plan's origin: per-itinerary geocoded home, else the classic default
   const homeOrigin = itinerary?.home ?? homePoint ?? HOME;
+  // the zone every label on this plan renders in (persisted zone wins)
+  const displayZone = itinerary?.timeZone ?? planZone;
 
   const mapHome = useMemo<MapHome | null>(() => {
     if (!homeLeg) return null;
     const first = (schedule ?? []).find((s) => s.start_time);
     const leaveBy =
       first?.start_time != null
-        ? formatStopTime(new Date(new Date(first.start_time).getTime() - homeLeg.totalMinutes * 60_000))
+        ? formatStopTime(new Date(new Date(first.start_time).getTime() - homeLeg.totalMinutes * 60_000), new Date(), displayZone)
         : null;
     return {
       label: homeOrigin.label,
@@ -609,7 +634,7 @@ export default function Home() {
       leaveBy,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [homeLeg, schedule, homeOrigin.label, homeOrigin.location.latitude, homeOrigin.location.longitude]);
+  }, [homeLeg, schedule, homeOrigin.label, homeOrigin.location.latitude, homeOrigin.location.longitude, displayZone]);
 
   const timedStops = itinerary?.stops.filter((s) => s.start_time) ?? [];
 
@@ -670,7 +695,7 @@ export default function Home() {
         : null;
     return {
       label: (itinerary.home ?? homePoint ?? HOME).label,
-      leaveBy: leaveISO ? formatStopTime(leaveISO) : null,
+      leaveBy: leaveISO ? formatStopTime(leaveISO, new Date(), displayZone) : null,
       leg: {
         mode: homeLeg.mode,
         totalMinutes: homeLeg.totalMinutes,
@@ -683,7 +708,8 @@ export default function Home() {
         arriveISO: first?.start_time ?? null,
       },
     };
-  }, [homeLeg, itinerary, homePoint]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homeLeg, itinerary, homePoint, displayZone]);
 
   const wxNow = weather?.[0] ?? null;
 
@@ -790,7 +816,7 @@ export default function Home() {
   // ── map stage ──
   return (
     <main className={"stage" + (banner ? " stage--banner" : "")}>
-      <ItineraryMap stops={styledStops} home={mapHome} selected={selected} onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))} />
+      <ItineraryMap stops={styledStops} home={mapHome} selected={selected} timeZone={displayZone} onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))} />
 
       {wxNow && (
         <div className="weather" aria-label={`Current weather — ${city.trim() || "Toronto"}`}>
@@ -804,6 +830,7 @@ export default function Home() {
         home={stripHome}
         stops={stripStops}
         selected={selected}
+        timeZone={displayZone}
         onSelect={(c) => setSelected(c)}
         swap={{
           text: swapText,

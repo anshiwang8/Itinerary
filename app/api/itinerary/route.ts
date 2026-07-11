@@ -12,6 +12,7 @@ export async function POST(request: NextRequest) {
   let parsed: ParsedPrompt | undefined;
   let homeLeg: TravelLeg | undefined;
   let home: HomePoint | undefined;
+  let timeZone: string | undefined;
   try {
     const body = await request.json();
     stops = body?.stops;
@@ -24,6 +25,7 @@ export async function POST(request: NextRequest) {
       body?.home && typeof body.home === "object" && body.home.location
         ? body.home
         : undefined;
+    timeZone = typeof body?.timeZone === "string" ? body.timeZone : undefined;
   } catch {
     return NextResponse.json(
       { error: "Request body must be JSON." },
@@ -37,7 +39,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const itinerary = createItinerary(stops, legs, parsed, homeLeg, home);
+  const itinerary = createItinerary(stops, legs, parsed, homeLeg, home, timeZone);
   try {
     await saveItinerary(itinerary);
   } catch (err) {

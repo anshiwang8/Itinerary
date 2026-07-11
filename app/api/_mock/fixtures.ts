@@ -311,8 +311,15 @@ export function mockTravelLegs(points: LatLng[]): TravelLeg[] {
 export function mockGeocode(query: string): {
   label: string;
   location: { latitude: number; longitude: number };
+  timeZone: string;
 } {
-  return { label: `${query} (fixture)`, location: { latitude: 43.6547, longitude: -79.3862 } };
+  // fixed Chestnut coords → America/Toronto, keeping mock plans on one
+  // deterministic zone (byte-stable legs + Toronto-rendered labels)
+  return {
+    label: `${query} (fixture)`,
+    location: { latitude: 43.6547, longitude: -79.3862 },
+    timeZone: "America/Toronto",
+  };
 }
 
 // ── weather: 48 calm hours from now, EXCEPT a fixed daily rain window at
