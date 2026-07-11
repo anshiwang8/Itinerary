@@ -17,6 +17,10 @@ export async function planEvening(page: Page, prompt: string): Promise<void> {
   await page.locator(".prompt__input").fill(prompt);
   await page.locator(".prompt__go").click();
 
+  // a thin prompt may surface the clarify step first — skipping runs the
+  // default pipeline (same behavior these specs always exercised)
+  await dismissClarifyIfShown(page);
+
   // success renders the strip; failure renders an error block — wait for
   // whichever comes first so failures are fast and carry the real reason
   await expect(page.locator(".lstrip, .empty__err, .stage__err").first()).toBeVisible({
@@ -31,6 +35,14 @@ export async function planEvening(page: Page, prompt: string): Promise<void> {
   await expect(page.locator(".chip").first()).toBeVisible({ timeout: 30_000 });
 }
 
+/** If the clarify block appears, click Skip so the pipeline continues. */
+export async function dismissClarifyIfShown(page: Page): Promise<void> {
+  const outcome = page.locator(".clarify, .lstrip, .empty__err, .stage__err").first();
+  await expect(outcome).toBeVisible({ timeout: 90_000 });
+  const skip = page.locator(".clarify__skip");
+  if (await skip.isVisible()) await skip.click();
+}
+
 /**
  * The inverse of planEvening: plan a prompt that SHOULD fail loud, assert
  * the fail-loud surface renders (and no itinerary strip behind it), and
@@ -40,6 +52,10 @@ export async function planExpectingProblem(page: Page, prompt: string): Promise<
   await page.goto("/");
   await page.locator(".prompt__input").fill(prompt);
   await page.locator(".prompt__go").click();
+
+  // some failures only surface after the clarify step (e.g. an unmet
+  // constraint on a prompt with no stated time) — skip through it
+  await dismissClarifyIfShown(page);
 
   const err = page.locator(".empty__err, .stage__err").first();
   await expect(err, "expected the fail-loud surface").toBeVisible({ timeout: 30_000 });

@@ -160,7 +160,10 @@ export function resolveStartTimeChecked(
 
   const hasClockTime = parseTargetTime(tw, now) !== null;
   const hasDayPart = Object.keys(DAY_PART_DEFAULTS).some((k) => tw.includes(k));
-  if (hasClockTime || hasDayPart) {
+  // an explicit "now" (clarify answer) is a stated time too — a 3 AM
+  // refusal must say "nothing's open then", never "add a time" (they just did)
+  const hasExplicitNow = /\bnow\b/.test(tw);
+  if (hasClockTime || hasDayPart || hasExplicitNow) {
     return { ok: false, reason: implausibleExplicitReason(start, categories) };
   }
   return { ok: false, reason: IMPLAUSIBLE_TIME_MESSAGE };
@@ -218,6 +221,15 @@ export function resolveStartTime(
     if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1);
     return d;
   };
+
+  // explicit "now" (a clarify answer, or user phrasing like "right now")
+  // → the immediate slot: next full hour, ignoring category defaults
+  if (/\bnow\b/.test(tw)) {
+    const d = new Date(now);
+    d.setMinutes(0, 0, 0);
+    d.setHours(d.getHours() + 1);
+    return d;
+  }
 
   const target = parseTargetTime(tw, now);
   if (target) {

@@ -216,6 +216,29 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "explicit 'now' → next full hour, overriding category defaults",
+    () => {
+      const t = new Date(2026, 6, 11, 15, 20, 0); // 3:20 PM
+      // a clarify "now" answer on a dinner-ish parse must anchor
+      // immediately, not at dinner's 19:00 default
+      assert.strictEqual(
+        resolveStartTime("now", t, ["dinner"]).toISOString(),
+        new Date(2026, 6, 11, 16, 0, 0).toISOString()
+      );
+      // midday "now" passes the checked resolver
+      const ok = resolveStartTimeChecked("now", t, []);
+      assert.strictEqual(ok.ok, true);
+      // 3 AM "now" is refused with the SPECIFIC nothing-open message —
+      // never the "add a time" one (the user just gave a time)
+      const late = resolveStartTimeChecked("now", new Date(2026, 6, 11, 2, 57, 0), []);
+      assert.strictEqual(late.ok, false);
+      if (!late.ok) {
+        assert.match(late.reason, /nothing much is open then/);
+        assert.notStrictEqual(late.reason, IMPLAUSIBLE_TIME_MESSAGE);
+      }
+    },
+  ],
+  [
     "CONTRACT: no time signal + no category match → next full hour (immediate)",
     () => {
       const t = new Date(2026, 6, 11, 13, 20, 0);

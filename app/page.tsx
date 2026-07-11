@@ -18,6 +18,7 @@ import {
   unmetConstraintReason,
   weatherBlockedReason,
 } from "./lib/planGuards";
+import { ClarifyQuestion, clarifyQuestions, timeWindowForWhenAnswer } from "./lib/clarify";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, { StripHome, StripStop } from "./ItineraryStrip";
 
@@ -155,6 +156,15 @@ export default function Home() {
   const [loadingText, setLoadingText] = useState<string | null>(null);
   const busy = loadingText !== null;
 
+  // lightweight clarifying questions (rule-based, pre-search)
+  const [clarify, setClarify] = useState<{
+    questions: ClarifyQuestion[];
+    parsed: Record<string, unknown>;
+  } | null>(null);
+  const [clarifyWhen, setClarifyWhen] = useState<string | null>(null);
+  const [clarifyTime, setClarifyTime] = useState("");
+  const [clarifyVibe, setClarifyVibe] = useState("");
+
   async function runPipeline() {
     const q = prompt.trim();
     if (!q || busy) return;
@@ -163,6 +173,7 @@ export default function Home() {
     setChangedIds(new Set());
     setOldStarts({});
     setSwapError(null);
+    setClarify(null);
     // THE fail-loud surface: every degenerate/impossible/contradictory
     // input lands here with a reason + a suggested fix — never an empty
     // map, never a borrowed error from the wrong branch.
@@ -185,14 +196,58 @@ export default function Home() {
       if (!parseRes.ok) throw new Error(parseData.error ?? `parse failed (${parseRes.status})`);
       setParsedObj(parseData);
 
-      // parse extracted nothing → "couldn't understand", NOT a time error
-      const unparseable = emptyParseReason(parseData);
+      // parse extracted nothing AND the prompt is degenerate → "couldn't
+      // understand"; a sincere-but-vague prompt falls through to the
+      // general "things to do" pool instead of a rejection
+      const unparseable = emptyParseReason(parseData, q);
       if (unparseable) return fail(unparseable);
 
       // "cheap fancy dinner" — contradictory, not impossible: say so
       const contradiction = contradictionReason(q, parseData);
       if (contradiction) return fail(contradiction);
 
+      // thin prompt → 1–2 targeted questions before spending search calls;
+      // answering or skipping continues with the (possibly updated) parse
+      const questions = clarifyQuestions(parseData);
+      if (questions.length > 0) {
+        setClarify({ questions, parsed: parseData });
+        setClarifyWhen(null);
+        setClarifyTime("");
+        setClarifyVibe("");
+        setLoadingText(null);
+        return;
+      }
+
+      await continuePipeline(parseData);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setLoadingText(null);
+    }
+  }
+
+  // clarify answered or skipped → resume the pipeline with final parse
+  async function submitClarify(skip: boolean) {
+    if (!clarify) return;
+    const updated: Record<string, unknown> = { ...clarify.parsed };
+    if (!skip) {
+      const whenAns = clarifyWhen === "pick a time" ? clarifyTime.trim() : clarifyWhen ?? "";
+      if (whenAns) updated.time_window = timeWindowForWhenAnswer(whenAns);
+      if (clarifyVibe.trim()) updated.aesthetic = clarifyVibe.trim();
+    }
+    setClarify(null);
+    setParsedObj(updated);
+    await continuePipeline(updated);
+  }
+
+  // everything from the time check onward — parseData is final here
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function continuePipeline(parseData: any) {
+    const fail = (reason: string) => {
+      setError(reason);
+      setLoadingText(null);
+    };
+    try {
+      setLoadingText("Reading your evening…");
       // fail loud on an implausible time (explicit "brunch at 3am" gets a
       // specific reason; a senseless inferred time gets the add-a-time one)
       const check = resolveStartTimeChecked(
@@ -578,6 +633,58 @@ export default function Home() {
 
   const wxNow = weather?.[0] ?? null;
 
+  // 1–2 targeted questions before search — inline, minimal, skippable
+  const clarifyBlock = clarify && (
+    <div className={"clarify" + (itinerary ? " clarify--stage" : "")}>
+      {clarify.questions.map((qq) => (
+        <div key={qq.id} className="clarify__q">
+          <div className="clarify__label">{qq.question}</div>
+          <div className="clarify__chips">
+            {qq.options.map((o) => (
+              <button
+                key={o}
+                className={
+                  "chipbtn " +
+                  ((qq.id === "when" ? clarifyWhen === o : clarifyVibe === o) ? "chipbtn--on" : "")
+                }
+                onClick={() => (qq.id === "when" ? setClarifyWhen(o) : setClarifyVibe(o))}
+              >
+                {o}
+              </button>
+            ))}
+            {qq.id === "when" && clarifyWhen === "pick a time" && (
+              <input
+                className="clarify__input"
+                value={clarifyTime}
+                onChange={(e) => setClarifyTime(e.target.value)}
+                placeholder="7pm"
+                aria-label="Pick a time"
+                autoFocus
+              />
+            )}
+            {qq.id === "vibe" && (
+              <input
+                className="clarify__input"
+                value={clarifyVibe}
+                onChange={(e) => setClarifyVibe(e.target.value)}
+                placeholder="or type one…"
+                aria-label="Describe the vibe"
+              />
+            )}
+          </div>
+        </div>
+      ))}
+      <div className="clarify__actions">
+        <button className="clarify__go" onClick={() => submitClarify(false)}>
+          Go
+        </button>
+        <button className="clarify__skip" onClick={() => submitClarify(true)}>
+          Skip — just plan it
+        </button>
+      </div>
+    </div>
+  );
+
   // ── empty state ──
   if (!itinerary) {
     return (
@@ -600,6 +707,7 @@ export default function Home() {
             {busy ? loadingText : "Plan it"}
           </button>
         </div>
+        {clarifyBlock}
         {error && <div className="empty__err">{error}</div>}
       </main>
     );
@@ -651,6 +759,8 @@ export default function Home() {
       </div>
 
       {loadingText && <div className="loading">{loadingText}</div>}
+
+      {clarifyBlock}
 
       {banner && (
         <div className={"banner banner--show" + (bannerFlat ? " banner--flat" : "")} role="status">

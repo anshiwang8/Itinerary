@@ -45,14 +45,30 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
-    "empty parse signature → unparseable; any extracted signal keeps going",
+    "empty parse + DEGENERATE prompt → unparseable (gibberish still fails)",
     () => {
-      assert.strictEqual(emptyParseReason(base), UNPARSEABLE_MESSAGE);
-      assert.strictEqual(emptyParseReason({ ...base, category_signals: ["dinner"] }), null);
-      assert.strictEqual(emptyParseReason({ ...base, time_window: "tonight" }), null);
-      assert.strictEqual(emptyParseReason({ ...base, aesthetic: "cozy" }), null);
-      assert.strictEqual(emptyParseReason({ ...base, budget: "cheap" }), null);
-      assert.strictEqual(emptyParseReason({ ...base, constraints: ["patio"] }), null);
+      assert.strictEqual(emptyParseReason(base, "asdfghjkl"), UNPARSEABLE_MESSAGE);
+      assert.strictEqual(emptyParseReason(base, "."), UNPARSEABLE_MESSAGE);
+    },
+  ],
+  [
+    "empty parse + SINCERE prompt → null (vague uncertainty is not gibberish)",
+    () => {
+      // real words, genuine uncertainty — falls through to the general
+      // "things to do" pool instead of a rejection
+      assert.strictEqual(emptyParseReason(base, "not sure what to do"), null);
+      assert.strictEqual(emptyParseReason(base, "no idea, surprise me"), null);
+      assert.strictEqual(emptyParseReason(base, "bored, help"), null);
+    },
+  ],
+  [
+    "any extracted signal keeps going regardless of prompt",
+    () => {
+      assert.strictEqual(emptyParseReason({ ...base, category_signals: ["dinner"] }, "x y z"), null);
+      assert.strictEqual(emptyParseReason({ ...base, time_window: "tonight" }, "x y z"), null);
+      assert.strictEqual(emptyParseReason({ ...base, aesthetic: "cozy" }, "x y z"), null);
+      assert.strictEqual(emptyParseReason({ ...base, budget: "cheap" }, "x y z"), null);
+      assert.strictEqual(emptyParseReason({ ...base, constraints: ["patio"] }, "x y z"), null);
     },
   ],
   [

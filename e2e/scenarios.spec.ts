@@ -104,6 +104,31 @@ test("swap then reroute: the swapped, now-active stop survives untouched @mock",
   await expectStripMatchesPin(page, "Ten O'Clock Curfew");
 });
 
+test("vague-but-sincere prompt: clarify shows, answering lands a general itinerary @mock", async ({ page }) => {
+  await page.goto("/");
+  await page.locator(".prompt__input").fill("not sure what to do");
+  await page.locator(".prompt__go").click();
+
+  // NOT the unparseable rejection — the clarify step appears instead,
+  // asking When? and for a vibe (fully vague parse)
+  const clarify = page.locator(".clarify");
+  await expect(clarify).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".empty__err")).toHaveCount(0);
+  await expect(clarify).toContainText("When?");
+  await expect(clarify).toContainText("vibe");
+
+  // answer "later today" (deterministic evening anchor at any run hour)
+  // and leave the vibe blank — Go continues the pipeline
+  await clarify.getByRole("button", { name: "later today" }).click();
+  await clarify.getByRole("button", { name: "Go", exact: true }).click();
+
+  // the general "things to do" pool serves the itinerary — a real plan,
+  // not an error, and not food-biased (the fixture general pool)
+  await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+  await expect(stripCard(page, "Fixture General One")).toBeVisible();
+  await expectStripMatchesPin(page, "Fixture General One");
+});
+
 test("active stop can't be swapped; an upcoming one still can @mock", async ({ page }) => {
   await planEvening(page, "dinner and drinks");
   await page.locator('.dev input[type="datetime-local"]').fill(simAt(20));

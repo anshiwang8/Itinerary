@@ -34,28 +34,34 @@ export function degeneratePromptReason(prompt: string): string | null {
   return null;
 }
 
-/**
- * Post-parse guard: the model extracted NOTHING — no categories, no time,
- * no vibe, no budget, no constraints, no group. That's the parse's honest
- * signature for nonsense, so say "couldn't understand", never a time error.
- */
-export function emptyParseReason(parsed: ParsedPrompt): string | null {
+/** The all-unspecified parse signature: the model extracted nothing. */
+export function isEmptyParse(parsed: ParsedPrompt): boolean {
   const unspecified = (v: unknown) =>
     typeof v !== "string" || !v.trim() || /^unspecified$/i.test(v.trim());
   const noCategories = !(parsed.category_signals ?? []).some(
     (c) => typeof c === "string" && c.trim() !== ""
   );
-  if (
+  return (
     noCategories &&
     unspecified(parsed.time_window) &&
     unspecified(parsed.aesthetic) &&
     unspecified(parsed.group_context) &&
     (parsed.budget == null || !String(parsed.budget).trim()) &&
     !(parsed.constraints ?? []).some((c) => typeof c === "string" && c.trim() !== "")
-  ) {
-    return UNPARSEABLE_MESSAGE;
-  }
-  return null;
+  );
+}
+
+/**
+ * Post-parse guard. An empty parse ALONE is not gibberish — "not sure
+ * what to do" is real words and genuine uncertainty, and it deserves the
+ * general "things to do" itinerary, not a rejection. Only fail when the
+ * PROMPT itself is degenerate by the same standard as the pre-parse
+ * check; a sincere-but-vague prompt returns null and falls through to
+ * the general pool.
+ */
+export function emptyParseReason(parsed: ParsedPrompt, prompt: string): string | null {
+  if (!isEmptyParse(parsed)) return null;
+  return degeneratePromptReason(prompt);
 }
 
 const CHEAP_SIGNAL =
