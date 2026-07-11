@@ -15,11 +15,14 @@ const FIELD_MASK = [
   "places.editorialSummary",
 ].join(",");
 
-// e.g. aesthetic="lively night out", category="bar", location="Ossington"
-// → "lively night out bar Ossington Toronto".
+// e.g. aesthetic="lively night out", category="bar", location="Ossington",
+// city="Toronto" → "lively night out bar Ossington Toronto".
 // Constraints (dietary/vibe: "vegan", "quiet", "wheelchair accessible")
 // are injected into the query so they shape the candidate pool itself —
 // not just the selection reasons ("vegan lunch" must SEARCH vegan).
+// The city comes from parsed.city (user-supplied input, injected by the
+// app); itineraries stored before multi-city carry no city and keep the
+// original Toronto behavior.
 export function buildQuery(parsed: ParsedPrompt, category: string): string {
   const aesthetic =
     parsed.aesthetic && parsed.aesthetic.toLowerCase() !== "unspecified"
@@ -28,7 +31,10 @@ export function buildQuery(parsed: ParsedPrompt, category: string): string {
   const constraints = (parsed.constraints ?? [])
     .filter((c) => typeof c === "string" && c.trim() !== "")
     .join(" ");
-  return [aesthetic, constraints, category, parsed.location, "Toronto"]
+  const neighbourhood =
+    parsed.location && parsed.location.toLowerCase() !== "unspecified" ? parsed.location : "";
+  const city = parsed.city?.trim() || "Toronto";
+  return [aesthetic, constraints, category, neighbourhood, city]
     .filter(Boolean)
     .join(" ");
 }

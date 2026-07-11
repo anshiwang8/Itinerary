@@ -1,11 +1,19 @@
-// Home origin — outings start from the user's home, hardcoded to UofT
-// Chestnut Residence (89 Chestnut St, Toronto) for the prototype.
-// Home is a starting WAYPOINT, not a stop: no duration, no venue card,
-// excluded from stop count / statuses / completion. Venue search stays
-// anchored on Ossington — home only shapes leg 0 (home → first stop).
+// Home origin — outings start from the user's starting address (geocoded
+// per plan, stored as itinerary.home). Home is a starting WAYPOINT, not a
+// stop: no duration, no venue card, excluded from stop count / statuses /
+// completion. Home only shapes leg 0 (home → first stop).
 import { LatLng, TravelLeg } from "./travel";
 
-export const HOME: { label: string; location: LatLng } = {
+/** A per-itinerary origin point (geocoded starting address or city centre). */
+export interface HomePoint {
+  label: string;
+  location: LatLng;
+}
+
+// The DEFAULT origin — used only when an itinerary carries no per-request
+// `home` (pre-multi-city itineraries, tests): the original prototype
+// anchor, UofT Chestnut Residence.
+export const HOME: HomePoint = {
   label: "Home · Chestnut Residence",
   location: { latitude: 43.6547, longitude: -79.3862 },
 };

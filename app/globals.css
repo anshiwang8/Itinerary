@@ -218,6 +218,17 @@ button { font-family: var(--grot); cursor: pointer; }
 /* weather-blocked card variant */
 .wx-note { font-family: var(--grot); font-size: 12.5px; color: var(--ink-soft); font-style: normal; }
 
+/* ── city + starting-address inputs (plain queries, no location services) ── */
+.wherebar { display: flex; gap: 8px; width: min(520px, 92vw); margin-bottom: 10px; }
+.where__input {
+  flex: 0 0 150px; min-width: 0; border: 1px solid var(--rule); border-radius: 8px;
+  background: var(--card); padding: 9px 12px; outline: none;
+  font-family: var(--grot); font-size: 14px; color: var(--ink);
+}
+.where__input--addr { flex: 1 1 auto; }
+.where__input:focus { border-color: var(--ink); }
+.where__input::placeholder { color: var(--ink-faint); }
+
 /* ── clarifying questions (inline, pre-search) ── */
 .clarify {
   margin-top: 16px; width: min(520px, 92vw); text-align: left;

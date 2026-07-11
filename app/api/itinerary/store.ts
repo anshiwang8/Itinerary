@@ -3,6 +3,7 @@
 // handling. Keyed by itinerary id.
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
+import { HomePoint } from "../schedule/home";
 import { ParsedPrompt } from "../places/search/filter";
 
 export type StopStatus = "upcoming" | "active" | "completed" | "skipped";
@@ -30,6 +31,9 @@ export interface Itinerary {
    * starts; the reroute engine never reads or writes it.
    */
   homeLeg?: TravelLeg;
+  /** the plan's origin point (geocoded starting address / city centre);
+   * absent on pre-multi-city itineraries → engines fall back to HOME */
+  home?: HomePoint;
   /** original parse output — the reroute engine re-runs the pipeline with it */
   parsed?: ParsedPrompt;
 }
@@ -145,7 +149,8 @@ export function createItinerary(
   stops: ScheduledStop[],
   legs: TravelLeg[],
   parsed?: ParsedPrompt,
-  homeLeg?: TravelLeg | null
+  homeLeg?: TravelLeg | null,
+  home?: HomePoint | null
 ): Itinerary {
   const itinerary: Itinerary = {
     id: crypto.randomUUID(),
@@ -159,6 +164,7 @@ export function createItinerary(
     })),
     legs,
     ...(homeLeg ? { homeLeg } : {}),
+    ...(home ? { home } : {}),
     ...(parsed ? { parsed } : {}),
   };
   store.set(itinerary.id, itinerary);

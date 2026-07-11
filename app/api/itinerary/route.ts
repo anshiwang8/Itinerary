@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createItinerary, saveItinerary } from "./store";
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
+import { HomePoint } from "../schedule/home";
 import { ParsedPrompt } from "../places/search/filter";
 
 // POST /api/itinerary — store the full pipeline output, return { id }.
@@ -10,6 +11,7 @@ export async function POST(request: NextRequest) {
   let legs: TravelLeg[];
   let parsed: ParsedPrompt | undefined;
   let homeLeg: TravelLeg | undefined;
+  let home: HomePoint | undefined;
   try {
     const body = await request.json();
     stops = body?.stops;
@@ -18,6 +20,10 @@ export async function POST(request: NextRequest) {
       body?.parsed && typeof body.parsed === "object" ? body.parsed : undefined;
     homeLeg =
       body?.homeLeg && typeof body.homeLeg === "object" ? body.homeLeg : undefined;
+    home =
+      body?.home && typeof body.home === "object" && body.home.location
+        ? body.home
+        : undefined;
   } catch {
     return NextResponse.json(
       { error: "Request body must be JSON." },
@@ -31,7 +37,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const itinerary = createItinerary(stops, legs, parsed, homeLeg);
+  const itinerary = createItinerary(stops, legs, parsed, homeLeg, home);
   try {
     await saveItinerary(itinerary);
   } catch (err) {

@@ -305,6 +305,16 @@ export function mockTravelLegs(points: LatLng[]): TravelLeg[] {
   return points.slice(0, -1).map((from, i) => mockLeg(i, from, points[i + 1]));
 }
 
+// ── geocode: deterministic — every query resolves to the classic fixture
+// home (Chestnut Residence coords) so mock travel legs and the home card
+// stay byte-stable regardless of what city/address a scenario types. ──
+export function mockGeocode(query: string): {
+  label: string;
+  location: { latitude: number; longitude: number };
+} {
+  return { label: `${query} (fixture)`, location: { latitude: 43.6547, longitude: -79.3862 } };
+}
+
 // ── weather: 48 calm hours from now, EXCEPT a fixed daily rain window at
 // 3 PM local (precip 80) — the deterministic trigger for the weather gate
 // and the all-pools-empty net: plan an outdoor category "at 3pm" and it

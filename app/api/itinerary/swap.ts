@@ -733,7 +733,7 @@ async function timeChange(
   let anchorInbound: TravelLeg | null = null;
   if (anchorLoc) {
     anchorInbound = await deps.getSingleLeg(
-      prevStop?.location ?? HOME.location,
+      prevStop?.location ?? itinerary.home?.location ?? HOME.location,
       anchorLoc,
       prevStop ? tp - 1 : HOME_LEG_INDEX,
       prevStop?.end_time ?? undefined,
@@ -976,7 +976,7 @@ async function finalize(
   let inbound: TravelLeg | null = null;
   if (newLoc) {
     inbound = await deps.getSingleLeg(
-      prevStop?.location ?? HOME.location,
+      prevStop?.location ?? itinerary.home?.location ?? HOME.location,
       newLoc,
       prevStop ? tp - 1 : HOME_LEG_INDEX,
       prevStop?.end_time ?? undefined,

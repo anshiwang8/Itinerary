@@ -115,6 +115,12 @@ function stopsFromItinerary(it: Itinerary): MapStop[] {
 
 export default function Home() {
   const [prompt, setPrompt] = useState("");
+  // plain query inputs — NOT location services (deliberately deferred).
+  // City prefilled visibly (never a silent fallback); address optional,
+  // defaulting to the city centre.
+  const [city, setCity] = useState("Toronto");
+  const [startAddress, setStartAddress] = useState("");
+  const [homePoint, setHomePoint] = useState<{ label: string; location: { latitude: number; longitude: number } } | null>(null);
   const [pools, setPools] = useState<Pools>({});
   const [parsedObj, setParsedObj] = useState<Record<string, unknown> | null>(null);
   const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
@@ -194,6 +200,9 @@ export default function Home() {
       });
       const parseData = await parseRes.json();
       if (!parseRes.ok) throw new Error(parseData.error ?? `parse failed (${parseRes.status})`);
+      // the city is app-supplied input, never LLM-inferred — it rides on
+      // the parse so swap/reroute re-searches inherit it from the store
+      parseData.city = city.trim();
       setParsedObj(parseData);
 
       // parse extracted nothing AND the prompt is degenerate → "couldn't
@@ -257,10 +266,50 @@ export default function Home() {
       );
       if (!check.ok) return fail(check.reason);
 
+      // ── geocode the city + starting address (plain text queries — real
+      // location services are deliberately future work). Never silently
+      // fall back: a city the geocoder can't place fails loud. ──
+      setLoadingText("Finding your city…");
+      const cityQ = city.trim();
+      if (!cityQ) return fail("Add a city so I know where to plan.");
+      const cityRes = await fetch("/api/geocode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: cityQ }),
+      });
+      const cityData = await cityRes.json();
+      if (!cityRes.ok) {
+        return fail(cityData.error ?? `Couldn't find "${cityQ}" — check the spelling?`);
+      }
+      let hp: { label: string; location: { latitude: number; longitude: number } } = {
+        label: `Start · ${cityQ} centre`,
+        location: cityData.location,
+      };
+      const addrQ = startAddress.trim();
+      if (addrQ) {
+        const addrRes = await fetch("/api/geocode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: `${addrQ}, ${cityQ}` }),
+        });
+        const addrData = await addrRes.json();
+        if (!addrRes.ok) {
+          return fail(addrData.error ?? `Couldn't find "${addrQ}" — check the spelling?`);
+        }
+        hp = { label: `Start · ${addrData.label ?? addrQ}`, location: addrData.location };
+      }
+      setHomePoint(hp);
+
       let weather = null;
       try {
-        const wr = await fetch("/api/weather");
-        if (wr.ok) weather = await wr.json();
+        const wr = await fetch(
+          `/api/weather?lat=${hp.location.latitude}&lng=${hp.location.longitude}`
+        );
+        if (wr.ok) {
+          weather = await wr.json();
+          // the ambient chip should show the PLAN's city, not the default
+          if (Array.isArray(weather)) setWeather(weather);
+        }
       } catch {
         weather = null;
       }
@@ -325,7 +374,7 @@ export default function Home() {
         const travelRes = await fetch("/api/schedule/travel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ points: [HOME.location, ...points], departureTime: startISO }),
+          body: JSON.stringify({ points: [hp.location, ...points], departureTime: startISO }),
         });
         const travelData = await travelRes.json();
         if (!travelRes.ok) throw new Error(travelData.error ?? `travel failed (${travelRes.status})`);
@@ -343,7 +392,7 @@ export default function Home() {
       setSelected(ms[0]?.category ?? null);
 
       // auto-store the itinerary so the live/reroute controls work at once
-      await storeItinerary(stops, legs, hl, parseData, categories as Pools, "");
+      await storeItinerary(stops, legs, hl, parseData, categories as Pools, "", hp);
       setLoadingText(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -357,7 +406,8 @@ export default function Home() {
     hl: TravelLeg | null,
     parsed: Record<string, unknown>,
     poolsIn: Pools,
-    simValue: string
+    simValue: string,
+    home?: { label: string; location: { latitude: number; longitude: number } } | null
   ) {
     const enriched = sched.map((st) => {
       const loc = st.id ? (poolsIn[st.category] ?? []).find((p) => p.id === st.id)?.location : undefined;
@@ -366,7 +416,7 @@ export default function Home() {
     const res = await fetch("/api/itinerary", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stops: enriched, legs, parsed, homeLeg: hl }),
+      body: JSON.stringify({ stops: enriched, legs, parsed, homeLeg: hl, ...(home ? { home } : {}) }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -539,6 +589,9 @@ export default function Home() {
   const selectedStop = itinerary?.stops.find((s) => s.category === selected) ?? null;
   const canSwap = !!selectedStop && selectedStop.status === "upcoming" && selectedStop.id !== null;
 
+  // the plan's origin: per-itinerary geocoded home, else the classic default
+  const homeOrigin = itinerary?.home ?? homePoint ?? HOME;
+
   const mapHome = useMemo<MapHome | null>(() => {
     if (!homeLeg) return null;
     const first = (schedule ?? []).find((s) => s.start_time);
@@ -547,15 +600,16 @@ export default function Home() {
         ? formatStopTime(new Date(new Date(first.start_time).getTime() - homeLeg.totalMinutes * 60_000))
         : null;
     return {
-      label: HOME.label,
-      lat: HOME.location.latitude,
-      lng: HOME.location.longitude,
+      label: homeOrigin.label,
+      lat: homeOrigin.location.latitude,
+      lng: homeOrigin.location.longitude,
       legModeToNext: homeLeg.mode,
       polylineToNext: homeLeg.encodedPolyline,
       legLabel: legDetail(homeLeg),
       leaveBy,
     };
-  }, [homeLeg, schedule]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homeLeg, schedule, homeOrigin.label, homeOrigin.location.latitude, homeOrigin.location.longitude]);
 
   const timedStops = itinerary?.stops.filter((s) => s.start_time) ?? [];
 
@@ -615,7 +669,7 @@ export default function Home() {
         ? new Date(new Date(first.start_time).getTime() - homeLeg.totalMinutes * 60_000).toISOString()
         : null;
     return {
-      label: HOME.label,
+      label: (itinerary.home ?? homePoint ?? HOME).label,
       leaveBy: leaveISO ? formatStopTime(leaveISO) : null,
       leg: {
         mode: homeLeg.mode,
@@ -629,7 +683,7 @@ export default function Home() {
         arriveISO: first?.start_time ?? null,
       },
     };
-  }, [homeLeg, itinerary]);
+  }, [homeLeg, itinerary, homePoint]);
 
   const wxNow = weather?.[0] ?? null;
 
@@ -691,6 +745,22 @@ export default function Home() {
       <main className="empty">
         <div className="empty__mark">Itinerary</div>
         <h1 className="empty__title">Plan your day</h1>
+        <div className="wherebar">
+          <input
+            className="where__input"
+            value={city}
+            onChange={(e) => setCity(e.target.value)}
+            placeholder="City"
+            aria-label="City"
+          />
+          <input
+            className="where__input where__input--addr"
+            value={startAddress}
+            onChange={(e) => setStartAddress(e.target.value)}
+            placeholder="Starting address (optional — city centre)"
+            aria-label="Starting address"
+          />
+        </div>
         <div className="prompt">
           <input
             className="prompt__input"
@@ -703,7 +773,11 @@ export default function Home() {
             aria-label="Describe your evening"
             autoFocus
           />
-          <button className="prompt__go" onClick={runPipeline} disabled={busy || !prompt.trim()}>
+          <button
+            className="prompt__go"
+            onClick={runPipeline}
+            disabled={busy || !prompt.trim() || !city.trim()}
+          >
             {busy ? loadingText : "Plan it"}
           </button>
         </div>
@@ -719,7 +793,7 @@ export default function Home() {
       <ItineraryMap stops={styledStops} home={mapHome} selected={selected} onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))} />
 
       {wxNow && (
-        <div className="weather" aria-label="Current weather in Ossington">
+        <div className="weather" aria-label={`Current weather — ${city.trim() || "Toronto"}`}>
           <WeatherIcon condition={wxNow.condition} precip={wxNow.precipProbability} />
           <span className="weather__temp">{wxNow.tempC != null ? `${Math.round(wxNow.tempC)}°` : "—"}</span>
           {wxNow.condition && <span className="weather__cond">{wxNow.condition}</span>}

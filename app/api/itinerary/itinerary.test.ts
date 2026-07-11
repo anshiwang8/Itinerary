@@ -31,6 +31,16 @@ const at = (iso: string) => new Date(iso);
 
 const cases: Array<[string, () => void]> = [
   [
+    "MULTI-CITY: createItinerary persists a per-plan home; absent stays absent",
+    () => {
+      const home = { label: "Start · 800 Robson St", location: { latitude: 49.2827, longitude: -123.1207 } };
+      const withHome = createItinerary([mkStop("dinner", S1.start, S1.end)], [], undefined, null, home);
+      assert.deepStrictEqual(withHome.home, home);
+      const without = createItinerary([mkStop("dinner", S1.start, S1.end)], []);
+      assert.strictEqual(without.home, undefined); // engines fall back to HOME
+    },
+  ],
+  [
     "status derivation at exact boundaries: t == start → active, t == end → completed",
     () => {
       assert.strictEqual(deriveStopStatus(S1.start, S1.end, at("2026-07-03T18:59:59-04:00")), "upcoming");

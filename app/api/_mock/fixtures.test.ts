@@ -4,7 +4,7 @@
 // scenarios exercising these categories stay honest).
 // Run with: npx tsx app/api/_mock/fixtures.test.ts
 import assert from "node:assert";
-import { mockParse } from "./fixtures";
+import { mockGeocode, mockParse } from "./fixtures";
 
 const cases: Array<[string, () => void]> = [
   [
@@ -25,6 +25,16 @@ const cases: Array<[string, () => void]> = [
       assert.deepStrictEqual(mockParse("a walk in the park at 3pm").category_signals, [
         "park walk",
       ]);
+    },
+  ],
+  [
+    "mockGeocode is deterministic: any query → fixture home coords",
+    () => {
+      const a = mockGeocode("Vancouver");
+      const b = mockGeocode("800 Robson St, Vancouver");
+      assert.deepStrictEqual(a.location, { latitude: 43.6547, longitude: -79.3862 });
+      assert.deepStrictEqual(b.location, a.location);
+      assert.strictEqual(a.label, "Vancouver (fixture)");
     },
   ],
   [

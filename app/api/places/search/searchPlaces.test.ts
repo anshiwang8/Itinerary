@@ -54,6 +54,20 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "MULTI-CITY: parsed.city replaces the Toronto literal; absent city keeps it",
+    () => {
+      // second city flows into the query — never a silent Ossington/Toronto
+      const van = buildQuery(mkParsed({ city: "Vancouver", location: "west end" }), "coffee");
+      assert.strictEqual(van, "coffee west end Vancouver");
+      // pre-multi-city itineraries (no city on parsed) keep the old behavior
+      const legacy = buildQuery(mkParsed(), "lunch");
+      assert.strictEqual(legacy, "lunch Ossington Toronto");
+      // neighbourhood "unspecified" (new parse contract: "" / unspecified) drops out
+      const bare = buildQuery(mkParsed({ city: "Montreal", location: "" }), "dinner");
+      assert.strictEqual(bare, "dinner Montreal");
+    },
+  ],
+  [
     "park-biased search: green-space categories get includedType 'park'",
     () => {
       // the hard type filter keeps scenic lounges/restaurants out of the pool

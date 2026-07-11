@@ -771,6 +771,27 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "MULTI-CITY: a time-swap on the FIRST stop departs from the itinerary's own home",
+    async () => {
+      const it = mkItinerary();
+      // a per-plan geocoded home (e.g. a Vancouver address), not the default
+      it.home = { label: "Start · 800 Robson St", location: { latitude: 49.2827, longitude: -123.1207 } };
+      const origins: Array<{ latitude: number; longitude: number }> = [];
+      const deps = mkDeps({ legMin: 10 });
+      const realLeg = deps.getSingleLeg;
+      deps.getSingleLeg = async (o, d, fi, dep, ex) => {
+        origins.push(o as { latitude: number; longitude: number });
+        return realLeg(o, d, fi, dep, ex);
+      };
+      // move dinner (stop 0) earlier — its inbound leg departs from HOME
+      const res = await swapStop(it, 0, "an hour earlier", new Date(T(17, 0)), deps);
+      assert.ok(res.swapped);
+      // the home→dinner leg used the ITINERARY's home, not the module default
+      const homeOrigin = origins.find((o) => Math.abs(o.latitude - 49.2827) < 1e-6);
+      assert.ok(homeOrigin, `expected an origin at the custom home, got ${JSON.stringify(origins)}`);
+    },
+  ],
+  [
     "no better candidate → honest refusal, original kept",
     async () => {
       const it = mkItinerary();

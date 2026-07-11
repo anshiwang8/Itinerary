@@ -19,7 +19,7 @@ Respond with ONLY a single JSON object. No prose, no explanations, no markdown f
   "group_context": string,      // who is going, e.g. "solo", "date", "family with kids", "group of friends"; "unspecified" if unknown
   "budget": string | null,      // budget signal if stated, e.g. "cheap", "under $50", "$$$"; null if unstated
   "constraints": string[],      // hard requirements, e.g. ["wheelchair accessible", "vegetarian options", "indoors only"]; [] if none
-  "location": string            // neighbourhood/area; default "Ossington" if the user does not state one
+  "location": string            // a neighbourhood/area WITHIN the city, only if the prompt states one ("west end", "downtown", "near the harbour"); "" if none. NEVER a city name — the city is supplied separately by the app, never inferred from the prompt
 }`;
 
 export async function POST(request: NextRequest) {

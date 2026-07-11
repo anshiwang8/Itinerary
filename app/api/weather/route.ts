@@ -1,19 +1,22 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { WeatherHour } from "../places/search/filter";
 import { isMockMode, mockWeather } from "../_mock/fixtures";
 
-// Google Weather API hourly forecast, next 24h. Single-neighborhood
-// launch: location hardcoded to Ossington/Toronto, no location plumbing.
+// Google Weather API hourly forecast, next 24h.
+// GET /api/weather?lat=..&lng=.. — forecast for the plan's geocoded
+// location; absent/invalid coords fall back to the original Ossington
+// anchor (pre-plan ambient chip, old clients).
 const FORECAST_URL = "https://weather.googleapis.com/v1/forecast/hours:lookup";
-const OSSINGTON = { latitude: 43.6479, longitude: -79.4197 };
+const DEFAULT_LOC = { latitude: 43.6479, longitude: -79.4197 }; // Ossington
 
 // A parameterless GET would otherwise be rendered statically at BUILD
 // time (stale forecast baked into the deploy). Force per-request
 // execution; the fetch below keeps its own 10-minute data cache.
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  // fixture seam: 24 calm deterministic hours, no Weather call
+export async function GET(request: NextRequest) {
+  // fixture seam: deterministic hours, no Weather call (coords ignored —
+  // the mock is a data source; location doesn't change the fixture)
   if (isMockMode()) return NextResponse.json(mockWeather());
 
   const apiKey = process.env.GOOGLE_WEATHER_API_KEY;
@@ -24,10 +27,17 @@ export async function GET() {
     );
   }
 
+  const lat = parseFloat(request.nextUrl.searchParams.get("lat") ?? "");
+  const lng = parseFloat(request.nextUrl.searchParams.get("lng") ?? "");
+  const loc =
+    Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
+      ? { latitude: lat, longitude: lng }
+      : DEFAULT_LOC;
+
   const url = new URL(FORECAST_URL);
   url.searchParams.set("key", apiKey);
-  url.searchParams.set("location.latitude", String(OSSINGTON.latitude));
-  url.searchParams.set("location.longitude", String(OSSINGTON.longitude));
+  url.searchParams.set("location.latitude", String(loc.latitude));
+  url.searchParams.set("location.longitude", String(loc.longitude));
   url.searchParams.set("hours", "24");
   url.searchParams.set("pageSize", "24");
   url.searchParams.set("unitsSystem", "METRIC");

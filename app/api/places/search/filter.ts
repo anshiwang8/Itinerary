@@ -26,7 +26,12 @@ export interface ParsedPrompt {
   group_context: string;
   budget: string | null;
   constraints: string[];
+  /** neighbourhood/area WITHIN the city (from the prompt), e.g. "west end" */
   location: string;
+  /** the user-supplied city (injected by the app after parse, NOT inferred
+   * by the LLM); rides on parsed so swap/reroute re-searches inherit it.
+   * Absent on pre-multi-city itineraries → search falls back to Toronto. */
+  city?: string;
 }
 
 export type DropRule =

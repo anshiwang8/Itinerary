@@ -28,7 +28,7 @@ fixes it with zero code change.
 | Variable | Value / purpose |
 | --- | --- |
 | `GROQ_API_KEY` | Groq (parse / select / swap interpret) — server-side only |
-| `GOOGLE_PLACES_API_KEY` | Places Text Search — server-side only |
+| `GOOGLE_PLACES_API_KEY` | Places Text Search (venue search + `/api/geocode` city/address lookup — no separate Geocoding API key) — server-side only |
 | `GOOGLE_ROUTES_API_KEY` | Routes computeRoutes — server-side only |
 | `GOOGLE_WEATHER_API_KEY` | Weather hourly forecast — server-side only |
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Maps JS (browser-side by design — see referrer note) |
