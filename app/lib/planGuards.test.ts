@@ -125,6 +125,58 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "dietary vs incompatible venue type → contradiction, naming the pair",
+    () => {
+      // the exact QA Scenario 9 case, incl. how it actually parses
+      assert.strictEqual(
+        contradictionReason("vegan steakhouse", {
+          ...base,
+          category_signals: ["steakhouse", "vegan"],
+          constraints: ["vegan options"],
+        }),
+        "That's a bit contradictory — vegan and steakhouse pull opposite ways. Which matters more?"
+      );
+      // other obvious clashes (message names the actual words)
+      assert.strictEqual(
+        contradictionReason("vegetarian bbq", base),
+        "That's a bit contradictory — vegetarian and bbq pull opposite ways. Which matters more?"
+      );
+      assert.strictEqual(
+        contradictionReason("kosher pork joint", base),
+        "That's a bit contradictory — kosher and pork pull opposite ways. Which matters more?"
+      );
+      assert.match(contradictionReason("vegan butcher", base) ?? "", /vegan and butcher pull opposite ways/);
+      assert.match(contradictionReason("halal bacon spot", base) ?? "", /halal and bacon pull opposite ways/);
+    },
+  ],
+  [
+    "satisfiable diet requests do NOT trip the new guard (Scenario 10 regression)",
+    () => {
+      // "vegan dinner" must plan, never refuse
+      assert.strictEqual(
+        contradictionReason("vegan dinner", { ...base, constraints: ["vegan"], category_signals: ["dinner"] }),
+        null
+      );
+      assert.strictEqual(contradictionReason("vegan cafe", base), null);
+      assert.strictEqual(contradictionReason("vegetarian ramen", base), null);
+      // per-diet: these venue types are only incompatible with SOME diets
+      assert.strictEqual(contradictionReason("halal steakhouse", base), null); // halal steak is fine
+      assert.strictEqual(contradictionReason("gluten-free steakhouse", base), null); // GF steak is fine
+      assert.strictEqual(contradictionReason("kosher bbq", base), null); // kosher BBQ is common
+    },
+  ],
+  [
+    "accommodation phrasing (mixed group) is not a contradiction",
+    () => {
+      // "vegan options" / "vegan-friendly" / "a vegan friend" = a preference
+      // for the group, not a hard whole-venue requirement
+      assert.strictEqual(contradictionReason("vegan options at a steakhouse", base), null);
+      assert.strictEqual(contradictionReason("steakhouse with a vegan friend", base), null);
+      assert.strictEqual(contradictionReason("vegan-friendly steakhouse", base), null);
+      assert.strictEqual(contradictionReason("a bbq place with vegetarian options", base), null);
+    },
+  ],
+  [
     "no-venues + weather + unmet-constraint messages carry reason + suggestion",
     () => {
       assert.strictEqual(

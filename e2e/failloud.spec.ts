@@ -42,12 +42,13 @@ test("empty-pool net: rained-out outdoor plan fails loud, not an empty map @mock
   );
 });
 
-test("constraints: 'vegan steakhouse' fails honestly — no hedged pick @mock", async ({ page }) => {
-  // the generic steakhouse pool has no vegan evidence → mockSelect returns
-  // id:null + unmetConstraint (mirroring the real contract), and the page
-  // must surface it — never a steakhouse that "may accommodate vegans"
+test("constraints: 'vegan steakhouse' is caught as a contradiction, up front @mock", async ({ page }) => {
+  // QA Bug 2: a hard diet vs a venue whose identity is the forbidden thing
+  // is a CONTRADICTION, caught before search/select — the parse used to
+  // treat "steakhouse" as a mere category and plan a vegan spot under that
+  // label. Named-pair message, same voice as "cheap fancy".
   expect(await planExpectingProblem(page, "vegan steakhouse")).toBe(
-    "Couldn't find a steakhouse that's really vegan — want to drop a constraint, or try a different kind of place?"
+    "That's a bit contradictory — vegan and steakhouse pull opposite ways. Which matters more?"
   );
 });
 

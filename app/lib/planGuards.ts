@@ -73,21 +73,68 @@ const FANCY_SIGNAL =
 const NEGATED_FANCY =
   /\b(?:nothing|not|no|isn'?t|without)\s+(?:too\s+|very\s+)?(?:fancy|upscale|posh|elegant|swanky|high[- ]end)\b/gi;
 
+// A hard dietary requirement pulling against a venue whose whole identity is
+// the thing it forbids ("vegan steakhouse"). Same shape as the cheap/fancy
+// pair, but PER dietary term — the incompatibility depends on the diet
+// (a "gluten-free steakhouse" is fine; a "halal steakhouse" is fine — halal
+// steak exists). Deliberately NOT exhaustive: just the common/obvious cases.
+const DIETARY_VENUE_CONFLICTS: Array<[RegExp, RegExp]> = [
+  // plant-based diets vs meat-/seafood-defined venues
+  [
+    /\b(vegan|vegetarian|plant[- ]based)\b/i,
+    /\b(steak\s?house|steakhouse|chop\s?house|chophouse|butcher|bbq|barbe?cue|barbeque|churrascaria|smoke\s?house|smokehouse|rib\s?(?:house|joint|shack)|meatery|seafood|oyster\s?bar|raw\s?bar|fish\s?house)\b/i,
+  ],
+  // pork-/shellfish-forbidding diets vs pork-/shellfish-defined venues
+  // (BBQ deliberately excluded here — halal/kosher BBQ is common)
+  [
+    /\b(halal|kosher)\b/i,
+    /\b(pork|hog\b|bacon|pig\s?roast|oyster\s?bar|raw\s?bar|shellfish|lobster\s?(?:shack|house)?|crab\s?shack|clam\s?bar)\b/i,
+  ],
+];
+
+// Accommodation phrasing — the diet is a preference for the GROUP, not a hard
+// requirement for the venue: "vegan options", "vegan-friendly", "a vegan
+// friend", "vegetarian menu". Stripped before the dietary-conflict check so
+// "vegan options at a steakhouse" / "steakhouse with a vegan friend" don't
+// trip it. Whole-venue asks ("vegan steakhouse") carry no such qualifier.
+const DIETARY_ACCOMMODATION =
+  /\b(?:vegan|vegetarian|plant[- ]based|halal|kosher|gluten[- ]free)[\s-]+(?:options?|friendly|friend|choices?|dishes?|menu|alternatives?|selections?)\b/gi;
+
 /**
- * Contradiction guard: a budget pulling one way and an aesthetic pulling
- * the other ("cheap fancy dinner") can't both be satisfied — say so
- * instead of returning an empty, silently price-filtered map.
+ * Contradiction guard: two stated wants that can't both hold — say so
+ * instead of returning an empty, silently filtered map. Covers a budget vs
+ * aesthetic clash ("cheap fancy dinner") and a hard dietary requirement vs
+ * an incompatible venue type ("vegan steakhouse"), naming the actual pair.
  */
 export function contradictionReason(
   prompt: string,
   parsed: ParsedPrompt | null
 ): string | null {
-  const fields = [parsed?.budget ?? "", parsed?.aesthetic ?? "", (parsed?.constraints ?? []).join(" ")]
-    .join(" ");
-  const haystack = `${prompt} ${fields}`.replace(NEGATED_FANCY, "");
-  if (CHEAP_SIGNAL.test(haystack) && FANCY_SIGNAL.test(haystack)) {
+  const fields = [
+    parsed?.budget ?? "",
+    parsed?.aesthetic ?? "",
+    (parsed?.constraints ?? []).join(" "),
+    (parsed?.category_signals ?? []).join(" "),
+  ].join(" ");
+  const raw = `${prompt} ${fields}`;
+
+  // cheap vs fancy
+  const cf = raw.replace(NEGATED_FANCY, "");
+  if (CHEAP_SIGNAL.test(cf) && FANCY_SIGNAL.test(cf)) {
     return CONTRADICTION_MESSAGE;
   }
+
+  // dietary vs incompatible venue type — the venue word is matched on the
+  // raw text; the dietary word is matched with accommodation phrasing removed
+  const dietText = raw.replace(DIETARY_ACCOMMODATION, " ");
+  for (const [diet, venue] of DIETARY_VENUE_CONFLICTS) {
+    const d = dietText.match(diet);
+    const v = raw.match(venue);
+    if (d && v) {
+      return `That's a bit contradictory — ${d[0].toLowerCase()} and ${v[0].toLowerCase()} pull opposite ways. Which matters more?`;
+    }
+  }
+
   return null;
 }
 
