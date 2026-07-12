@@ -18,6 +18,10 @@ import { TravelLeg } from "../schedule/travel";
 
 const T = (h: number, m: number) =>
   `2026-07-03T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00-04:00`;
+// Vancouver wall-clock (PDT, −07:00) for the same calendar day — used by the
+// multi-city zone tests. T(h,m) and V(h,m) are 3h apart as instants.
+const V = (h: number, m: number) =>
+  `2026-07-03T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00-07:00`;
 const ms = (iso: string | null) => new Date(iso!).getTime();
 
 function leg(fromIndex: number, mode: "transit" | "walk", total: number): TravelLeg {
@@ -789,6 +793,57 @@ const cases: Array<[string, () => Promise<void>]> = [
       // the home→dinner leg used the ITINERARY's home, not the module default
       const homeOrigin = origins.find((o) => Math.abs(o.latitude - 49.2827) < 1e-6);
       assert.ok(homeOrigin, `expected an origin at the custom home, got ${JSON.stringify(origins)}`);
+    },
+  ],
+  [
+    "MULTI-CITY: an absolute time-swap lands 6pm in the PLAN's zone, never Toronto's",
+    async () => {
+      // Regression pin for the Phase-5 timeChange fix. A Vancouver plan
+      // carries Pacific wall times and its real IANA zone. "move it to 6pm"
+      // must set 18:00 PACIFIC (−07:00), never 18:00 Toronto (−04:00) — the
+      // bug was setHours() in the SERVER's local zone, which on the Toronto
+      // dev box would render a Vancouver plan three hours wrong. The two
+      // instants differ by 3h, so this assertion actually discriminates.
+      const it = createItinerary(
+        [
+          {
+            category: "dinner", id: "vd1", name: "Vancouver Dinner",
+            start_time: V(19, 0), end_time: V(20, 45),
+            durationMinutes: { base: 90, buffer: 15, total: 105 },
+            location: { latitude: 49.2827, longitude: -123.1207 },
+            travelMinutesToNext: 15, travelToNext: leg(0, "transit", 15),
+          },
+          {
+            category: "bar", id: "vb1", name: "Vancouver Bar",
+            start_time: V(21, 0), end_time: V(22, 10),
+            durationMinutes: { base: 60, buffer: 10, total: 70 },
+            location: { latitude: 49.282, longitude: -123.118 },
+          },
+        ],
+        [leg(0, "transit", 15)],
+        {
+          time_window: "evening", stop_count: null, aesthetic: "lively",
+          category_signals: ["dinner", "bar"], group_context: "date",
+          budget: null, constraints: [], location: "Gastown",
+        },
+        null,
+        null,
+        "America/Vancouver"
+      );
+      const now = new Date(V(16, 0)); // 4pm Pacific → dinner still upcoming
+      const res = await swapStop(it, 0, "move it to 6pm", now, mkDeps({ legMin: 10 }));
+      assert.ok(res.swapped, `expected a swap, got: ${JSON.stringify(res)}`);
+      if (!res.swapped) return;
+      assert.strictEqual(res.path, "time");
+      // the pin: 18:00 in Vancouver, not in Toronto
+      assert.strictEqual(it.stops[0].start_time, V(18, 0));
+      assert.strictEqual(ms(it.stops[0].start_time), ms(V(18, 0)));
+      // explicitly NOT the Toronto-6pm instant the pre-fix code produced on a
+      // Toronto-local server
+      assert.notStrictEqual(ms(it.stops[0].start_time), ms(T(18, 0)));
+      // the kept 105-min duration also renders in Pacific (18:00 + 105 = 19:45)
+      assert.strictEqual(it.stops[0].end_time, V(19, 45));
+      assert.match(res.reason, /6:00 PM/);
     },
   ],
   [
