@@ -6,13 +6,42 @@ import {
   CONTRADICTION_MESSAGE,
   contradictionReason,
   degeneratePromptReason,
+  emptyCategoryReason,
   emptyParseReason,
   noVenuesReason,
+  partialEmptyCategories,
   UNPARSEABLE_MESSAGE,
   unmetConstraintReason,
   weatherBlockedReason,
+  widenOfferLabel,
 } from "./planGuards";
-import { ParsedPrompt } from "../api/places/search/filter";
+import { DropEntry, ParsedPrompt } from "../api/places/search/filter";
+import type { Selection } from "../api/select/selectVenues";
+
+// selection/drop builders for the recovery tests
+const pick = (category: string, id = `${category}_1`): Selection => ({
+  category,
+  id,
+  reason: `A fine ${category}.`,
+});
+const emptyPick = (category: string): Selection => ({
+  category,
+  id: null,
+  reason: "no venues survived filtering",
+});
+const unmetPick = (category: string, constraint: string): Selection => ({
+  category,
+  id: null,
+  reason: `no ${category} candidate actually meets "${constraint}"`,
+  unmetConstraint: constraint,
+});
+const drop = (category: string, rule: DropEntry["rule"], detail = ""): DropEntry => ({
+  category,
+  name: `${category} spot`,
+  id: `${category}_x`,
+  rule,
+  detail,
+});
 
 const base: ParsedPrompt = {
   time_window: "unspecified",
@@ -111,6 +140,85 @@ const cases: Array<[string, () => void]> = [
         unmetConstraintReason("steakhouse", "vegan"),
         "Couldn't find a steakhouse that's really vegan — want to drop a constraint, or try a different kind of place?"
       );
+    },
+  ],
+  [
+    "PARTIAL empty: some real picks + ≥1 empty pool → the empty categories",
+    () => {
+      // ramen empty, bar picked → recovery targets ONLY ramen
+      assert.deepStrictEqual(
+        partialEmptyCategories([emptyPick("ramen"), pick("bar")]),
+        ["ramen"]
+      );
+      // two empties among picks → both surface, per-category
+      assert.deepStrictEqual(
+        partialEmptyCategories([pick("dinner"), emptyPick("ramen"), emptyPick("dessert")]),
+        ["ramen", "dessert"]
+      );
+    },
+  ],
+  [
+    "ALL empty or NONE empty → [] (all-empty keeps its own noVenuesReason path)",
+    () => {
+      // every pool empty → NOT partial (the all-empty net owns this)
+      assert.deepStrictEqual(partialEmptyCategories([emptyPick("ramen"), emptyPick("bar")]), []);
+      // nothing empty → nothing to recover
+      assert.deepStrictEqual(partialEmptyCategories([pick("dinner"), pick("bar")]), []);
+      // empty list
+      assert.deepStrictEqual(partialEmptyCategories([]), []);
+    },
+  ],
+  [
+    "unmet-constraint null picks are NOT treated as empty pools (different failure)",
+    () => {
+      // a constraint failure (id null + unmetConstraint) is handled by
+      // unmetConstraintReason, never routed into recovery
+      assert.deepStrictEqual(
+        partialEmptyCategories([pick("bar"), unmetPick("steakhouse", "vegan")]),
+        []
+      );
+      // mixed: a real empty pool DOES surface; the unmet one still doesn't
+      assert.deepStrictEqual(
+        partialEmptyCategories([pick("bar"), emptyPick("ramen"), unmetPick("steakhouse", "vegan")]),
+        ["ramen"]
+      );
+    },
+  ],
+  [
+    "emptyCategoryReason names the objective reason from the drop log",
+    () => {
+      // the exact Scenario-1 case: only nearby match permanently closed
+      assert.strictEqual(
+        emptyCategoryReason("ramen", [drop("ramen", "businessStatus", "CLOSED_PERMANENTLY")], "Ossington"),
+        "Couldn't find any ramen open near Ossington — the only one nearby is permanently closed."
+      );
+      // multiple, closed-at-hour
+      assert.strictEqual(
+        emptyCategoryReason("bar", [drop("bar", "hours"), drop("bar", "hours")], "Ossington"),
+        "Couldn't find any bar open near Ossington — the ones nearby are closed at that hour."
+      );
+      // rating + price phrasings
+      assert.match(emptyCategoryReason("cafe", [drop("cafe", "rating")], "Ossington"), /too poorly rated/);
+      assert.match(emptyCategoryReason("dinner", [drop("dinner", "price")], "Ossington"), /doesn't fit your budget/);
+      // no drops at all (nothing was even returned) → the softer fallback
+      assert.strictEqual(
+        emptyCategoryReason("ramen", [], "Ossington"),
+        "Couldn't find any ramen near Ossington."
+      );
+      // unspecified/empty location → "nearby", not "near unspecified"
+      assert.strictEqual(
+        emptyCategoryReason("ramen", [], "unspecified"),
+        "Couldn't find any ramen nearby."
+      );
+    },
+  ],
+  [
+    "widenOfferLabel scopes to the neighbourhood, else a generic city-wide offer",
+    () => {
+      assert.strictEqual(widenOfferLabel("Ossington"), "Look further than Ossington");
+      assert.strictEqual(widenOfferLabel("unspecified"), "Look further out");
+      assert.strictEqual(widenOfferLabel(""), "Look further out");
+      assert.strictEqual(widenOfferLabel(null), "Look further out");
     },
   ],
 ];

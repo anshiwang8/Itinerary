@@ -4,7 +4,8 @@
 // wrong error. Each guard returns a user-facing string, or null to let
 // the pipeline continue. Runs client-side before/around the API calls,
 // same pattern as resolveStartTimeChecked.
-import { ParsedPrompt } from "../api/places/search/filter";
+import { ParsedPrompt, DropEntry } from "../api/places/search/filter";
+import type { Selection } from "../api/select/selectVenues";
 
 export const UNPARSEABLE_MESSAGE =
   "I couldn't make sense of that — try describing your evening, like “dinner and drinks in Ossington”.";
@@ -109,4 +110,82 @@ export function weatherBlockedReason(
 /** A hard constraint no candidate actually meets — fail loud, never hedge. */
 export function unmetConstraintReason(category: string, constraint: string): string {
   return `Couldn't find a ${category} that's really ${constraint} — want to drop a constraint, or try a different kind of place?`;
+}
+
+// ── partial-failure recovery ──────────────────────────────────────────
+// SOME categories returned real picks but ≥1 came back with an empty pool
+// (e.g. "ramen then a bar" where the only nearby ramen was permanently
+// closed). We never silently drop the empty one — name the honest reason
+// (from the objective drop log) and let the caller offer to recover.
+// Distinct from the ALL-empty case, which keeps its own noVenuesReason
+// path and must never route through here.
+
+/** An empty-pool selection: id null with NO unmet constraint (a constraint
+ *  failure is a different, harder case handled by unmetConstraintReason). */
+function isEmptyPoolPick(s: Selection): boolean {
+  return s.id === null && !s.unmetConstraint;
+}
+
+/**
+ * The categories that came back empty in a PARTIAL failure — at least one
+ * real pick exists alongside ≥1 empty pool. Returns [] when nothing is
+ * empty OR when EVERYTHING is empty (all-empty stays on noVenuesReason).
+ */
+export function partialEmptyCategories(selections: Selection[]): string[] {
+  const empties = selections.filter(isEmptyPoolPick);
+  const hasRealPick = selections.some((s) => s.id !== null);
+  if (empties.length === 0 || !hasRealPick) return [];
+  return empties.map((s) => s.category);
+}
+
+const meaningfulLocation = (label?: string | null): string | null =>
+  label && label.trim() && label.trim().toLowerCase() !== "unspecified" ? label.trim() : null;
+
+// Friendly phrasing for the dominant objective drop rule that emptied a
+// category's pool. null when nothing was even returned nearby (no drops).
+function reasonFromDrops(category: string, drops: DropEntry[]): string | null {
+  const mine = drops.filter((d) => d.category === category);
+  if (mine.length === 0) return null;
+  const counts = new Map<DropEntry["rule"], number>();
+  for (const d of mine) counts.set(d.rule, (counts.get(d.rule) ?? 0) + 1);
+  const [rule] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  const one = mine.length === 1;
+  switch (rule) {
+    case "businessStatus":
+      return one ? "the only one nearby is permanently closed" : "the ones nearby are permanently closed";
+    case "hours":
+      return one ? "the only one nearby is closed at that hour" : "the ones nearby are closed at that hour";
+    case "rating":
+      return one ? "the only one nearby is too poorly rated" : "the ones nearby are too poorly rated";
+    case "price":
+      return one ? "the only one nearby doesn't fit your budget" : "the ones nearby don't fit your budget";
+    case "dedup":
+      return "the only match is already elsewhere in your plan";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Honest, fail-loud-voice sentence for ONE empty category, using whatever
+ * objective drop data explains it (permanently closed, closed then, low
+ * rating, over budget). Same tone as noVenuesReason / unmetConstraintReason.
+ */
+export function emptyCategoryReason(
+  category: string,
+  drops: DropEntry[],
+  locationLabel?: string | null
+): string {
+  const loc = meaningfulLocation(locationLabel);
+  const where = loc ? ` near ${loc}` : " nearby";
+  const why = reasonFromDrops(category, drops);
+  return why
+    ? `Couldn't find any ${category} open${where} — ${why}.`
+    : `Couldn't find any ${category}${where}.`;
+}
+
+/** The widen-offer label, scoped to the plan's neighborhood/location. */
+export function widenOfferLabel(locationLabel?: string | null): string {
+  const loc = meaningfulLocation(locationLabel);
+  return loc ? `Look further than ${loc}` : "Look further out";
 }

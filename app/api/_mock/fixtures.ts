@@ -109,6 +109,33 @@ const POOL_RULES: Array<[RegExp, Place[]]> = [
   [/dinner|restaurant|dining|food|eat|ramen|sushi|pizza|taco|lunch|brunch/i, DINNER],
 ];
 
+// Partial-failure recovery fixture: a "dumplings" search IN A NEIGHBOURHOOD
+// returns only a permanently-closed spot — the objective filter empties the
+// pool and logs a businessStatus drop (→ the honest "permanently closed"
+// reason). Widened city-wide (neighbourhood dropped) it returns a real open
+// venue, so accepting the widen offer recovers the stop. This is the mock
+// stand-in for the live Scenario-1 case (the only nearby ramen was closed).
+const DUMPLING_CLOSED: Place = {
+  id: "fx_dumpling_closed",
+  displayName: { text: "Shuttered Dumpling House" },
+  location: { latitude: 43.6489, longitude: -79.4198 },
+  rating: 4.6,
+  priceLevel: "PRICE_LEVEL_INEXPENSIVE",
+  businessStatus: "CLOSED_PERMANENTLY",
+  editorialSummary: { text: "Beloved dumpling counter — now permanently closed." },
+};
+// no currentOpeningHours → keep-on-missing (never dropped on hours), so the
+// widen path recovers deterministically regardless of the e2e's run-hour
+const DUMPLING_OPEN: Place = {
+  id: "fx_dumpling_open",
+  displayName: { text: "Citywide Dumpling Bar" },
+  location: { latitude: 43.6601, longitude: -79.3802 },
+  rating: 4.6,
+  priceLevel: "PRICE_LEVEL_INEXPENSIVE",
+  businessStatus: "OPERATIONAL",
+  editorialSummary: { text: "Handmade dumplings across town, open late." },
+};
+
 // unknown categories still get a small deterministic pool
 const genericCache = new Map<string, Place[]>();
 function genericPool(category: string): Place[] {
@@ -128,18 +155,26 @@ function genericPool(category: string): Place[] {
   return pool;
 }
 
-export function poolFor(category: string): Place[] {
+export function poolFor(category: string, hasNeighbourhood = false): Place[] {
+  // recovery fixture: dumplings-in-a-neighbourhood → only-a-closed-spot;
+  // city-wide (widened) → a real open venue (see DUMPLING_* above)
+  if (/dumpling/i.test(category)) return hasNeighbourhood ? [DUMPLING_CLOSED] : [DUMPLING_OPEN];
   for (const [pattern, pool] of POOL_RULES) {
     if (pattern.test(category)) return pool;
   }
   return genericPool(category);
 }
 
-/** Mirror of searchPools: one pool per category, "general" when none. */
-export function mockPools(categories: string[]): Record<string, Place[]> {
+/** Mirror of searchPools: one pool per category, "general" when none. The
+ *  optional parsed lets a fixture react to the neighbourhood the way real
+ *  Places does (used by the partial-failure recovery trigger). */
+export function mockPools(categories: string[], parsed?: ParsedPrompt): Record<string, Place[]> {
   const cats = categories.filter((c) => typeof c === "string" && c.trim() !== "");
+  const hasNeighbourhood = !!(
+    parsed?.location && parsed.location.trim() && parsed.location.trim().toLowerCase() !== "unspecified"
+  );
   if (cats.length === 0) return { general: genericPool("general") };
-  return Object.fromEntries(cats.map((c) => [c, poolFor(c)]));
+  return Object.fromEntries(cats.map((c) => [c, poolFor(c, hasNeighbourhood)]));
 }
 
 // ── parse: keyword scan, deterministic, schema-complete. Nothing
@@ -150,6 +185,9 @@ export function mockParse(prompt: string): ParsedPrompt {
   const signals: string[] = [];
   if (/brunch/.test(p)) signals.push("brunch");
   if (/steak/.test(p)) signals.push("steakhouse");
+  // dumplings is its own category (the partial-failure recovery fixture);
+  // keep it BEFORE the broad dinner rule so it isn't swallowed into "dinner"
+  if (/dumpling/.test(p)) signals.push("dumplings");
   if (/dinner|restaurant|ramen|sushi|food|eat/.test(p)) signals.push("dinner");
   if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
   if (/dessert|ice\s*cream|gelato/.test(p)) signals.push("dessert");

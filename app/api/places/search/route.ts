@@ -20,6 +20,7 @@ export async function POST(request: NextRequest) {
   let parsed: ParsedPrompt;
   let weather: WeatherHour[] | null;
   let timeZone: string | undefined;
+  let categoriesOverride: string[] | undefined;
   try {
     const body = await request.json();
     parsed = body?.parsed;
@@ -27,6 +28,12 @@ export async function POST(request: NextRequest) {
     weather = Array.isArray(body?.weather) ? body.weather : null;
     // the plan's zone — the hours filter checks the VENUE's local wall clock
     timeZone = typeof body?.timeZone === "string" ? body.timeZone : undefined;
+    // optional: re-search only a subset of categories (partial-failure
+    // recovery + reroute), leaving the rest of the plan untouched — same
+    // parameter searchPools already exposes to the reroute engine
+    categoriesOverride = Array.isArray(body?.categoriesOverride)
+      ? body.categoriesOverride.filter((c: unknown): c is string => typeof c === "string" && c.trim() !== "")
+      : undefined;
   } catch {
     return NextResponse.json(
       { error: "Request body must be JSON." },
@@ -45,7 +52,7 @@ export async function POST(request: NextRequest) {
     // parse handed us, what instant it resolved to, and under which TZ —
     // a schedule anchored at a nonsense hour is visible right here
     {
-      const cats = (parsed.category_signals ?? []).filter(
+      const cats = (categoriesOverride ?? parsed.category_signals ?? []).filter(
         (c): c is string => typeof c === "string" && c.trim() !== ""
       );
       const resolved = resolveStartTime(parsed.time_window ?? "", new Date(), cats, timeZone);
@@ -59,8 +66,8 @@ export async function POST(request: NextRequest) {
     // fixture seam: swap the DATA SOURCE only — the objective filter
     // below still runs for real over the fixture pools
     const rawPools = isMockMode()
-      ? mockPools(parsed.category_signals ?? [])
-      : await searchPools(apiKey!, parsed);
+      ? mockPools(categoriesOverride ?? parsed.category_signals ?? [], parsed)
+      : await searchPools(apiKey!, parsed, categoriesOverride);
     const { pools, dropLog, weatherBlocked } = filterPools(
       rawPools,
       parsed,

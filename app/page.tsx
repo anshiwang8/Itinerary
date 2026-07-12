@@ -13,12 +13,17 @@ import { formatStopTime } from "./lib/timeLabels";
 import {
   contradictionReason,
   degeneratePromptReason,
+  emptyCategoryReason,
   emptyParseReason,
   noVenuesReason,
+  partialEmptyCategories,
   unmetConstraintReason,
   weatherBlockedReason,
+  widenOfferLabel,
 } from "./lib/planGuards";
 import { ClarifyQuestion, clarifyQuestions, timeWindowForWhenAnswer } from "./lib/clarify";
+import type { Selection } from "./api/select/selectVenues";
+import type { DropEntry } from "./api/places/search/filter";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, { StripHome, StripStop } from "./ItineraryStrip";
 
@@ -40,6 +45,20 @@ interface WeatherHour {
   tempC: number | null;
   precipProbability: number | null;
   condition: string | null;
+}
+
+// everything the tail of the pipeline needs to build + store a plan —
+// captured so a partial-failure recovery can pause and resume without
+// re-deriving geocode/zone/weather/pools
+interface PlanCtx {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  parseData: any;
+  planZone: string;
+  hp: { label: string; location: { latitude: number; longitude: number } };
+  weather: WeatherHour[] | null;
+  pools: Pools;
+  sels: Selection[];
+  drops: DropEntry[];
 }
 
 function WeatherIcon({ condition, precip }: { condition: string | null; precip: number | null }) {
@@ -173,6 +192,17 @@ export default function Home() {
   const [clarifyTime, setClarifyTime] = useState("");
   const [clarifyVibe, setClarifyVibe] = useState("");
 
+  // partial-failure recovery: SOME categories resolved but ≥1 came back
+  // empty. Instead of silently dropping it, pause with the honest reason
+  // and an offer to widen the search (city-wide) or replace that ONE slot.
+  const [recovery, setRecovery] = useState<{
+    ctx: PlanCtx;
+    empties: { category: string; reason: string }[];
+    replaceText: Record<string, string>;
+    busy: boolean;
+    note: string | null;
+  } | null>(null);
+
   async function runPipeline() {
     const q = prompt.trim();
     if (!q || busy) return;
@@ -182,6 +212,7 @@ export default function Home() {
     setOldStarts({});
     setSwapError(null);
     setClarify(null);
+    setRecovery(null);
     // THE fail-loud surface: every degenerate/impossible/contradictory
     // input lands here with a reason + a suggested fix — never an empty
     // map, never a borrowed error from the wrong branch.
@@ -338,7 +369,7 @@ export default function Home() {
       const placesData = await placesRes.json();
       if (!placesRes.ok) throw new Error(placesData.error ?? `places failed (${placesRes.status})`);
       const { _dropLog, _weatherBlocked, ...categories } = placesData;
-      void _dropLog;
+      const drops: DropEntry[] = Array.isArray(_dropLog) ? _dropLog : [];
       setPools(categories as Pools);
       const wxBlocks = Array.isArray(_weatherBlocked) ? _weatherBlocked : [];
       setWeatherBlocks(wxBlocks);
@@ -365,22 +396,62 @@ export default function Home() {
       });
       const selectData = await selectRes.json();
       if (!selectRes.ok) throw new Error(selectData.error ?? `select failed (${selectRes.status})`);
-      const sels = selectData.selections ?? [];
+      const sels: Selection[] = selectData.selections ?? [];
 
       // a hard constraint nothing actually meets → fail loud, never a
       // pick with a "check with the venue" hedge
-      const unmet = (sels as { category: string; unmetConstraint?: string }[]).find(
-        (s) => s.unmetConstraint
-      );
+      const unmet = sels.find((s) => s.unmetConstraint);
       if (unmet) return fail(unmetConstraintReason(unmet.category, unmet.unmetConstraint!));
 
+      const ctx: PlanCtx = {
+        parseData,
+        planZone,
+        hp,
+        weather,
+        pools: categories as Pools,
+        sels,
+        drops,
+      };
+
+      // partial failure: some categories resolved, ≥1 came back empty.
+      // Never drop the empty one silently — pause with the honest reason
+      // and an offer to recover (widen / replace) that ONE category. The
+      // all-empty case above keeps its own noVenuesReason path.
+      const emptyCats = partialEmptyCategories(sels);
+      if (emptyCats.length > 0) {
+        setRecovery({
+          ctx,
+          empties: emptyCats.map((c) => ({
+            category: c,
+            reason: emptyCategoryReason(c, drops, parseData.location),
+          })),
+          replaceText: {},
+          busy: false,
+          note: null,
+        });
+        setLoadingText(null);
+        return;
+      }
+
+      await finishPipeline(ctx);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setLoadingText(null);
+    }
+  }
+
+  // Build the route + schedule from finalized selections, then store the
+  // itinerary. Shared by the normal path and by post-recovery resumption,
+  // so recovering a category runs the exact same tail — no forked path.
+  async function finishPipeline(ctx: PlanCtx) {
+    const { parseData, planZone, hp, pools, sels } = ctx;
+    try {
+      setPools(pools);
+      setParsedObj(parseData);
       setLoadingText("Timing the route…");
       const points = sels
-        .filter((s: { id: string | null }) => s.id !== null)
-        .map((s: { id: string; category: string }) => {
-          const pool: Place[] = (categories as Pools)[s.category] ?? [];
-          return pool.find((p) => p.id === s.id)?.location ?? null;
-        });
+        .filter((s) => s.id !== null)
+        .map((s) => (pools[s.category] ?? []).find((p) => p.id === s.id)?.location ?? null);
 
       let legs: TravelLeg[] = [];
       let hl: TravelLeg | null = null;
@@ -402,17 +473,110 @@ export default function Home() {
       setSchedule(stops);
       setTravelLegs(legs);
       setHomeLeg(hl);
-      const ms = stopsFromSchedule(stops, categories as Pools);
+      const ms = stopsFromSchedule(stops, pools);
       setMapStops(ms);
       setSelected(ms[0]?.category ?? null);
 
       // auto-store the itinerary so the live/reroute controls work at once
-      await storeItinerary(stops, legs, hl, parseData, categories as Pools, "", hp, planZone);
+      await storeItinerary(stops, legs, hl, parseData, pools, "", hp, planZone);
       setLoadingText(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setLoadingText(null);
     }
+  }
+
+  // Re-resolve ONE empty category — widen (drop the neighbourhood, search
+  // city-wide) or replace (search a new category the user names) — leaving
+  // every other stop untouched. Reuses the places route's categoriesOverride
+  // (the same subset-search the reroute engine uses) + the select route.
+  async function resolveEmpty(
+    category: string,
+    opts: { searchCategory: string; dropLocation: boolean }
+  ) {
+    if (!recovery) return;
+    const { ctx } = recovery;
+    const searchCategory = opts.searchCategory.trim();
+    if (!searchCategory) return;
+    setRecovery({ ...recovery, busy: true, note: null });
+    try {
+      const scopedParsed = {
+        ...ctx.parseData,
+        ...(opts.dropLocation ? { location: "" } : {}),
+      };
+      const placesRes = await fetch("/api/places/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parsed: scopedParsed,
+          categoriesOverride: [searchCategory],
+          weather: ctx.weather,
+          timeZone: ctx.planZone,
+        }),
+      });
+      const placesData = await placesRes.json();
+      if (!placesRes.ok) throw new Error(placesData.error ?? `places failed (${placesRes.status})`);
+      const { _dropLog, _weatherBlocked, ...poolObj } = placesData;
+      void _weatherBlocked;
+      const newPool: Place[] = (poolObj as Pools)[searchCategory] ?? [];
+      const newDrops: DropEntry[] = Array.isArray(_dropLog) ? _dropLog : [];
+
+      let newSel: Selection | undefined;
+      if (newPool.length > 0) {
+        const selRes = await fetch("/api/select", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ parsed: scopedParsed, pools: { [searchCategory]: newPool } }),
+        });
+        const selData = await selRes.json();
+        if (!selRes.ok) throw new Error(selData.error ?? `select failed (${selRes.status})`);
+        newSel = (selData.selections as Selection[] | undefined)?.find(
+          (s) => s.category === searchCategory
+        );
+      }
+
+      if (newSel && newSel.id !== null) {
+        // resolved — swap the empty entry for the new pick (keeping order),
+        // add its pool, and drop it from the outstanding list
+        const mergedSels = ctx.sels.map((s) => (s.category === category ? newSel! : s));
+        const mergedPools: Pools = { ...ctx.pools, [searchCategory]: newPool };
+        const newCtx: PlanCtx = { ...ctx, sels: mergedSels, pools: mergedPools };
+        const remaining = recovery.empties.filter((e) => e.category !== category);
+        if (remaining.length === 0) {
+          setRecovery(null);
+          await finishPipeline(newCtx);
+        } else {
+          setRecovery({ ...recovery, ctx: newCtx, empties: remaining, busy: false });
+        }
+      } else {
+        // still nothing — honest note, keep the panel so they can try again
+        const stillReason = emptyCategoryReason(
+          searchCategory,
+          newDrops,
+          opts.dropLocation ? null : ctx.parseData.location
+        );
+        setRecovery({
+          ...recovery,
+          busy: false,
+          note: opts.dropLocation
+            ? `Still no ${searchCategory} city-wide — tell me what you'd like there instead?`
+            : `${stillReason} Try another?`,
+        });
+      }
+    } catch (err) {
+      setRecovery((r) =>
+        r ? { ...r, busy: false, note: err instanceof Error ? err.message : String(err) } : r
+      );
+    }
+  }
+
+  // user declined to recover the empty category(ies) — build the plan
+  // without them (they stay skipped, as before, but now by explicit choice)
+  async function planWithoutEmpties() {
+    if (!recovery) return;
+    const ctx = recovery.ctx;
+    setRecovery(null);
+    await finishPipeline(ctx);
   }
 
   async function storeItinerary(
@@ -765,6 +929,73 @@ export default function Home() {
     </div>
   );
 
+  // partial-failure recovery — one category came back empty; name the
+  // reason, offer to widen (city-wide) or replace it. Reuses the clarify
+  // panel's look; the widen offer only shows when there's a neighbourhood
+  // to drop (an already-city-wide search can't be widened).
+  const recoveryCanWiden = !!(
+    recovery &&
+    recovery.ctx.parseData.location &&
+    String(recovery.ctx.parseData.location).trim() &&
+    String(recovery.ctx.parseData.location).trim().toLowerCase() !== "unspecified"
+  );
+  const recoveryBlock = recovery && (
+    <div className={"clarify recover" + (itinerary ? " clarify--stage" : "")}>
+      {recovery.empties.map((e) => (
+        <div key={e.category} className="clarify__q">
+          <div className="clarify__label recover__reason">{e.reason}</div>
+          <div className="clarify__chips">
+            {recoveryCanWiden && (
+              <button
+                className="chipbtn recover__widen"
+                disabled={recovery.busy}
+                onClick={() => resolveEmpty(e.category, { searchCategory: e.category, dropLocation: true })}
+              >
+                {widenOfferLabel(recovery.ctx.parseData.location)}
+              </button>
+            )}
+            <input
+              className="clarify__input recover__input"
+              value={recovery.replaceText[e.category] ?? ""}
+              onChange={(ev) =>
+                setRecovery((r) =>
+                  r ? { ...r, replaceText: { ...r.replaceText, [e.category]: ev.target.value } } : r
+                )
+              }
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter" && recovery.replaceText[e.category]?.trim())
+                  resolveEmpty(e.category, {
+                    searchCategory: recovery.replaceText[e.category],
+                    dropLocation: false,
+                  });
+              }}
+              placeholder={`or try something else there…`}
+              aria-label={`Replace ${e.category}`}
+            />
+            <button
+              className="chipbtn recover__go"
+              disabled={recovery.busy || !recovery.replaceText[e.category]?.trim()}
+              onClick={() =>
+                resolveEmpty(e.category, {
+                  searchCategory: recovery.replaceText[e.category],
+                  dropLocation: false,
+                })
+              }
+            >
+              Go
+            </button>
+          </div>
+        </div>
+      ))}
+      {recovery.note && <div className="clarify__label recover__note">{recovery.note}</div>}
+      <div className="clarify__actions">
+        <button className="clarify__skip recover__skip" disabled={recovery.busy} onClick={planWithoutEmpties}>
+          Plan without it
+        </button>
+      </div>
+    </div>
+  );
+
   // ── empty state ──
   if (!itinerary) {
     return (
@@ -808,6 +1039,7 @@ export default function Home() {
           </button>
         </div>
         {clarifyBlock}
+        {recoveryBlock}
         {error && <div className="empty__err">{error}</div>}
       </main>
     );
@@ -862,6 +1094,7 @@ export default function Home() {
       {loadingText && <div className="loading">{loadingText}</div>}
 
       {clarifyBlock}
+      {recoveryBlock}
 
       {banner && (
         <div className={"banner banner--show" + (bannerFlat ? " banner--flat" : "")} role="status">
