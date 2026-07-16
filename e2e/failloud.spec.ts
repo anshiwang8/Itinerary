@@ -24,6 +24,8 @@ const FAIL_LOUD_CASES: Array<[string, string]> = [
     "That's a bit contradictory — cheap and fancy pull opposite ways.",
   ],
   ["asdfghjkl", UNPARSEABLE],
+  // non-row gibberish (vowel-less noise) — used to slip past the mash check
+  ["xkjvbz qzwvk", UNPARSEABLE],
   [".", UNPARSEABLE],
 ];
 

@@ -67,11 +67,37 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "non-row gibberish (vowel-less noise) is ALSO degenerate",
+    () => {
+      // random consonant strings that are NOT keyboard-row substrings —
+      // these used to sail through to the clarify flow
+      assert.strictEqual(degeneratePromptReason("xkjvbz"), UNPARSEABLE_MESSAGE);
+      assert.strictEqual(degeneratePromptReason("qzxwvk"), UNPARSEABLE_MESSAGE);
+      assert.strictEqual(degeneratePromptReason("bcdfg hjklm"), UNPARSEABLE_MESSAGE);
+      assert.strictEqual(degeneratePromptReason("sdfsdf dfgdfg"), UNPARSEABLE_MESSAGE);
+      // mixed row-mash + vowel-less noise
+      assert.strictEqual(degeneratePromptReason("asdf xkjvbz"), UNPARSEABLE_MESSAGE);
+      // but ONE real word anywhere lets the prompt through to the parse
+      assert.strictEqual(degeneratePromptReason("dinner xkjvbz"), null);
+    },
+  ],
+  [
     "real prompts are NOT degenerate (incl. short words that sit on a key row)",
     () => {
       assert.strictEqual(degeneratePromptReason("dinner and drinks"), null);
       assert.strictEqual(degeneratePromptReason("as we like"), null); // 'as'/'we' are row runs but short
       assert.strictEqual(degeneratePromptReason("ramen at 7"), null);
+      // y-as-vowel: real vowel-less-looking words never read as gibberish
+      assert.strictEqual(degeneratePromptReason("gym then dinner"), null);
+      assert.strictEqual(degeneratePromptReason("myth trivia night"), null);
+      assert.strictEqual(degeneratePromptReason("sync up over coffee"), null);
+      // Phase 2's fix — the hardest regression to avoid: sincere, real-word
+      // vague prompts must still reach the clarify flow, never a rejection
+      assert.strictEqual(degeneratePromptReason("not sure what to do"), null);
+      assert.strictEqual(degeneratePromptReason("no idea, surprise me"), null);
+      assert.strictEqual(degeneratePromptReason("something fun I guess"), null);
+      assert.strictEqual(degeneratePromptReason("bored, help"), null);
+      assert.strictEqual(degeneratePromptReason("whatever works tbh"), null);
     },
   ],
   [

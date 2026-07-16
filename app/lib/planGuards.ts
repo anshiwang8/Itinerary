@@ -15,21 +15,34 @@ export const CONTRADICTION_MESSAGE =
 
 // keyboard rows for the mash check ("asdfghjkl" is literally the home row)
 const KEY_ROWS = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
+// y counts as a vowel so real words like "gym", "myth", "sync" never read
+// as gibberish; a 4+-letter word with NO vowel at all ("xkjvbz", "bcdfg")
+// is not a word anyone typed on purpose
+const VOWELISH = /[aeiouy]/;
+
+/** A 4+-letter token that is keyboard-row mash OR entirely vowel-less.
+ *  Deliberately conservative: no dictionary, no consonant-run scoring
+ *  (those false-positive on real words like "strengths"). Short tokens
+ *  (< 4 letters: "dj", "tv", "brr") never count — too risky alone. */
+function gibberishWord(w: string): boolean {
+  if (w.length < 4) return false;
+  if (KEY_ROWS.some((row) => row.includes(w))) return true;
+  return !VOWELISH.test(w);
+}
 
 /**
  * Pre-parse guard: prompts with no real words never reach the LLM.
- * Catches "." / "!!!" / "123" (fewer than 3 letters) and keyboard mash
- * ("asdfghjkl") where every 4+ letter word is a contiguous row run.
+ * Catches "." / "!!!" / "123" (fewer than 3 letters) and prompts where
+ * EVERY 4+-letter word is gibberish — keyboard-row mash ("asdfghjkl")
+ * or vowel-less noise ("xkjvbz"). One real word anywhere lets the prompt
+ * through to the parse (mixed prompts may still carry a real request).
  */
 export function degeneratePromptReason(prompt: string): string | null {
   const letters = (prompt.match(/\p{L}/gu) ?? []).length;
   if (letters < 3) return UNPARSEABLE_MESSAGE;
 
   const words = prompt.toLowerCase().split(/[^a-z]+/).filter(Boolean);
-  if (
-    words.length > 0 &&
-    words.every((w) => w.length >= 4 && KEY_ROWS.some((row) => row.includes(w)))
-  ) {
+  if (words.length > 0 && words.every(gibberishWord)) {
     return UNPARSEABLE_MESSAGE;
   }
   return null;
