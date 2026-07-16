@@ -40,8 +40,15 @@ mocked pipeline source.
   evidence** for mockSelect: "vegan" lives on **Noodle Letterpress**
   (dinner), "patio" on **The Standing Room** (bar). A constraint with no
   evidence in the pool → id:null + unmetConstraint → the fail-loud
-  surface ("vegan steakhouse" fails; "vegan dinner" picks Noodle
-  Letterpress).
+  surface ("dessert with a patio" fails — no dessert fixture has patio
+  evidence; "vegan dinner" picks Noodle Letterpress).
+- **Recovery triggers** (partial-failure flow): "**dumplings**" and
+  "**bao**" are neighbourhood-sensitive — searched WITH a neighbourhood
+  they return only a permanently-closed venue (the objective filter
+  empties the pool), searched city-wide (the widen path) they return a
+  real open venue (Citywide Dumpling Bar / Harbourside Bao House). Pair
+  one or both with a resolving category ("… then a bar at 7pm") for
+  single- or multi-empty recovery scenarios.
 - Unknown categories get a generated "Fixture <Category> One/Two/Three"
   pool. Weather is 48 calm hours (20°, precip 10%) with a built-in daily
   **rain window at 3 PM local** (precip 80, `MOCK_RAIN_HOUR`) — plan an
@@ -54,8 +61,12 @@ All of these produce their exact message with zero live calls:
 - `"brunch at 3am"` / `"dinner at 4am"` → the category-window message
   (mockParse extracts the clock time + category; the band check is code).
 - `"cheap fancy dinner"` → the contradiction message (prompt-level guard).
-- `"vegan steakhouse"` → unmet-constraint fail-loud (generic steakhouse
-  pool has no vegan evidence).
+- `"vegan steakhouse"` → the CONTRADICTION message naming the pair ("vegan
+  and steakhouse pull opposite ways") — caught by the dietary-vs-venue-type
+  guard BEFORE search/select, not the unmet-constraint path.
+- `"dessert with a patio at 8pm"` → unmet-constraint fail-loud (no dessert
+  fixture has patio evidence; nothing trips the contradiction guard, so it
+  reaches select's id:null + unmetConstraint and the page-level message).
 - `"a walk in the park at 3pm"` → the all-pools-empty net via the built-in
   3 PM rain window.
 
@@ -68,8 +79,13 @@ All of the above are pinned exact-text in `failloud.spec.ts`.
 - `fixtures.spec.ts` (@mock) — guards the seam: deterministic picks,
   fixture transit line, canned weather.
 - `failloud.spec.ts` (@mock) — every bad-input message pinned exact-text
-  (impossible times, contradiction, gibberish, weather net, unmet
-  constraint + the positive vegan pick).
+  (impossible times, contradictions incl. dietary-vs-venue, gibberish,
+  weather net, unmet constraint + the positive vegan pick).
+- `recovery.spec.ts` (@mock) — the partial-failure recovery flow: honest
+  reason + widen offer for an empty category, accept-widen recovers the
+  slot, decline routes to the replace follow-up, TWO empties resolve one
+  at a time before the plan finishes, all-empty stays on the plain
+  fail-loud path.
 - `scenarios.spec.ts` (@mock) — interacting state: price refresh on a
   cheaper swap ($$$ → $$), description present/absent, swap input takes
   real keystrokes with spaces, repeated swaps (cheaper → fancier →

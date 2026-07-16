@@ -69,6 +69,40 @@ test.describe("@mock partial-failure recovery", () => {
     await expect(page.locator(".lstrip")).not.toContainText(/dumpling/i);
   });
 
+  test("TWO empty categories → both surface; plan finishes only after BOTH resolve @mock", async ({ page }) => {
+    // "dumplings" AND "bao" are both neighbourhood-sensitive recovery
+    // fixtures (closed nearby / open city-wide); the bar resolves normally.
+    // The panel must list both empties, resolving one must NOT finish the
+    // plan, and the plan completes only once the second is resolved too —
+    // one via widen, one via the replace follow-up (both paths exercised).
+    await page.goto("/");
+    await page.locator(".prompt__input").fill("dumplings and bao then a bar at 7pm in Ossington");
+    await page.locator(".prompt__go").click();
+    await expect(page.locator(".recover")).toBeVisible({ timeout: 90_000 });
+    await expect(page.locator(".recover__reason")).toHaveCount(2);
+    await expect(page.locator(".lstrip")).toHaveCount(0);
+
+    // resolve #1 — widen dumplings city-wide
+    const dumplingRow = page.locator(".clarify__q", { hasText: "dumplings" });
+    await expect(dumplingRow.locator(".recover__reason")).toContainText(/permanently closed/i);
+    await dumplingRow.locator(".recover__widen").click();
+
+    // panel stays for bao; the plan must NOT have finished on one resolve
+    await expect(page.locator(".recover__reason")).toHaveCount(1);
+    await expect(page.locator(".recover__reason")).toContainText(/bao/i);
+    await expect(page.locator(".lstrip")).toHaveCount(0);
+
+    // resolve #2 — decline widening for bao, name a replacement instead
+    await page.locator(".recover__input").fill("dessert");
+    await page.locator(".recover__go").click();
+
+    // NOW the plan completes: bar + recovered dumplings + replacement dessert
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".lstrip__stop")).toHaveCount(3);
+    await expect(page.locator(".lstrip__name", { hasText: "Citywide Dumpling Bar" })).toBeVisible();
+    await expect(page.locator(".lstrip")).not.toContainText(/bao/i);
+  });
+
   test("ALL categories empty still uses the plain fail-loud message (no recovery panel) @mock", async ({ page }) => {
     await page.goto("/");
     // dumplings alone in a neighbourhood → the ONLY pool is empty → all-empty

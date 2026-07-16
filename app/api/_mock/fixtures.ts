@@ -136,6 +136,28 @@ const DUMPLING_OPEN: Place = {
   editorialSummary: { text: "Handmade dumplings across town, open late." },
 };
 
+// second recovery trigger, same shape — lets a scenario produce TWO empty
+// categories in one request ("dumplings and bao …") to exercise the
+// multi-empty recovery panel
+const BAO_CLOSED: Place = {
+  id: "fx_bao_closed",
+  displayName: { text: "Folded Cloud Bao" },
+  location: { latitude: 43.6493, longitude: -79.4206 },
+  rating: 4.7,
+  priceLevel: "PRICE_LEVEL_INEXPENSIVE",
+  businessStatus: "CLOSED_PERMANENTLY",
+  editorialSummary: { text: "Steamed-bun counter — now permanently closed." },
+};
+const BAO_OPEN: Place = {
+  id: "fx_bao_open",
+  displayName: { text: "Harbourside Bao House" },
+  location: { latitude: 43.6389, longitude: -79.3817 },
+  rating: 4.5,
+  priceLevel: "PRICE_LEVEL_INEXPENSIVE",
+  businessStatus: "OPERATIONAL",
+  editorialSummary: { text: "Pillowy bao by the water, open late." },
+};
+
 // unknown categories still get a small deterministic pool
 const genericCache = new Map<string, Place[]>();
 function genericPool(category: string): Place[] {
@@ -156,9 +178,10 @@ function genericPool(category: string): Place[] {
 }
 
 export function poolFor(category: string, hasNeighbourhood = false): Place[] {
-  // recovery fixture: dumplings-in-a-neighbourhood → only-a-closed-spot;
-  // city-wide (widened) → a real open venue (see DUMPLING_* above)
+  // recovery fixtures: in-a-neighbourhood → only-a-closed-spot; city-wide
+  // (widened) → a real open venue (see DUMPLING_* / BAO_* above)
   if (/dumpling/i.test(category)) return hasNeighbourhood ? [DUMPLING_CLOSED] : [DUMPLING_OPEN];
+  if (/\bbao\b/i.test(category)) return hasNeighbourhood ? [BAO_CLOSED] : [BAO_OPEN];
   for (const [pattern, pool] of POOL_RULES) {
     if (pattern.test(category)) return pool;
   }
@@ -185,9 +208,10 @@ export function mockParse(prompt: string): ParsedPrompt {
   const signals: string[] = [];
   if (/brunch/.test(p)) signals.push("brunch");
   if (/steak/.test(p)) signals.push("steakhouse");
-  // dumplings is its own category (the partial-failure recovery fixture);
-  // keep it BEFORE the broad dinner rule so it isn't swallowed into "dinner"
+  // dumplings/bao are their own categories (the partial-failure recovery
+  // fixtures); kept BEFORE the broad dinner rule so they aren't swallowed
   if (/dumpling/.test(p)) signals.push("dumplings");
+  if (/\bbao\b/.test(p)) signals.push("bao");
   if (/dinner|restaurant|ramen|sushi|food|eat/.test(p)) signals.push("dinner");
   if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
   if (/dessert|ice\s*cream|gelato/.test(p)) signals.push("dessert");
