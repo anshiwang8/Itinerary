@@ -1,7 +1,7 @@
 // buildQuery unit tests — constraints must shape the search query.
 // Run with: npx tsx app/api/places/search/searchPlaces.test.ts
 import assert from "node:assert";
-import { buildQuery, includedTypeFor } from "./searchPlaces";
+import { buildQuery, GENERAL_QUERIES, includedTypeFor } from "./searchPlaces";
 import { ParsedPrompt } from "./filter";
 
 function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
@@ -82,6 +82,27 @@ const cases: Array<[string, () => void]> = [
       // the text query itself is unchanged for parks (type filter does the work)
       const q = buildQuery(mkParsed({ aesthetic: "quiet" }), "park");
       assert.strictEqual(q, "quiet park Ossington Toronto");
+    },
+  ],
+  [
+    "general pool spans day AND night, and each query is a real located search",
+    () => {
+      // live evidence: a lone "things to do" query returned 15/20 daytime
+      // attractions (all closed at 11 PM) leaving parks only — no bar, no
+      // live music, no late food ever entered the running
+      assert.ok(GENERAL_QUERIES.includes("things to do"), "daytime attractions still covered");
+      for (const q of ["bar", "live music", "late night food", "entertainment"]) {
+        assert.ok(GENERAL_QUERIES.includes(q), `general pool must cover "${q}"`);
+      }
+      // every general query builds a properly located query (city + hood)
+      for (const q of GENERAL_QUERIES) {
+        assert.strictEqual(buildQuery(mkParsed(), q), `${q} Ossington Toronto`);
+      }
+      // and they still respect an aesthetic/constraints like any category
+      assert.strictEqual(
+        buildQuery(mkParsed({ aesthetic: "lively" }), "bar"),
+        "lively bar Ossington Toronto"
+      );
     },
   ],
   [

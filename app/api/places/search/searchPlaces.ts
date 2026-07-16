@@ -82,10 +82,40 @@ async function searchText(
   return data.places ?? [];
 }
 
+// A vague prompt ("not sure what to do") has no category, so the general
+// pool IS the whole plan. One "things to do" text search skews hard to
+// daytime tourist attractions — live at 11 PM, 15 of 20 results were
+// museums/galleries/the zoo, all dropped as closed, leaving only parks
+// (which survive on missing hours). Bars, live music and late food never
+// entered the running at all. So the general pool is the UNION of several
+// broad queries spanning day and night. No time-awareness needed here:
+// the objective hours filter drops whatever is closed at the resolved
+// instant, so the same query set self-selects — attractions win at 2 PM,
+// nightlife wins at 11 PM.
+export const GENERAL_QUERIES = [
+  "things to do",
+  "bar",
+  "live music",
+  "late night food",
+  "entertainment",
+];
+
+/** Merge pools, first occurrence wins (queries overlap on popular venues). */
+function dedupeById(places: Place[]): Place[] {
+  const seen = new Set<string>();
+  const out: Place[] = [];
+  for (const p of places) {
+    if (p.id && seen.has(p.id)) continue;
+    if (p.id) seen.add(p.id);
+    out.push(p);
+  }
+  return out;
+}
+
 /**
  * One Text Search per category (parallel), keyed by category. With no
- * categories, a single aesthetic+location query keyed "general" so
- * vague prompts still get candidates. `categoriesOverride` lets the
+ * categories, the GENERAL_QUERIES union keyed "general" so vague prompts
+ * get candidates spanning day and night. `categoriesOverride` lets the
  * reroute engine re-search a subset without touching parsed.
  */
 export async function searchPools(
@@ -98,7 +128,10 @@ export async function searchPools(
   );
 
   if (categories.length === 0) {
-    return { general: await searchText(apiKey, buildQuery(parsed, "things to do")) };
+    const results = await Promise.all(
+      GENERAL_QUERIES.map((q) => searchText(apiKey, buildQuery(parsed, q)))
+    );
+    return { general: dedupeById(results.flat()) };
   }
 
   const results = await Promise.all(
