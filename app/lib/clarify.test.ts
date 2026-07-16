@@ -1,7 +1,7 @@
 // Tests for the rule-based clarifying questions (no LLM involved).
 // Run with: npx tsx app/lib/clarify.test.ts
 import assert from "node:assert";
-import { clarifyQuestions, timeWindowForWhenAnswer } from "./clarify";
+import { categoriesForKindAnswer, clarifyQuestions, timeWindowForWhenAnswer } from "./clarify";
 import { ParsedPrompt } from "../api/places/search/filter";
 
 const base: ParsedPrompt = {
@@ -19,9 +19,35 @@ const ids = (p: ParsedPrompt) => clarifyQuestions(p).map((q) => q.id);
 
 const cases: Array<[string, () => void]> = [
   [
-    "fully vague parse ('not sure what to do') → asks When? AND vibe",
+    "ULTRA-VAGUE ('not sure what to do') → asks KIND first, then When?, then vibe",
     () => {
-      assert.deepStrictEqual(ids(base), ["when", "vibe"]);
+      // batch 4: a prompt with no category at all gets the extra question —
+      // without it the plan rests entirely on the broad general pool
+      assert.deepStrictEqual(ids(base), ["kind", "when", "vibe"]);
+    },
+  ],
+  [
+    "kind is asked ONLY when there's no category at all",
+    () => {
+      // a real category means we already know what they want
+      assert.ok(!ids({ ...base, category_signals: ["dinner"] }).includes("kind"));
+      assert.ok(ids(base).includes("kind"));
+      // ...and it never displaces the existing questions
+      assert.deepStrictEqual(ids({ ...base, category_signals: ["dinner"] }), ["when", "vibe"]);
+    },
+  ],
+  [
+    "kind answers map onto pipeline-understood categories",
+    () => {
+      assert.deepStrictEqual(categoriesForKindAnswer("food"), ["restaurant"]);
+      assert.deepStrictEqual(categoriesForKindAnswer("drinks"), ["bar"]);
+      assert.deepStrictEqual(categoriesForKindAnswer("outdoors"), ["park"]);
+      // "something to do" deliberately stays general — the broad pool IS
+      // the right tool for "surprise me"
+      assert.deepStrictEqual(categoriesForKindAnswer("something to do"), []);
+      // free text becomes its own category, like any typed prompt would
+      assert.deepStrictEqual(categoriesForKindAnswer("bowling"), ["bowling"]);
+      assert.deepStrictEqual(categoriesForKindAnswer("  "), []);
     },
   ],
   [

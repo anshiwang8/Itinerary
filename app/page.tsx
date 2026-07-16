@@ -22,7 +22,12 @@ import {
   weatherBlockedReason,
   widenOfferLabel,
 } from "./lib/planGuards";
-import { ClarifyQuestion, clarifyQuestions, timeWindowForWhenAnswer } from "./lib/clarify";
+import {
+  categoriesForKindAnswer,
+  ClarifyQuestion,
+  clarifyQuestions,
+  timeWindowForWhenAnswer,
+} from "./lib/clarify";
 import type { Selection } from "./api/select/selectVenues";
 import type { DropEntry } from "./api/places/search/filter";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
@@ -195,6 +200,7 @@ export default function Home() {
   const [clarifyWhen, setClarifyWhen] = useState<string | null>(null);
   const [clarifyTime, setClarifyTime] = useState("");
   const [clarifyVibe, setClarifyVibe] = useState("");
+  const [clarifyKind, setClarifyKind] = useState("");
 
   // partial-failure recovery: SOME categories resolved but ≥1 came back
   // empty. Instead of silently dropping it, pause with the honest reason
@@ -260,6 +266,7 @@ export default function Home() {
         setClarifyWhen(null);
         setClarifyTime("");
         setClarifyVibe("");
+        setClarifyKind("");
         setLoadingText(null);
         return;
       }
@@ -279,6 +286,12 @@ export default function Home() {
       const whenAns = clarifyWhen === "pick a time" ? clarifyTime.trim() : clarifyWhen ?? "";
       if (whenAns) updated.time_window = timeWindowForWhenAnswer(whenAns);
       if (clarifyVibe.trim()) updated.aesthetic = clarifyVibe.trim();
+      // the KIND answer narrows an ultra-vague prompt to a real category;
+      // "something to do" maps to [] and deliberately keeps the general pool
+      if (clarifyKind.trim()) {
+        const cats = categoriesForKindAnswer(clarifyKind);
+        if (cats.length > 0) updated.category_signals = cats;
+      }
     }
     setClarify(null);
     setParsedObj(updated);
@@ -909,9 +922,21 @@ export default function Home() {
                 key={o}
                 className={
                   "chipbtn " +
-                  ((qq.id === "when" ? clarifyWhen === o : clarifyVibe === o) ? "chipbtn--on" : "")
+                  ((qq.id === "when"
+                    ? clarifyWhen === o
+                    : qq.id === "kind"
+                    ? clarifyKind === o
+                    : clarifyVibe === o)
+                    ? "chipbtn--on"
+                    : "")
                 }
-                onClick={() => (qq.id === "when" ? setClarifyWhen(o) : setClarifyVibe(o))}
+                onClick={() =>
+                  qq.id === "when"
+                    ? setClarifyWhen(o)
+                    : qq.id === "kind"
+                    ? setClarifyKind(o)
+                    : setClarifyVibe(o)
+                }
               >
                 {o}
               </button>
@@ -924,6 +949,15 @@ export default function Home() {
                 placeholder="7pm"
                 aria-label="Pick a time"
                 autoFocus
+              />
+            )}
+            {qq.id === "kind" && (
+              <input
+                className="clarify__input"
+                value={clarifyKind}
+                onChange={(e) => setClarifyKind(e.target.value)}
+                placeholder="or type one… (bowling, live music)"
+                aria-label="What kind of thing"
               />
             )}
             {qq.id === "vibe" && (

@@ -115,16 +115,18 @@ test("vague-but-sincere prompt: clarify shows, answering lands a general itinera
   await page.locator(".prompt__input").fill("not sure what to do");
   await page.locator(".prompt__go").click();
 
-  // NOT the unparseable rejection — the clarify step appears instead,
-  // asking When? and for a vibe (fully vague parse)
+  // NOT the unparseable rejection — the clarify step appears instead.
+  // An ultra-vague prompt (no category) gets the batch-4 "what kind of
+  // thing?" question ON TOP of When?/vibe.
   const clarify = page.locator(".clarify");
   await expect(clarify).toBeVisible({ timeout: 30_000 });
   await expect(page.locator(".empty__err")).toHaveCount(0);
+  await expect(clarify).toContainText("What kind of thing?");
   await expect(clarify).toContainText("When?");
   await expect(clarify).toContainText("vibe");
 
-  // answer "later today" (deterministic evening anchor at any run hour)
-  // and leave the vibe blank — Go continues the pipeline
+  // answer "later today" (deterministic evening anchor at any run hour),
+  // leave kind/vibe blank — Go continues on the general pool
   await clarify.getByRole("button", { name: "later today" }).click();
   await clarify.getByRole("button", { name: "Go", exact: true }).click();
 
@@ -133,6 +135,38 @@ test("vague-but-sincere prompt: clarify shows, answering lands a general itinera
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
   await expect(stripCard(page, "Fixture General One")).toBeVisible();
   await expectStripMatchesPin(page, "Fixture General One");
+});
+
+test("clarify: the KIND answer steers the plan, and repeated answers don't leak @mock", async ({ page }) => {
+  // batch 4: answering "what kind of thing?" must actually narrow the
+  // plan away from the general pool...
+  await page.goto("/");
+  await page.locator(".prompt__input").fill("not sure what to do");
+  await page.locator(".prompt__go").click();
+  const clarify = page.locator(".clarify");
+  await expect(clarify).toBeVisible({ timeout: 30_000 });
+  await clarify.getByRole("button", { name: "drinks", exact: true }).click();
+  await clarify.getByRole("button", { name: "later today" }).click();
+  await clarify.getByRole("button", { name: "Go", exact: true }).click();
+
+  // "drinks" → the bar pool, NOT the general fixture pool
+  await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".lstrip__stop .eyebrow").first()).toHaveText(/drinks|bar/i);
+  await expect(stripCard(page, "Fixture General One")).toHaveCount(0);
+
+  // ...and a SECOND interaction in the same session must re-resolve from a
+  // fresh parse — no category leaking from the first answer (the reported
+  // state-leak hypothesis, pinned so it can never become true)
+  await page.locator(".topbar__input").fill("not sure what to do");
+  await page.locator(".topbar__go").click();
+  await expect(clarify).toBeVisible({ timeout: 30_000 });
+  // the kind question is asked AGAIN → the parse is vague again, not "bar"
+  await expect(clarify).toContainText("What kind of thing?");
+  await clarify.getByRole("button", { name: "outdoors", exact: true }).click();
+  await clarify.getByRole("button", { name: "later today" }).click();
+  await clarify.getByRole("button", { name: "Go", exact: true }).click();
+  // now a park plan — the previous "drinks" answer left no trace
+  await expect(page.locator(".lstrip__stop .eyebrow").first()).toHaveText(/park/i);
 });
 
 test("active stop can't be swapped; an upcoming one still can @mock", async ({ page }) => {
