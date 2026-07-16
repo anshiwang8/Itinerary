@@ -4,6 +4,7 @@ import assert from "node:assert";
 import {
   buildLeg,
   ComputeRoutesResponse,
+  MAX_WALK_LABEL_MIN,
   SHORT_LEG_WALK_METERS,
   TRANSIT_MARGIN_MIN,
 } from "./travel";
@@ -133,6 +134,34 @@ const cases: Array<[string, () => void]> = [
       const leg2 = buildLeg(0, mkRoute(480, 900), mkRoute(420, 800));
       assert.strictEqual(leg2.mode, "walk");
       assert.strictEqual(leg2.totalMinutes, 7);
+    },
+  ],
+  [
+    "REGRESSION (75-min walk): a long walk never beats similar transit — the relabel is capped",
+    () => {
+      // the mentor's live shape: walk 75 min vs transit 72 min — the old
+      // rule called 75 <= 72+5 "competitive" and presented an hour-plus
+      // WALK. Beyond MAX_WALK_LABEL_MIN the leg must stay transit.
+      const leg = buildLeg(0, mkRoute(72 * 60, 6100, { transitStep: true }), mkRoute(75 * 60, 5800));
+      assert.strictEqual(leg.mode, "transit");
+      assert.strictEqual(leg.totalMinutes, 72 + TRANSIT_MARGIN_MIN);
+      assert.ok(75 > MAX_WALK_LABEL_MIN);
+      // boundary: a walk AT the cap that beats transit still relabels
+      const atCap = buildLeg(0, mkRoute(28 * 60, 2500), mkRoute(MAX_WALK_LABEL_MIN * 60, 2300));
+      assert.strictEqual(atCap.mode, "walk");
+    },
+  ],
+  [
+    "escape hatch: walking at least TWICE as fast as transit wins at any length",
+    () => {
+      // broken transit (90 min with transfers/waits) vs a 35-min walk —
+      // the cap must not force the worse ride
+      const leg = buildLeg(0, mkRoute(90 * 60, 4000, { transitStep: true }), mkRoute(35 * 60, 2900));
+      assert.strictEqual(leg.mode, "walk");
+      assert.strictEqual(leg.totalMinutes, 35);
+      // but a 35-min walk vs 45-min transit (not twice as fast) stays transit
+      const leg2 = buildLeg(0, mkRoute(45 * 60, 4000, { transitStep: true }), mkRoute(35 * 60, 2900));
+      assert.strictEqual(leg2.mode, "transit");
     },
   ],
   [

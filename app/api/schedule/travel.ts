@@ -14,6 +14,13 @@ export const TRANSIT_MARGIN_MIN = 5;
 // label and no margin.
 export const SHORT_LEG_WALK_METERS = 400;
 
+// The walk-competitive relabel only applies to walks people actually
+// take. Beyond this, "walk 75 / transit 72" must stay TRANSIT — nobody
+// prefers an hour-plus walk to a similar transit ride — unless walking
+// beats transit outright (at least twice as fast), i.e. transit there is
+// effectively broken.
+export const MAX_WALK_LABEL_MIN = 30;
+
 const FIELD_MASK = [
   "routes.duration",
   "routes.distanceMeters",
@@ -156,8 +163,12 @@ function parseRoute(
  *   - distance < SHORT_LEG_WALK_METERS (transit routing walks short
  *     segments internally anyway), or
  *   - walking is competitive INCLUDING the margin
- *     (walkRaw <= transitRaw + TRANSIT_MARGIN_MIN) — a 7-minute walk
- *     beats a 13-minutes-with-buffer bus ride.
+ *     (walkRaw <= transitRaw + TRANSIT_MARGIN_MIN) AND the walk is one a
+ *     person actually takes (<= MAX_WALK_LABEL_MIN) — a 7-minute walk
+ *     beats a 13-minutes-with-buffer bus ride, but a 75-minute walk must
+ *     never be presented over a 72-minute transit ride, or
+ *   - walking beats transit OUTRIGHT (at least twice as fast) — transit
+ *     there is effectively broken, any length.
  * Walk-labeled legs use the WALK route's own numbers and geometry when
  * available (falling back to the transit route's on short hops without
  * walk data). Transit unusable → walk route. Neither → "unknown", 0 min.
@@ -184,7 +195,9 @@ export function buildLeg(
     const shortHop =
       t.distanceMeters !== null && t.distanceMeters < SHORT_LEG_WALK_METERS;
     const walkCompetitive =
-      w.ok && w.rawMinutes <= t.rawMinutes + TRANSIT_MARGIN_MIN;
+      w.ok &&
+      w.rawMinutes <= t.rawMinutes + TRANSIT_MARGIN_MIN &&
+      (w.rawMinutes <= MAX_WALK_LABEL_MIN || w.rawMinutes * 2 <= t.rawMinutes);
     if (shortHop || walkCompetitive) {
       // prefer the real walking route; a short hop without walk data
       // keeps the transit route's numbers (it's walking-pace anyway)
