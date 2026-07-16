@@ -46,6 +46,12 @@ test("description line: renders when present, absent when missing @mock", async 
   // no placeholder (keep-on-missing)
   await expect(stripCard(page, "Sundown Scoops")).toBeVisible();
   await expect(stripCard(page, "Sundown Scoops").locator(".lstrip__desc")).toHaveCount(0);
+  // the mentor-reported shape: on a description-less venue the SELECTED
+  // card's only prose is the pick-reason — it must carry the "why here"
+  // label so justification text can never read as a factual description
+  await stripCard(page, "Sundown Scoops").click();
+  await expect(stripCard(page, "Sundown Scoops").locator(".lstrip__why")).toHaveText(/why here/i);
+  await expect(stripCard(page, "Sundown Scoops").locator(".lstrip__desc")).toHaveCount(0);
 });
 
 test("swap input accepts spaces (real keystrokes) @mock", async ({ page }) => {

@@ -71,6 +71,9 @@ function mkVenue(id: string, name = `New ${id}`): Place {
   return {
     id, displayName: { text: name }, rating: 4.5, businessStatus: "OPERATIONAL",
     location: { latitude: 43.651, longitude: -79.415 },
+    // the factual Places editorial — swap-produced stops must carry it as
+    // `description`, distinct from the pick-justification `reason`
+    editorialSummary: { text: `${name}, a real spot on the strip.` },
   };
 }
 
@@ -844,6 +847,33 @@ const cases: Array<[string, () => Promise<void>]> = [
       // the kept 105-min duration also renders in Pacific (18:00 + 105 = 19:45)
       assert.strictEqual(it.stops[0].end_time, V(19, 45));
       assert.match(res.reason, /6:00 PM/);
+    },
+  ],
+  [
+    "swap-produced stops carry the pick's REAL description, distinct from the reason",
+    async () => {
+      // venue swap (finalize path): the new stop's description is the
+      // candidate's Places editorialSummary — never the Groq reason
+      const it = mkItinerary();
+      const res = await swapStop(it, 1, "somewhere cheaper", new Date(T(18, 0)), mkDeps({ legMin: 10 }));
+      assert.ok(res.swapped);
+      const s = it.stops[1];
+      assert.strictEqual(s.description, "New bar_fresh, a real spot on the strip.");
+      assert.ok(s.reason, "swap stop should carry a reason too");
+      assert.notStrictEqual(s.description, s.reason, "description must not be the reason");
+
+      // adapt path (buildStop pick branch): a time shift that closes a later
+      // venue replaces it — the replacement also carries its own editorial
+      const it2 = mkItinerary();
+      const r2 = await swapStop(
+        it2, 1, "an hour later", new Date(T(18, 0)),
+        mkDeps({ time: { mode: "relative", deltaMinutes: 60 }, legMin: 10, unusableIds: ["s1"] })
+      );
+      assert.ok(r2.swapped);
+      const d = it2.stops[2];
+      assert.strictEqual(d.id, "dessert_fresh");
+      assert.strictEqual(d.description, "New dessert_fresh, a real spot on the strip.");
+      assert.notStrictEqual(d.description, d.reason);
     },
   ],
   [

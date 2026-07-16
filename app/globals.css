@@ -330,6 +330,14 @@ button { font-family: var(--grot); cursor: pointer; }
   font-family: var(--disp); font-weight: 400; font-size: 13.5px; line-height: 1.45;
   color: var(--ink-soft); margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--rule);
 }
+/* eyebrow tag on the pick-reason — keeps justification text visually
+   distinct from the factual description line above it */
+.lstrip__why {
+  display: block;
+  font-family: var(--grot); font-size: 9.5px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-soft); opacity: 0.7; margin-bottom: 3px;
+}
 .lstrip__stop--sel { border-color: var(--ink); box-shadow: 0 8px 22px rgba(23,33,46,0.16); width: 208px; }
 .lstrip__stop--live { border-color: var(--live); border-width: 1.5px; }
 .lstrip__stop--changed { border-color: var(--live); border-width: 1.5px; }

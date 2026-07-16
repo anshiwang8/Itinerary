@@ -176,7 +176,15 @@ function StopCard({
         )}
       </div>
       {stop.description && <div className="lstrip__desc">{stop.description}</div>}
-      {selected && stop.reason && <div className="lstrip__reason">{stop.reason}</div>}
+      {/* the reason is PICK JUSTIFICATION, never a description — labeled so
+          that on venues with no Places editorial (desc line absent) the
+          Groq-written reason can't read as a factual description */}
+      {selected && stop.reason && (
+        <div className="lstrip__reason">
+          <span className="lstrip__why">why here</span>
+          {stop.reason}
+        </div>
+      )}
       {selected && swap?.canSwap && (
         <div className="lstrip__swap" onClick={(e) => e.stopPropagation()}>
           <div className="lstrip__swaplabel">Not quite right?</div>
