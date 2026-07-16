@@ -134,16 +134,16 @@ const cases: Array<[string, () => void]> = [
           category_signals: ["steakhouse", "vegan"],
           constraints: ["vegan options"],
         }),
-        "That's a bit contradictory — vegan and steakhouse pull opposite ways. Which matters more?"
+        "That's a bit contradictory — vegan and steakhouse pull opposite ways."
       );
       // other obvious clashes (message names the actual words)
       assert.strictEqual(
         contradictionReason("vegetarian bbq", base),
-        "That's a bit contradictory — vegetarian and bbq pull opposite ways. Which matters more?"
+        "That's a bit contradictory — vegetarian and bbq pull opposite ways."
       );
       assert.strictEqual(
         contradictionReason("kosher pork joint", base),
-        "That's a bit contradictory — kosher and pork pull opposite ways. Which matters more?"
+        "That's a bit contradictory — kosher and pork pull opposite ways."
       );
       assert.match(contradictionReason("vegan butcher", base) ?? "", /vegan and butcher pull opposite ways/);
       assert.match(contradictionReason("halal bacon spot", base) ?? "", /halal and bacon pull opposite ways/);

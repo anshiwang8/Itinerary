@@ -21,7 +21,7 @@ const FAIL_LOUD_CASES: Array<[string, string]> = [
   ],
   [
     "cheap fancy dinner",
-    "That's a bit contradictory — cheap and fancy pull opposite ways. Which matters more?",
+    "That's a bit contradictory — cheap and fancy pull opposite ways.",
   ],
   ["asdfghjkl", UNPARSEABLE],
   [".", UNPARSEABLE],
@@ -48,7 +48,7 @@ test("constraints: 'vegan steakhouse' is caught as a contradiction, up front @mo
   // treat "steakhouse" as a mere category and plan a vegan spot under that
   // label. Named-pair message, same voice as "cheap fancy".
   expect(await planExpectingProblem(page, "vegan steakhouse")).toBe(
-    "That's a bit contradictory — vegan and steakhouse pull opposite ways. Which matters more?"
+    "That's a bit contradictory — vegan and steakhouse pull opposite ways."
   );
 });
 

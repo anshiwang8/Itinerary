@@ -11,7 +11,7 @@ export const UNPARSEABLE_MESSAGE =
   "I couldn't make sense of that — try describing your evening, like “dinner and drinks in Ossington”.";
 
 export const CONTRADICTION_MESSAGE =
-  "That's a bit contradictory — cheap and fancy pull opposite ways. Which matters more?";
+  "That's a bit contradictory — cheap and fancy pull opposite ways.";
 
 // keyboard rows for the mash check ("asdfghjkl" is literally the home row)
 const KEY_ROWS = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
@@ -131,7 +131,7 @@ export function contradictionReason(
     const d = dietText.match(diet);
     const v = raw.match(venue);
     if (d && v) {
-      return `That's a bit contradictory — ${d[0].toLowerCase()} and ${v[0].toLowerCase()} pull opposite ways. Which matters more?`;
+      return `That's a bit contradictory — ${d[0].toLowerCase()} and ${v[0].toLowerCase()} pull opposite ways.`;
     }
   }
 
