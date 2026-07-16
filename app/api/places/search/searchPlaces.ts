@@ -39,15 +39,23 @@ export function buildQuery(parsed: ParsedPrompt, category: string): string {
     .join(" ");
 }
 
-// Green-space categories get a hard Places type filter (includedType:
-// "park") so a "scenic lounge" or view-restaurant can't leak into the
-// pool — free-text relevance alone can't guarantee a genuine public
-// park. Pattern aligned with the park resolver in durations.ts.
+// Some categories get a hard Places type filter (includedType) because
+// free-text relevance alone drifts into lookalike venues:
+//  - green space → "park": a "scenic lounge" or view-restaurant can't
+//    leak into the pool (pattern aligned with the park resolver in
+//    durations.ts)
+//  - casino → "casino": the text query "casino <city>" returns poker
+//    clubs, arcade bars, and jazz lounges — often HIGHER-rated than the
+//    real casinos, so select drifts to a nightclub without the filter
 const PARK_PATTERN = /park|trail|garden|green\s*space|greenspace|beach|bench|stroll|hike|\bwalk\b/i;
+const TYPE_FILTERS: Array<[RegExp, string]> = [
+  [PARK_PATTERN, "park"],
+  [/\bcasinos?\b/i, "casino"],
+];
 
 /** Places type filter for a category, when one applies. */
 export function includedTypeFor(category: string): string | undefined {
-  return PARK_PATTERN.test(category ?? "") ? "park" : undefined;
+  return TYPE_FILTERS.find(([pattern]) => pattern.test(category ?? ""))?.[1];
 }
 
 async function searchText(

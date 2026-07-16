@@ -84,6 +84,23 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(q, "quiet park Ossington Toronto");
     },
   ],
+  [
+    "casino-biased search: casino categories get includedType 'casino'",
+    () => {
+      // live evidence: the text query "casino Toronto" returns poker clubs,
+      // arcade bars, and jazz lounges rated HIGHER than the real casinos —
+      // the hard type filter keeps the pool to genuine casino-type places
+      assert.strictEqual(includedTypeFor("casino"), "casino");
+      assert.strictEqual(includedTypeFor("casinos"), "casino");
+      assert.strictEqual(includedTypeFor("casino night"), "casino");
+      // nightlife lookalikes stay unfiltered free-text searches
+      assert.strictEqual(includedTypeFor("nightclub"), undefined);
+      assert.strictEqual(includedTypeFor("club"), undefined);
+      assert.strictEqual(includedTypeFor("poker club"), undefined);
+      // the text query itself is unchanged (type filter does the work)
+      assert.strictEqual(buildQuery(mkParsed(), "casino"), "casino Ossington Toronto");
+    },
+  ],
 ];
 
 let failed = 0;
