@@ -9,6 +9,7 @@ import {
   emptyCategoryReason,
   emptyParseReason,
   noVenuesReason,
+  orderByRequest,
   partialEmptyCategories,
   UNPARSEABLE_MESSAGE,
   unmetConstraintReason,
@@ -271,6 +272,49 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(widenOfferLabel("unspecified"), "Look further out");
       assert.strictEqual(widenOfferLabel(""), "Look further out");
       assert.strictEqual(widenOfferLabel(null), "Look further out");
+    },
+  ],
+  [
+    "orderByRequest restores the PROMPT's order after recovery",
+    () => {
+      // "ramen then a bar": ramen came back empty, selectVenues appended it
+      // last, recovery resolved it there — it must land FIRST again
+      assert.deepStrictEqual(
+        orderByRequest([pick("bar"), pick("ramen")], ["ramen", "bar"]).map((s) => s.category),
+        ["ramen", "bar"]
+      );
+      // a REPLACEMENT category inherits the slot of the category it replaced
+      // (recovery's follow-up path: ramen → dessert stays in ramen's slot)
+      assert.deepStrictEqual(
+        orderByRequest([pick("bar"), pick("dessert")], ["ramen", "bar"], { dessert: "ramen" }).map(
+          (s) => s.category
+        ),
+        ["dessert", "bar"]
+      );
+      // three categories, middle one replaced — full order restored
+      assert.deepStrictEqual(
+        orderByRequest(
+          [pick("drinks"), pick("dumplings"), pick("dessert")],
+          ["dumplings", "bao", "drinks"],
+          { dessert: "bao" }
+        ).map((s) => s.category),
+        ["dumplings", "dessert", "drinks"]
+      );
+      // categories not in the request sort after known ones, relative order kept
+      assert.deepStrictEqual(
+        orderByRequest([pick("general"), pick("bar")], ["bar"]).map((s) => s.category),
+        ["bar", "general"]
+      );
+      // no signals (vague prompt) → untouched
+      assert.deepStrictEqual(
+        orderByRequest([pick("general")], []).map((s) => s.category),
+        ["general"]
+      );
+      // already-ordered normal path is a no-op (null-id empties keep position)
+      assert.deepStrictEqual(
+        orderByRequest([pick("ramen"), emptyPick("bar")], ["ramen", "bar"]).map((s) => s.category),
+        ["ramen", "bar"]
+      );
     },
   ],
 ];

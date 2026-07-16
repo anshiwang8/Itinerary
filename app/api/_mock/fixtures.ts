@@ -268,10 +268,15 @@ export function mockSelect(
     (c) => typeof c === "string" && c.trim() !== ""
   );
   const out: Selection[] = [];
+  // mirror the REAL selectVenues contract: empty-pool categories are
+  // answered without the LLM and appended LAST — the recovery flow's
+  // ordering behavior depends on this shape, so the fixture must not
+  // quietly keep them in place
+  const empties: Selection[] = [];
   for (const [category, places] of Object.entries(poolsIn)) {
     if (category.startsWith("_") || !Array.isArray(places)) continue;
     if (places.length === 0) {
-      out.push({ category, id: null, reason: "no venues survived filtering" });
+      empties.push({ category, id: null, reason: "no venues survived filtering" });
       continue;
     }
     let pool = places;
@@ -306,7 +311,7 @@ export function mockSelect(
       description: pick.editorialSummary?.text,
     });
   }
-  return out;
+  return [...out, ...empties];
 }
 
 // ── travel: distance-derived, deterministic. Short hops walk; the

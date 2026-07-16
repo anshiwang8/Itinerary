@@ -236,3 +236,31 @@ export function widenOfferLabel(locationLabel?: string | null): string {
   const loc = meaningfulLocation(locationLabel);
   return loc ? `Look further than ${loc}` : "Look further out";
 }
+
+/**
+ * Order resolved selections back into the ORIGINAL request order
+ * (parsed.category_signals). selectVenues appends empty-pool categories
+ * last and the recovery flow resolves them in that appended position — so
+ * without this, a recovered FIRST-requested category ("ramen then a bar")
+ * renders at the END of the plan. `slots` maps a replacement category to
+ * the requested category whose slot it fills (recovery's follow-up path,
+ * e.g. { dessert: "ramen" }). Categories not in the request (e.g.
+ * "general") sort after the known ones, keeping their relative order.
+ */
+export function orderByRequest(
+  selections: Selection[],
+  categorySignals: string[] | undefined | null,
+  slots?: Record<string, string>
+): Selection[] {
+  const signals = (categorySignals ?? []).filter(
+    (c): c is string => typeof c === "string" && c.trim() !== ""
+  );
+  if (signals.length === 0) return selections;
+  const pos = (s: Selection) => {
+    const slot = slots?.[s.category] ?? s.category;
+    const i = signals.indexOf(slot);
+    return i === -1 ? signals.length : i;
+  };
+  // Array.prototype.sort is stable — ties keep their existing order
+  return [...selections].sort((a, b) => pos(a) - pos(b));
+}

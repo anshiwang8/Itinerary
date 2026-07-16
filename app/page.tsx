@@ -16,6 +16,7 @@ import {
   emptyCategoryReason,
   emptyParseReason,
   noVenuesReason,
+  orderByRequest,
   partialEmptyCategories,
   unmetConstraintReason,
   weatherBlockedReason,
@@ -59,6 +60,9 @@ interface PlanCtx {
   pools: Pools;
   sels: Selection[];
   drops: DropEntry[];
+  /** replacement category → the requested category whose slot it fills
+   * (recovery's follow-up path), so ordering can restore prompt order */
+  slots: Record<string, string>;
 }
 
 function WeatherIcon({ condition, precip }: { condition: string | null; precip: number | null }) {
@@ -411,6 +415,7 @@ export default function Home() {
         pools: categories as Pools,
         sels,
         drops,
+        slots: {},
       };
 
       // partial failure: some categories resolved, ≥1 came back empty.
@@ -444,7 +449,12 @@ export default function Home() {
   // itinerary. Shared by the normal path and by post-recovery resumption,
   // so recovering a category runs the exact same tail — no forked path.
   async function finishPipeline(ctx: PlanCtx) {
-    const { parseData, planZone, hp, pools, sels } = ctx;
+    const { parseData, planZone, hp, pools } = ctx;
+    // stops must follow the PROMPT's order ("ramen then a bar" = ramen
+    // first) — selectVenues appends empty categories last and recovery
+    // resolves them in that appended position, so re-order by the parse's
+    // category_signals; a replacement category takes its slot's position
+    const sels = orderByRequest(ctx.sels, parseData.category_signals, ctx.slots);
     try {
       setPools(pools);
       setParsedObj(parseData);
@@ -537,10 +547,16 @@ export default function Home() {
 
       if (newSel && newSel.id !== null) {
         // resolved — swap the empty entry for the new pick (keeping order),
-        // add its pool, and drop it from the outstanding list
+        // add its pool, and drop it from the outstanding list. A replacement
+        // category records which requested slot it fills, so finishPipeline
+        // can restore the prompt's order.
         const mergedSels = ctx.sels.map((s) => (s.category === category ? newSel! : s));
         const mergedPools: Pools = { ...ctx.pools, [searchCategory]: newPool };
-        const newCtx: PlanCtx = { ...ctx, sels: mergedSels, pools: mergedPools };
+        const mergedSlots =
+          searchCategory === category
+            ? ctx.slots
+            : { ...ctx.slots, [searchCategory]: ctx.slots[category] ?? category };
+        const newCtx: PlanCtx = { ...ctx, sels: mergedSels, pools: mergedPools, slots: mergedSlots };
         const remaining = recovery.empties.filter((e) => e.category !== category);
         if (remaining.length === 0) {
           setRecovery(null);

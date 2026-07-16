@@ -55,6 +55,12 @@ test.describe("@mock partial-failure recovery", () => {
     await expect(page.locator(".lstrip__name", { hasText: "Citywide Dumpling Bar" })).toBeVisible();
     // and the untouched bar stop is still there → exactly two stops
     await expect(page.locator(".lstrip__stop")).toHaveCount(2);
+    // ORDER: the user asked "dumplings then a bar" — the recovered dumplings
+    // must land back in FIRST position, not appended after the bar (scope to
+    // stop cards; the first .lstrip__name overall is the home card)
+    await expect(page.locator(".lstrip__stop .lstrip__name").first()).toHaveText(
+      "Citywide Dumpling Bar"
+    );
   });
 
   test("decline widen → follow-up replace re-resolves that one slot @mock", async ({ page }) => {
@@ -101,6 +107,12 @@ test.describe("@mock partial-failure recovery", () => {
     await expect(page.locator(".lstrip__stop")).toHaveCount(3);
     await expect(page.locator(".lstrip__name", { hasText: "Citywide Dumpling Bar" })).toBeVisible();
     await expect(page.locator(".lstrip")).not.toContainText(/bao/i);
+    // ORDER: "dumplings and bao then a bar" — dumplings back in FIRST slot,
+    // the dessert REPLACEMENT inherits bao's middle slot, bar stays last
+    // (scope to stop cards; the first .lstrip__name overall is the home card)
+    const stopNames = page.locator(".lstrip__stop .lstrip__name");
+    await expect(stopNames.nth(0)).toHaveText("Citywide Dumpling Bar");
+    await expect(stopNames.nth(2)).toContainText(/Curfew|Standing Room|Paper Lantern/);
   });
 
   test("ALL categories empty still uses the plain fail-loud message (no recovery panel) @mock", async ({ page }) => {
