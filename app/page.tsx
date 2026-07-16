@@ -338,6 +338,10 @@ export default function Home() {
       }
       setHomePoint(hp);
       setPlanZone(planZone);
+      // the plan's starting point rides on the parse (like parsed.city) so
+      // select can weigh each candidate's code-computed distance from it —
+      // and swap/reroute re-searches inherit the same anchor from the store
+      parseData.home = hp.location;
 
       // fail loud on an implausible time, judged in the PLAN's zone (explicit
       // "brunch at 3am" gets a specific reason; a senseless inferred time

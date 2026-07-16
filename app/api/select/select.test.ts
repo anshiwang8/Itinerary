@@ -195,6 +195,32 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(data.selections[0].unmetConstraint, undefined);
     },
   ],
+  [
+    "parsed.home → each candidate carries a CODE-computed kmFromHome; absent without it",
+    async () => {
+      // with the anchor: the payload the model judges must carry distances
+      groqCalls = [];
+      responder = () => valid("a");
+      const home = { latitude: 43.6547, longitude: -79.3862 };
+      await POST(req({ parsed: { ...parsed, home }, pools }));
+      const payload = JSON.parse(groqCalls[0].messages[1].content);
+      const cands = payload.candidates.cafe as Array<{ id: string; kmFromHome?: number }>;
+      for (const c of cands) {
+        assert.strictEqual(typeof c.kmFromHome, "number", `candidate ${c.id} missing kmFromHome`);
+        assert.ok(c.kmFromHome! > 0 && c.kmFromHome! < 10, `implausible kmFromHome ${c.kmFromHome}`);
+      }
+      // and the system prompt actually states the distance rule
+      assert.match(groqCalls[0].messages[0].content, /kmFromHome/);
+
+      // without the anchor (legacy plans): no invented distances
+      groqCalls = [];
+      await POST(req({ parsed, pools }));
+      const payload2 = JSON.parse(groqCalls[0].messages[1].content);
+      for (const c of payload2.candidates.cafe as Array<{ kmFromHome?: number }>) {
+        assert.strictEqual(c.kmFromHome, undefined);
+      }
+    },
+  ],
 ];
 
 // ── runner ──

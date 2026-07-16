@@ -2,6 +2,7 @@
 // reroute engine. One Groq call over all pools, validation ladder:
 // invalid ids → one correction retry → highest-rated fallback.
 import { ParsedPrompt, Place } from "../places/search/filter";
+import { haversineMeters } from "../schedule/travel";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "llama-3.3-70b-versatile";
@@ -12,6 +13,7 @@ Rules:
 - Select by "id", ONLY from the provided candidates within that same category. Never invent an id and never borrow one from another category.
 - Judge fit against the parsed request (aesthetic, group_context, budget, constraints) AND cohesion across the full set: the chosen venues should make sense together as one outing — compatible vibe, and reasonable proximity to each other (use the lat/lng provided).
 - Prefer a coherent outing over individually highest-rated venues.
+- DISTANCE (applies when candidates carry "kmFromHome" — the straight-line km from the user's starting point, computed by code): treat distance as a real cost, not a tiebreaker. Prefer the nearer candidate when quality is comparable, and NEVER pick a venue tens of kilometres away when an acceptable option exists much nearer — a slightly lower rating close by beats a slightly higher rating across the region. Mention distance in the reason only when it drove the pick.
 - BUDGET (applies whenever request.budget is stated): strongly prefer venues whose "price" is known and fits the budget (for cheap/budget requests: PRICE_LEVEL_INEXPENSIVE or PRICE_LEVEL_MODERATE). A venue with price null/unknown is a RISK, not a free pass — pick it only when no appropriately-priced option exists in that category. Also use your own general knowledge as a tiebreaker: if you recognize a venue as upscale or pricey even though its price data is missing, avoid it. When affordability influenced a pick, say so in the reason.
 - CONSTRAINTS are hard requirements, not preferences. Treat a candidate as meeting a constraint (dietary, accessibility, etc.) ONLY when the provided data, its "desc", or the venue's name/known character is actual evidence for it — a "vegan" constraint needs a vegan or clearly plant-based venue, not a steakhouse that might have options. If NO candidate in a category meets every constraint, do NOT pick a best-effort venue: return { "category": <category>, "id": null, "unmet_constraint": <the constraint no candidate meets> } for that category instead. NEVER pick a venue while telling the user to verify — reasons must not contain hedges like "worth confirming", "check with the venue", or "may accommodate".
 - PARKS / OUTDOOR RELAXATION categories (park, garden, trail, walk): prefer the highest-rated genuine public park or notable scenic spot over ANY commercial venue with a "scenic" angle — a lounge, cafe, or restaurant with a view is not a park. Parks usually have no price data; when the pick is a public park with null price, the reason may note that it's free.
@@ -50,8 +52,10 @@ export class SelectParseError extends Error {
 }
 
 // Compact candidate view sent to the model — just what's needed to
-// judge fit and proximity, keeps tokens down.
-function candidateView(p: Place) {
+// judge fit and proximity, keeps tokens down. When the plan's starting
+// point is known, each candidate carries a CODE-computed kmFromHome so
+// the distance judgment rests on a verifiable fact, never LLM arithmetic.
+function candidateView(p: Place, home?: { latitude: number; longitude: number }) {
   return {
     id: p.id,
     name: p.displayName?.text ?? "(unnamed)",
@@ -61,6 +65,9 @@ function candidateView(p: Place) {
     desc: p.editorialSummary?.text ?? null,
     lat: p.location?.latitude ?? null,
     lng: p.location?.longitude ?? null,
+    ...(home && p.location
+      ? { kmFromHome: Math.round(haversineMeters(home, p.location) / 100) / 10 }
+      : {}),
   };
 }
 
@@ -174,7 +181,7 @@ export async function selectVenues(
 
   const candidates: Record<string, unknown[]> = {};
   for (const [category, places] of Object.entries(pools)) {
-    candidates[category] = places.map(candidateView);
+    candidates[category] = places.map((p) => candidateView(p, parsed.home));
   }
 
   const messages: unknown[] = [

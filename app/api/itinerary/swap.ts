@@ -25,6 +25,7 @@ import { DEFAULT_ZONE, instantAtWallClock, wallClockParts } from "../../lib/zone
 import { isOpenAt } from "../places/search/hours";
 import {
   getSingleLeg as realGetSingleLeg,
+  haversineMeters,
   LatLng,
   TravelLeg,
 } from "../schedule/travel";
@@ -487,7 +488,7 @@ export async function swapStop(
   } else if (interp.intent === "duration") {
     result = await durationChange(itinerary, stopIndex, target, interp, base, floor, now, deps);
   } else {
-    result = await venueSwap(itinerary, stopIndex, target, interp, base, floor, now, deps);
+    result = await venueSwap(itinerary, stopIndex, target, interp, base, floor, now, deps, refinement);
   }
 
   const after = result.swapped ? itinerary.stops[result.stopIndex] : null;
@@ -598,6 +599,11 @@ async function durationChange(
   };
 }
 
+// A "closer/nearest" refinement is a DISTANCE request — detected
+// deterministically (like the time/duration parsers) so the arithmetic
+// never depends on the model.
+const CLOSER_PATTERN = /\b(closer|nearer|nearest|closest|close by|nearby|walking distance|walkable)\b/i;
+
 // ── VENUE / CONSTRAINT: replace the venue, hold the slot ──
 async function venueSwap(
   itinerary: Itinerary,
@@ -607,7 +613,8 @@ async function venueSwap(
   base: ParsedPrompt,
   floor: Date,
   now: Date,
-  deps: SwapDeps
+  deps: SwapDeps,
+  refinement: string
 ): Promise<SwapResult> {
   const poolKey = interp.path === "research" ? interp.category : target.category;
   const searchParsed =
@@ -626,9 +633,39 @@ async function venueSwap(
       .map((s, i) => (i === stopIndex ? target.id : s.id))
       .filter((id): id is string => id !== null)
   );
-  const candidates = (filtered[poolKey] ?? []).filter((p) => !excluded.has(p.id));
+  let candidates = (filtered[poolKey] ?? []).filter((p) => !excluded.has(p.id));
   if (candidates.length === 0) {
     return { swapped: false, reason: `Couldn't find another ${target.category} that fits — keeping ${target.name}.` };
+  }
+
+  // "closer" = CODE-side distance ranking against the anchor the user
+  // travels from (the previous timed stop, else the plan's home): keep
+  // only candidates strictly nearer than the current venue, nearest
+  // first. The model then judges FIT among genuinely-closer options —
+  // it never does the distance math.
+  if (CLOSER_PATTERN.test(refinement) && target.location) {
+    let anchor: LatLng | null = null;
+    for (let i = stopIndex - 1; i >= 0; i--) {
+      const s = itinerary.stops[i];
+      if (s.start_time && s.location) {
+        anchor = s.location;
+        break;
+      }
+    }
+    anchor = anchor ?? itinerary.home?.location ?? HOME.location;
+    const currentMeters = haversineMeters(anchor, target.location);
+    const closer = candidates
+      .filter((p) => p.location && haversineMeters(anchor!, p.location) < currentMeters)
+      .sort(
+        (a, b) => haversineMeters(anchor!, a.location!) - haversineMeters(anchor!, b.location!)
+      );
+    if (closer.length === 0) {
+      return {
+        swapped: false,
+        reason: `Couldn't find a ${poolKey} closer than ${target.name} — it's already the closest option I can find.`,
+      };
+    }
+    candidates = closer;
   }
 
   const selections = await deps.selectVenues(judgeParsed, { [poolKey]: candidates });

@@ -33,6 +33,11 @@ export interface ParsedPrompt {
    * by the LLM); rides on parsed so swap/reroute re-searches inherit it.
    * Absent on pre-multi-city itineraries → search falls back to Toronto. */
   city?: string;
+  /** the plan's geocoded starting point (injected by the app after geocode,
+   * NOT inferred by the LLM); the select step computes each candidate's
+   * distance from it so picks aren't distance-blind. Rides on parsed so
+   * swap/reroute re-searches inherit the anchor. Absent on older plans. */
+  home?: { latitude: number; longitude: number };
 }
 
 export type DropRule =

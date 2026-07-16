@@ -877,6 +877,64 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "CLOSER: a 'closer' swap ranks by CODE-computed distance and lands the nearest venue",
+    async () => {
+      // anchor = the previous timed stop (dinner at 43.647,-79.42); the
+      // current bar (43.649,-79.41) is ~840m from it. Pool lists the FAR
+      // venue first — without distance ranking the fake select (first-in-
+      // pool) would pick it; the engine must filter to strictly-closer and
+      // sort nearest-first.
+      const far = { ...mkVenue("b_far", "Far Bar"), location: { latitude: 43.66, longitude: -79.4 } };
+      const near = { ...mkVenue("b_near", "Near Bar"), location: { latitude: 43.6475, longitude: -79.4185 } };
+      const it = mkItinerary();
+      const res = await swapStop(it, 1, "somewhere closer", new Date(T(18, 0)), mkDeps({ pool: [far, near], legMin: 5 }));
+      assert.ok(res.swapped, `expected a swap, got: ${JSON.stringify(res)}`);
+      if (!res.swapped) return;
+      assert.strictEqual(it.stops[1].id, "b_near");
+      // distance genuinely reduced vs the original venue (both from dinner)
+      const dist = (a: { latitude: number; longitude: number }, b: { latitude: number; longitude: number }) => {
+        const dLat = ((b.latitude - a.latitude) * Math.PI) / 180;
+        const dLng = ((b.longitude - a.longitude) * Math.PI) / 180;
+        const s = Math.sin(dLat / 2) ** 2 + Math.cos((a.latitude * Math.PI) / 180) * Math.cos((b.latitude * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+        return 2 * 6371000 * Math.asin(Math.sqrt(s));
+      };
+      const anchor = { latitude: 43.647, longitude: -79.42 }; // dinner
+      assert.ok(
+        dist(anchor, it.stops[1].location!) < dist(anchor, { latitude: 43.649, longitude: -79.41 }),
+        "new venue must be nearer the anchor than the original"
+      );
+      // slot held (a closer-swap is still a venue swap)
+      assert.strictEqual(it.stops[1].start_time, T(21, 0));
+    },
+  ],
+  [
+    "CLOSER: nothing nearer → honest refusal, original kept",
+    async () => {
+      // pool holds only venues FARTHER from the anchor than the current bar
+      const far = { ...mkVenue("b_far", "Far Bar"), location: { latitude: 43.66, longitude: -79.4 } };
+      const it = mkItinerary();
+      const res = await swapStop(it, 1, "somewhere closer", new Date(T(18, 0)), mkDeps({ pool: [far] }));
+      assert.strictEqual(res.swapped, false);
+      if (!res.swapped) assert.match(res.reason, /closer than Bar Spot — it's already the closest/);
+      assert.strictEqual(it.stops[1].id, "b1"); // untouched
+    },
+  ],
+  [
+    "CLOSER on the FIRST stop anchors to the itinerary's home",
+    async () => {
+      const it = mkItinerary();
+      // home at the dessert end of the strip — "closer" for the dinner stop
+      // must mean closer to HOME, not to any downstream stop
+      it.home = { label: "Start · custom", location: { latitude: 43.6502, longitude: -79.4045 } };
+      // dinner (43.647,-79.42) is ~1.3km from home; near-home candidate wins
+      const nearHome = { ...mkVenue("d_near", "Near Dinner"), location: { latitude: 43.6503, longitude: -79.405 } };
+      const farAway = { ...mkVenue("d_far", "Far Dinner"), location: { latitude: 43.62, longitude: -79.5 } };
+      const res = await swapStop(it, 0, "find a closer dinner", new Date(T(17, 0)), mkDeps({ pool: [farAway, nearHome], legMin: 5 }));
+      assert.ok(res.swapped, `expected a swap, got: ${JSON.stringify(res)}`);
+      assert.strictEqual(it.stops[0].id, "d_near");
+    },
+  ],
+  [
     "no better candidate → honest refusal, original kept",
     async () => {
       const it = mkItinerary();

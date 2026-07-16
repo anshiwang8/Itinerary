@@ -26,6 +26,21 @@ export interface LatLng {
   longitude: number;
 }
 
+/** Straight-line metres between two points — the code-side distance fact
+ *  used wherever proximity is judged (select's kmFromHome, the swap
+ *  engine's "closer" ranking). Never the LLM's job to compute. */
+export function haversineMeters(a: LatLng, b: LatLng): number {
+  const R = 6_371_000;
+  const dLat = ((b.latitude - a.latitude) * Math.PI) / 180;
+  const dLng = ((b.longitude - a.longitude) * Math.PI) / 180;
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((a.latitude * Math.PI) / 180) *
+      Math.cos((b.latitude * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+  return Math.round(2 * R * Math.asin(Math.sqrt(s)));
+}
+
 // Raw computeRoutes response shape (the parts we read).
 export interface ComputeRoutesResponse {
   routes?: Array<{
