@@ -46,6 +46,21 @@ const cases: Array<[string, () => void]> = [
       ]);
     },
   ],
+  [
+    "a venue FEATURE is a constraint, never its own category (mirrors the prompt rule)",
+    () => {
+      // "dessert with a patio" is ONE dessert stop with a patio requirement
+      const p = mockParse("dessert with a patio");
+      assert.deepStrictEqual(p.category_signals, ["dessert"]);
+      assert.deepStrictEqual(p.constraints, ["patio"]);
+      // dietary words behave the same way (the rule this generalizes)
+      const v = mockParse("vegan dinner");
+      assert.deepStrictEqual(v.category_signals, ["dinner"]);
+      assert.deepStrictEqual(v.constraints, ["vegan"]);
+      // genuinely distinct activities still get their own entries
+      assert.deepStrictEqual(mockParse("dinner then a bar").category_signals, ["dinner", "drinks"]);
+    },
+  ],
 ];
 
 let failed = 0;
