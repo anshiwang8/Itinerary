@@ -295,13 +295,57 @@ const cases: Array<[string, () => void]> = [
         resolveStartTime("unspecified", t, ["axe throwing"]).toISOString(),
         new Date(2026, 6, 11, 14, 0, 0).toISOString()
       );
-      // KNOWN INTERACTION (flagged for the ambiguous-prompt work, not fixed
-      // here): late at night the immediate slot falls outside the generic
-      // 8–23 band and the checked resolver refuses it — a vague prompt at
-      // 11:30 PM cannot get an immediate itinerary today.
+      // RESOLVED (was the "KNOWN INTERACTION" flagged for the ambiguous-
+      // prompt work): the generic band now wraps to 1 AM, so a vague/
+      // unrecognized request at 11:30 PM gets its immediate slot (00:00)
+      // instead of being refused on rounding alone.
       const late = new Date(2026, 6, 11, 23, 30, 0);
       const r = resolveStartTimeChecked("unspecified", late, ["axe throwing"]);
+      assert.strictEqual(r.ok, true);
+    },
+  ],
+  [
+    "LATE-NIGHT (batch 4): a vague 'now' at 10:18 PM resolves instead of refusing",
+    () => {
+      // the reported repro: "now" rounds UP to 23:00 and the old 8–23 band
+      // refused it by a minute of rounding. No categories = the general case.
+      const t = new Date(2026, 6, 16, 22, 18, 0);
+      const r = resolveStartTimeChecked("now", t, []);
+      assert.strictEqual(r.ok, true);
+      if (r.ok) assert.strictEqual(r.start.getHours(), 23);
+      // and past midnight still works up to the 1 AM edge
+      const midnight = resolveStartTimeChecked("now", new Date(2026, 6, 16, 23, 40, 0), []);
+      assert.strictEqual(midnight.ok, true);
+      // but the small hours are still honestly refused
+      const threeAM = resolveStartTimeChecked("now", new Date(2026, 6, 16, 2, 57, 0), []);
+      assert.strictEqual(threeAM.ok, false);
+      if (!threeAM.ok) assert.match(threeAM.reason, /nothing much is open then/);
+    },
+  ],
+  [
+    "LATE-NIGHT (batch 4): an INFERRED out-of-band time names the real obstacle, not 'add a time'",
+    () => {
+      // the reported repro: "sit in a park" at 10:54 PM → inferred 11 PM,
+      // past the park band's 10 PM close. "Add a time" was misleading —
+      // nothing the user types fixes tonight.
+      const t = new Date(2026, 6, 16, 22, 54, 0);
+      const r = resolveStartTimeChecked("unspecified", t, ["park"]);
       assert.strictEqual(r.ok, false);
+      if (!r.ok) {
+        assert.notStrictEqual(r.reason, IMPLAUSIBLE_TIME_MESSAGE);
+        assert.strictEqual(
+          r.reason,
+          "It's 11 PM — too late for park today (park around here runs about 6 AM to 10 PM). Try tomorrow, or something else tonight?"
+        );
+      }
+      // too EARLY reads the other way round
+      const dawn = resolveStartTimeChecked("unspecified", new Date(2026, 6, 16, 4, 30, 0), ["park"]);
+      assert.strictEqual(dawn.ok, false);
+      if (!dawn.ok) assert.match(dawn.reason, /too early for park .*Try later today\?$/);
+      // a category with NO band keeps the generic add-a-time message
+      const unknown = resolveStartTimeChecked("unspecified", new Date(2026, 6, 3, 4, 0, 0), ["axe throwing"]);
+      assert.strictEqual(unknown.ok, false);
+      if (!unknown.ok) assert.strictEqual(unknown.reason, IMPLAUSIBLE_TIME_MESSAGE);
     },
   ],
   [
@@ -367,7 +411,7 @@ const cases: Array<[string, () => void]> = [
       if (!generic.ok) {
         assert.strictEqual(
           generic.reason,
-          "Couldn't plan that for 4 AM — nothing much is open then. Try a time between 8 AM and 11 PM?"
+          "Couldn't plan that for 4 AM — nothing much is open then. Try a time between 8 AM and 1 AM?"
         );
       }
       // implausible DAY-PART hits the same surface ("brunch tonight")

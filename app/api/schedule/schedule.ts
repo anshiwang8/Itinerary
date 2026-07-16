@@ -86,7 +86,15 @@ export const PLAUSIBLE_BANDS: Array<[RegExp, PlausibleBand]> = [
     { startHour: 11, endHour: 23 },
   ],
 ];
-export const DEFAULT_PLAUSIBLE_BAND: PlausibleBand = { startHour: 8, endHour: 23 };
+// The fallback band — used ONLY when no category matches a band above:
+// an unrecognized category ("axe throwing") or a general/vague request
+// with no category at all. It wraps past midnight to 1 AM because "some-
+// thing to do" in a city genuinely runs late (bars, clubs, late food are
+// open at 11 PM), and the immediate "now" slot rounds UP to the next full
+// hour — an 8–23 band refused a 10:18 PM vague prompt purely on rounding.
+// Recognized categories keep their OWN bands untouched, so explicit
+// impossible requests ("brunch at 3am") still fail loud exactly as before.
+export const DEFAULT_PLAUSIBLE_BAND: PlausibleBand = { startHour: 8, endHour: 1 };
 
 // The band check reads the WALL-CLOCK hour in the plan's zone — a 7 PM
 // Vancouver dinner must be judged against 19:00 Pacific, not the server's
@@ -164,6 +172,33 @@ function implausibleExplicitReason(
   return `Couldn't plan a ${clock12(start, timeZone)} ${label} — ${label} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}. ${suggest}`;
 }
 
+// The user gave NO time and the resolver's own inferred slot (next full
+// hour / category default) landed outside a KNOWN category's band — e.g.
+// "sit in a park" at 10:54 PM resolves to 11 PM, past the park band's
+// 10 PM close. "Add a time" is misleading here: nothing they type fixes
+// tonight. Name the real obstacle and the realistic ways out. Returns
+// null when no category has a band (nothing specific to say → the caller
+// keeps the generic add-a-time message).
+function implausibleInferredReason(
+  start: Date,
+  categories: string[],
+  timeZone: string = DEFAULT_ZONE
+): string | null {
+  for (const c of categories) {
+    const hit = PLAUSIBLE_BANDS.find(([p]) => p.test(c));
+    if (!hit) continue;
+    const band = hit[1];
+    const { hour, minute } = wallClockParts(start, timeZone);
+    const h = hour + minute / 60;
+    const beforeOpen = band.startHour <= band.endHour ? h < band.startHour : true;
+    const window = `${c} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}`;
+    return beforeOpen
+      ? `It's ${clock12(start, timeZone)} — too early for ${c} (${window}). Try later today?`
+      : `It's ${clock12(start, timeZone)} — too late for ${c} today (${window}). Try tomorrow, or something else tonight?`;
+  }
+  return null;
+}
+
 /**
  * resolveStartTime + the fail-loud plausibility check. EVERY resolved
  * start must land inside a plausible band for at least one category
@@ -196,7 +231,12 @@ export function resolveStartTimeChecked(
   if (hasClockTime || hasDayPart || hasExplicitNow) {
     return { ok: false, reason: implausibleExplicitReason(start, categories, timeZone) };
   }
-  return { ok: false, reason: IMPLAUSIBLE_TIME_MESSAGE };
+  // no stated time: if the category itself has a known window, say THAT
+  // (adding a time wouldn't help); otherwise fall back to add-a-time
+  return {
+    ok: false,
+    reason: implausibleInferredReason(start, categories, timeZone) ?? IMPLAUSIBLE_TIME_MESSAGE,
+  };
 }
 
 /** Format an absolute instant as an ISO string in `timeZone` (default
