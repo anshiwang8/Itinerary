@@ -360,6 +360,26 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "GATE CONTINUATION (batch 4c): 'now' + bar late at night resolves TONIGHT, not tomorrow's default",
+    () => {
+      // the confirmed repro's resolver shape: at 22:54, a bar category with
+      // NO time signal falls to its 20:00 default → rolls to TOMORROW.
+      // With the explicit "now" the gate's "something else" now stamps on
+      // the continuation, it must resolve to the immediate slot TONIGHT
+      // (23:00 — inside the bar band's past-midnight wrap).
+      const t = new Date(2026, 6, 16, 22, 54, 0);
+      // sanity: the un-stamped fall-through really is tomorrow (the bug shape)
+      const plain = resolveStartTime("unspecified", t, ["bar"]);
+      assert.strictEqual(plain.toISOString(), new Date(2026, 6, 17, 20, 0, 0).toISOString());
+      // the stamped continuation: tonight, and it passes the checked resolver
+      const stamped = resolveStartTimeChecked("now", t, ["bar"]);
+      assert.strictEqual(stamped.ok, true);
+      if (stamped.ok) {
+        assert.strictEqual(stamped.start.toISOString(), new Date(2026, 6, 16, 23, 0, 0).toISOString());
+      }
+    },
+  ],
+  [
     "OVERRIDE BOUNDARY (batch 4b): explicit impossible requests are NEVER overridable",
     () => {
       // the load-bearing distinction: the override exists ONLY for the

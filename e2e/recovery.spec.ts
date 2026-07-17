@@ -225,4 +225,28 @@ test.describe("@mock inferred-time gate", () => {
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".lstrip__stop .lstrip__name").first()).toHaveText(/Fixture General/);
   });
+
+  test("'Something else' → drinks lands TONIGHT, not tomorrow's category default @mock", async ({ page }) => {
+    // the batch-4c repro: at a frozen 22:54, choosing "drinks" after the
+    // gate used to fall through to bar's 20:00 default — already passed —
+    // and roll the whole plan to TOMORROW 8 PM. The gate continuation now
+    // carries an explicit "now", so the plan anchors at 23:00 tonight
+    // (inside the bar band's past-midnight wrap). The hours-less Night
+    // Owl fixture keeps the bar pool non-empty at any SERVER hour.
+    await planLate(page, "sit in a park");
+    await page.locator(".recover--gate").getByRole("button", { name: "Something else" }).click();
+    const clarify = page.locator(".clarify");
+    await expect(clarify).toBeVisible({ timeout: 30_000 });
+    await clarify.getByRole("button", { name: "drinks", exact: true }).click();
+    await clarify.getByRole("button", { name: "Go", exact: true }).click();
+
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    const firstStop = page.locator(".lstrip__stop").first();
+    await expect(firstStop.locator(".eyebrow")).toHaveText(/drinks|bar/i);
+    // TONIGHT: the stop's time line must carry no "tomorrow" prefix and
+    // sit in the 11 PM slot the frozen clock implies
+    const be = firstStop.locator(".lstrip__be");
+    await expect(be).not.toContainText(/tomorrow/i);
+    await expect(be).toContainText(/11:\d{2} PM/);
+  });
 });

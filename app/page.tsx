@@ -697,10 +697,22 @@ export default function Home() {
 
   // "Something else": swap direction without retyping — re-open the kind
   // picker (batch 4's clarify question) on the same prompt, categories
-  // cleared so the answer genuinely steers the plan.
+  // cleared so the answer genuinely steers the plan. CRUCIALLY (batch 4c)
+  // the continuation carries an explicit "now": reaching the gate at all
+  // means no time was typed and our own right-now guess was the problem —
+  // the person is clearly asking about tonight. Without this, the new
+  // kind fell through to its category default (bar → 20:00), which had
+  // already passed and rolled the plan to TOMORROW 8 PM. Same semantics
+  // as answering the original When question with "now" — including its
+  // consequences: a category that's genuinely closed right now gets the
+  // explicit-window refusal, exactly like now+that-category typed fresh.
   function timeGateSomethingElse() {
     if (recovery?.mode !== "time-gate") return;
-    const parsed = { ...recovery.parsed, category_signals: [] };
+    const parsed = {
+      ...recovery.parsed,
+      category_signals: [],
+      time_window: timeWindowForWhenAnswer("now"),
+    };
     setRecovery(null);
     setClarify({ questions: [kindQuestion()], parsed });
     setClarifyKind("");

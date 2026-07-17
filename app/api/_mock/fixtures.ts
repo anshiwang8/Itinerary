@@ -92,6 +92,20 @@ const BAR: Place[] = [
     "Snug standing bar with a lantern-lit patio out back."),
   venue("fx_bar_lantern", "Paper Lantern", 43.6473, -79.419, 4.4, "PRICE_LEVEL_INEXPENSIVE", 18, 2,
     "Cheap-and-cheerful late-night bar under red lanterns."),
+  // NO hours — keep-on-missing makes it the any-hour survivor (same role
+  // as "Fixture … Three"), so bar scenarios that run the pipeline at an
+  // odd server hour (the time-gate "something else → drinks" e2e) stay
+  // deterministic. Lowest-rated on purpose: it never displaces the picks
+  // the other specs pin (Curfew evenings, Standing Room late).
+  {
+    id: "fx_bar_nightowl",
+    displayName: { text: "Night Owl" },
+    location: { latitude: 43.6489, longitude: -79.4203 },
+    rating: 4.1,
+    priceLevel: "PRICE_LEVEL_INEXPENSIVE",
+    businessStatus: "OPERATIONAL",
+    editorialSummary: { text: "Unfussy neighbourhood bar with unlisted hours." },
+  },
 ];
 const DESSERT: Place[] = [
   // closes 9 PM — THE adapt trigger for late-shifted evenings. Deliberately

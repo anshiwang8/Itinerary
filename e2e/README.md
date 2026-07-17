@@ -31,6 +31,10 @@ mocked pipeline source.
   $$$ → $$ (the price rides on the stop, not a pools lookup).
 - Drinks pick is **Ten O'Clock Curfew** (4.7, closes 22:00) — pushing
   drinks past 10 PM fires the ADAPT path (→ The Standing Room, open to 2).
+  **Night Owl** (4.1, NO listed hours) is the bar pool's any-hour
+  keep-on-missing survivor — lowest-rated on purpose so it never displaces
+  the pinned picks; it exists so late/odd-hour bar scenarios (the
+  time-gate "something else → drinks" e2e) stay deterministic.
 - **Sundown Scoops** (dessert, closes 21:00) is the downstream adapt
   trigger for late-shifted evenings; **Midnight Flour** is its late
   replacement.
