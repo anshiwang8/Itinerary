@@ -14,6 +14,17 @@ export interface ClarifyQuestion {
 const unspecified = (v: unknown): boolean =>
   typeof v !== "string" || !v.trim() || /^unspecified$/i.test(v.trim());
 
+/** The "what kind of thing?" question — asked for ultra-vague prompts,
+ *  and re-shown by the time-gate's "something else" action (batch 4b) so
+ *  a blocked direction can be swapped without retyping the prompt. */
+export function kindQuestion(): ClarifyQuestion {
+  return {
+    id: "kind",
+    question: "What kind of thing?",
+    options: ["food", "drinks", "something to do", "outdoors"],
+  };
+}
+
 /**
  * Rules:
  *  - NO category at all ("not sure what to do") → ask what KIND of thing
@@ -43,11 +54,7 @@ export function clarifyQuestions(parsed: ParsedPrompt): ClarifyQuestion[] {
   // the city" to a real intent — deliberately 4 broad buckets, not an
   // exhaustive taxonomy: enough for a good guess, still one tap.
   if (!hasCategory) {
-    questions.push({
-      id: "kind",
-      question: "What kind of thing?",
-      options: ["food", "drinks", "something to do", "outdoors"],
-    });
+    questions.push(kindQuestion());
   }
   if (!hasTime) {
     questions.push({

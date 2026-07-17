@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   buildSchedule,
+  resolveStartTime,
   resolveStartTimeChecked,
   ScheduledStop,
 } from "./api/schedule/schedule";
@@ -26,6 +27,7 @@ import {
   categoriesForKindAnswer,
   ClarifyQuestion,
   clarifyQuestions,
+  kindQuestion,
   timeWindowForWhenAnswer,
 } from "./lib/clarify";
 import type { Selection } from "./api/select/selectVenues";
@@ -202,16 +204,31 @@ export default function Home() {
   const [clarifyVibe, setClarifyVibe] = useState("");
   const [clarifyKind, setClarifyKind] = useState("");
 
-  // partial-failure recovery: SOME categories resolved but ≥1 came back
-  // empty. Instead of silently dropping it, pause with the honest reason
-  // and an offer to widen the search (city-wide) or replace that ONE slot.
-  const [recovery, setRecovery] = useState<{
-    ctx: PlanCtx;
-    empties: { category: string; reason: string }[];
-    replaceText: Record<string, string>;
-    busy: boolean;
-    note: string | null;
-  } | null>(null);
+  // The interactive-recovery panel — one component, two triggers:
+  //  - "empty": SOME (or, after an override, ALL) categories came back
+  //    empty → honest reason + widen / replace that slot.
+  //  - "time-gate" (batch 4b): the user typed NO time and our own inferred
+  //    slot landed outside a known category band → a real choice ("still
+  //    want it" bypasses the gate; "something else" re-opens the kind
+  //    picker) instead of a dead-end refusal string.
+  const [recovery, setRecovery] = useState<
+    | {
+        mode: "empty";
+        ctx: PlanCtx;
+        empties: { category: string; reason: string }[];
+        replaceText: Record<string, string>;
+        busy: boolean;
+        note: string | null;
+      }
+    | {
+        mode: "time-gate";
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        parsed: any;
+        reason: string;
+        category: string;
+      }
+    | null
+  >(null);
 
   async function runPipeline() {
     const q = prompt.trim();
@@ -298,9 +315,12 @@ export default function Home() {
     await continuePipeline(updated);
   }
 
-  // everything from the time check onward — parseData is final here
+  // everything from the time check onward — parseData is final here.
+  // opts.overrideTimeGate: the user pressed "still want it" on the
+  // time-gate panel — an explicit, informed confirmation — so the
+  // inferred-time band check is bypassed for THIS run only.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async function continuePipeline(parseData: any) {
+  async function continuePipeline(parseData: any, opts: { overrideTimeGate?: boolean } = {}) {
     const fail = (reason: string) => {
       setError(reason);
       setLoadingText(null);
@@ -356,16 +376,40 @@ export default function Home() {
       // and swap/reroute re-searches inherit the same anchor from the store
       parseData.home = hp.location;
 
-      // fail loud on an implausible time, judged in the PLAN's zone (explicit
-      // "brunch at 3am" gets a specific reason; a senseless inferred time
-      // gets the add-a-time one)
+      // fail loud on an implausible time, judged in the PLAN's zone.
+      // Explicit impossible requests ("brunch at 3am") stay HARD fails.
+      // The inferred case (user typed no time; our own guess landed
+      // outside a known band) is OVERRIDABLE: it opens the time-gate
+      // panel, and "still want it" re-enters here with the override set.
       const check = resolveStartTimeChecked(
         parseData.time_window ?? "",
         new Date(),
         parseData.category_signals ?? [],
         planZone
       );
-      if (!check.ok) return fail(check.reason);
+      let startInstant: Date;
+      if (check.ok) {
+        startInstant = check.start;
+      } else if (check.overridable && opts.overrideTimeGate) {
+        // informed override — keep the same inferred instant, skip the gate
+        startInstant = resolveStartTime(
+          parseData.time_window ?? "",
+          new Date(),
+          parseData.category_signals ?? [],
+          planZone
+        );
+      } else if (check.overridable) {
+        setRecovery({
+          mode: "time-gate",
+          parsed: parseData,
+          reason: check.reason,
+          category: check.category ?? "that",
+        });
+        setLoadingText(null);
+        return;
+      } else {
+        return fail(check.reason);
+      }
 
       let weather = null;
       try {
@@ -396,16 +440,40 @@ export default function Home() {
       setWeatherBlocks(wxBlocks);
 
       // the empty-map net: EVERY pool came back empty → say why, don't
-      // render a map with nothing on it
+      // render a map with nothing on it. After a time-gate OVERRIDE the
+      // plain string would be a brand-new dead end — the user just chose
+      // to push past one — so that case routes into the SAME recovery
+      // panel instead (widen / try something else), with synthesized
+      // null-id selections since select never ran.
       const poolEntries = Object.entries(categories as Pools);
       const allEmpty =
         poolEntries.length === 0 ||
         poolEntries.every(([, arr]) => !Array.isArray(arr) || arr.length === 0);
       if (allEmpty) {
+        if (opts.overrideTimeGate && poolEntries.length > 0) {
+          const emptySels: Selection[] = poolEntries.map(([c]) => ({
+            category: c,
+            id: null,
+            reason: "no venues survived filtering",
+          }));
+          setRecovery({
+            mode: "empty",
+            ctx: { parseData, planZone, hp, weather, pools: categories as Pools, sels: emptySels, drops, slots: {} },
+            empties: poolEntries.map(([c]) => ({
+              category: c,
+              reason: emptyCategoryReason(c, drops, parseData.location),
+            })),
+            replaceText: {},
+            busy: false,
+            note: null,
+          });
+          setLoadingText(null);
+          return;
+        }
         return fail(
           wxBlocks.length >= poolEntries.length && wxBlocks.length > 0
             ? weatherBlockedReason(wxBlocks)
-            : noVenuesReason(Object.keys(categories), formatStopTime(check.start, new Date(), planZone))
+            : noVenuesReason(Object.keys(categories), formatStopTime(startInstant, new Date(), planZone))
         );
       }
 
@@ -442,6 +510,7 @@ export default function Home() {
       const emptyCats = partialEmptyCategories(sels);
       if (emptyCats.length > 0) {
         setRecovery({
+          mode: "empty",
           ctx,
           empties: emptyCats.map((c) => ({
             category: c,
@@ -521,7 +590,7 @@ export default function Home() {
     category: string,
     opts: { searchCategory: string; dropLocation: boolean }
   ) {
-    if (!recovery) return;
+    if (recovery?.mode !== "empty") return;
     const { ctx } = recovery;
     const searchCategory = opts.searchCategory.trim();
     if (!searchCategory) return;
@@ -598,7 +667,9 @@ export default function Home() {
       }
     } catch (err) {
       setRecovery((r) =>
-        r ? { ...r, busy: false, note: err instanceof Error ? err.message : String(err) } : r
+        r && r.mode === "empty"
+          ? { ...r, busy: false, note: err instanceof Error ? err.message : String(err) }
+          : r
       );
     }
   }
@@ -606,10 +677,36 @@ export default function Home() {
   // user declined to recover the empty category(ies) — build the plan
   // without them (they stay skipped, as before, but now by explicit choice)
   async function planWithoutEmpties() {
-    if (!recovery) return;
+    if (recovery?.mode !== "empty") return;
     const ctx = recovery.ctx;
     setRecovery(null);
     await finishPipeline(ctx);
+  }
+
+  // ── time-gate actions (batch 4b) ──────────────────────────────────────
+  // "Still want it": the user read the window and confirmed — re-run the
+  // pipeline with the band gate bypassed for this one run. Whatever the
+  // hours data then says is honest (venues with no listed hours survive
+  // via keep-on-missing; nothing surviving lands in the recovery panel).
+  async function overrideTimeGate() {
+    if (recovery?.mode !== "time-gate") return;
+    const parsed = recovery.parsed;
+    setRecovery(null);
+    await continuePipeline(parsed, { overrideTimeGate: true });
+  }
+
+  // "Something else": swap direction without retyping — re-open the kind
+  // picker (batch 4's clarify question) on the same prompt, categories
+  // cleared so the answer genuinely steers the plan.
+  function timeGateSomethingElse() {
+    if (recovery?.mode !== "time-gate") return;
+    const parsed = { ...recovery.parsed, category_signals: [] };
+    setRecovery(null);
+    setClarify({ questions: [kindQuestion()], parsed });
+    setClarifyKind("");
+    setClarifyWhen(null);
+    setClarifyTime("");
+    setClarifyVibe("");
   }
 
   async function storeItinerary(
@@ -989,11 +1086,32 @@ export default function Home() {
   // to drop (an already-city-wide search can't be widened).
   const recoveryCanWiden = !!(
     recovery &&
+    recovery.mode === "empty" &&
     recovery.ctx.parseData.location &&
     String(recovery.ctx.parseData.location).trim() &&
     String(recovery.ctx.parseData.location).trim().toLowerCase() !== "unspecified"
   );
-  const recoveryBlock = recovery && (
+  // time-gate variant of the SAME panel (batch 4b): a real choice —
+  // override the inferred-time gate, or change direction — never a
+  // dead-end refusal string
+  const recoveryBlock =
+    recovery && recovery.mode === "time-gate" ? (
+      <div className={"clarify recover recover--gate" + (itinerary ? " clarify--stage" : "")}>
+        <div className="clarify__q">
+          <div className="clarify__label recover__reason">
+            {recovery.reason} Still want to try one, or do something else?
+          </div>
+          <div className="clarify__chips">
+            <button className="chipbtn recover__override" onClick={overrideTimeGate}>
+              Still want it
+            </button>
+            <button className="chipbtn recover__else" onClick={timeGateSomethingElse}>
+              Something else
+            </button>
+          </div>
+        </div>
+      </div>
+    ) : recovery && (
     <div className={"clarify recover" + (itinerary ? " clarify--stage" : "")}>
       {recovery.empties.map((e) => (
         <div key={e.category} className="clarify__q">
@@ -1013,7 +1131,9 @@ export default function Home() {
               value={recovery.replaceText[e.category] ?? ""}
               onChange={(ev) =>
                 setRecovery((r) =>
-                  r ? { ...r, replaceText: { ...r.replaceText, [e.category]: ev.target.value } } : r
+                  r && r.mode === "empty"
+                    ? { ...r, replaceText: { ...r.replaceText, [e.category]: ev.target.value } }
+                    : r
                 )
               }
               onKeyDown={(ev) => {
@@ -1042,11 +1162,16 @@ export default function Home() {
         </div>
       ))}
       {recovery.note && <div className="clarify__label recover__note">{recovery.note}</div>}
-      <div className="clarify__actions">
-        <button className="clarify__skip recover__skip" disabled={recovery.busy} onClick={planWithoutEmpties}>
-          Plan without it
-        </button>
-      </div>
+      {/* "Plan without it" only makes sense when something ELSE was
+          actually picked — an all-empty panel (post-override) has nothing
+          to plan around, so recovering or redirecting are the options */}
+      {recovery.ctx.sels.some((s) => s.id !== null) && (
+        <div className="clarify__actions">
+          <button className="clarify__skip recover__skip" disabled={recovery.busy} onClick={planWithoutEmpties}>
+            Plan without it
+          </button>
+        </div>
+      )}
     </div>
   );
 

@@ -50,9 +50,16 @@ mocked pipeline source.
   one or both with a resolving category ("… then a bar at 7pm") for
   single- or multi-empty recovery scenarios.
 - Unknown categories get a generated "Fixture <Category> One/Two/Three"
-  pool. Weather is 48 calm hours (20°, precip 10%) with a built-in daily
-  **rain window at 3 PM local** (precip 80, `MOCK_RAIN_HOUR`) — plan an
-  outdoor category "at 3pm" to trigger the weather gate / empty-pool net.
+  pool — **Three carries NO hours** (keep-on-missing), so it survives the
+  objective filter at ANY server hour: the determinism anchor for
+  late-night scenarios (the time-gate override e2e). Weather is 48 calm
+  hours (20°, precip 10%) with a built-in daily **rain window at 3 PM
+  local** (precip 80, `MOCK_RAIN_HOUR`) — plan an outdoor category "at
+  3pm" to trigger the weather gate / empty-pool net.
+- **"beach"** is the deliberately EMPTY park-family pool: it shares the
+  park plausible band (a late no-time beach prompt fires the batch-4b
+  time-gate) but nothing is ever found — the deterministic trigger for
+  "override finds nothing → recovery flow" scenarios.
 
 ## Fail-loud guards — deterministic in mock mode
 

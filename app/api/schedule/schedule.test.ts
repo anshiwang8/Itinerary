@@ -327,7 +327,9 @@ const cases: Array<[string, () => void]> = [
     () => {
       // the reported repro: "sit in a park" at 10:54 PM → inferred 11 PM,
       // past the park band's 10 PM close. "Add a time" was misleading —
-      // nothing the user types fixes tonight.
+      // nothing the user types fixes tonight. Since batch 4b the failure
+      // is also OVERRIDABLE (the UI offers "still want it") and carries
+      // no trailing suggestion — the panel's buttons ARE the suggestion.
       const t = new Date(2026, 6, 16, 22, 54, 0);
       const r = resolveStartTimeChecked("unspecified", t, ["park"]);
       assert.strictEqual(r.ok, false);
@@ -335,17 +337,56 @@ const cases: Array<[string, () => void]> = [
         assert.notStrictEqual(r.reason, IMPLAUSIBLE_TIME_MESSAGE);
         assert.strictEqual(
           r.reason,
-          "It's 11 PM — too late for park today (park around here runs about 6 AM to 10 PM). Try tomorrow, or something else tonight?"
+          "It's 11 PM — late for a typical park visit (park around here runs about 6 AM to 10 PM)."
         );
+        assert.strictEqual(r.overridable, true);
+        assert.strictEqual(r.category, "park");
       }
-      // too EARLY reads the other way round
+      // too EARLY reads the other way round — and is overridable too
       const dawn = resolveStartTimeChecked("unspecified", new Date(2026, 6, 16, 4, 30, 0), ["park"]);
       assert.strictEqual(dawn.ok, false);
-      if (!dawn.ok) assert.match(dawn.reason, /too early for park .*Try later today\?$/);
-      // a category with NO band keeps the generic add-a-time message
+      if (!dawn.ok) {
+        assert.match(dawn.reason, /early for park \(park around here runs about 6 AM to 10 PM\)\.$/);
+        assert.strictEqual(dawn.overridable, true);
+      }
+      // a category with NO band keeps the generic add-a-time message and
+      // is NOT overridable (there's no informed window to override)
       const unknown = resolveStartTimeChecked("unspecified", new Date(2026, 6, 3, 4, 0, 0), ["axe throwing"]);
       assert.strictEqual(unknown.ok, false);
-      if (!unknown.ok) assert.strictEqual(unknown.reason, IMPLAUSIBLE_TIME_MESSAGE);
+      if (!unknown.ok) {
+        assert.strictEqual(unknown.reason, IMPLAUSIBLE_TIME_MESSAGE);
+        assert.strictEqual(unknown.overridable, undefined);
+      }
+    },
+  ],
+  [
+    "OVERRIDE BOUNDARY (batch 4b): explicit impossible requests are NEVER overridable",
+    () => {
+      // the load-bearing distinction: the override exists ONLY for the
+      // inferred path. An explicit "brunch at 3am"/"dinner at 4am"/"now"
+      // stays a hard fail — same messages, no override flag.
+      const now = new Date(2026, 6, 3, 1, 0, 0);
+      for (const [tw, cats] of [
+        ["3am", ["brunch"]],
+        ["4am", ["dinner"]],
+        ["evening", ["brunch"]], // explicit day-part
+      ] as Array<[string, string[]]>) {
+        const r = resolveStartTimeChecked(tw, now, cats);
+        assert.strictEqual(r.ok, false, `${tw} ${cats[0]} must fail`);
+        if (!r.ok) assert.strictEqual(r.overridable, undefined, `${tw} ${cats[0]} must not be overridable`);
+      }
+      // explicit "now" (a clarify answer) is a stated time — not overridable
+      const late = resolveStartTimeChecked("now", new Date(2026, 6, 11, 2, 57, 0), []);
+      assert.strictEqual(late.ok, false);
+      if (!late.ok) assert.strictEqual(late.overridable, undefined);
+      // and "now" + park at 11 PM: stated time, park band → explicit hard
+      // fail with the category window, still no override
+      const nowPark = resolveStartTimeChecked("now", new Date(2026, 6, 16, 22, 54, 0), ["park"]);
+      assert.strictEqual(nowPark.ok, false);
+      if (!nowPark.ok) {
+        assert.match(nowPark.reason, /park around here runs about 6 AM to 10 PM/);
+        assert.strictEqual(nowPark.overridable, undefined);
+      }
     },
   ],
   [

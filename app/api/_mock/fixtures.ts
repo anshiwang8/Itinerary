@@ -170,8 +170,18 @@ function genericPool(category: string): Place[] {
       `A dependable ${category} option on the strip.`),
     venue(`fx_${slug}_two`, `Fixture ${label} Two`, 43.6481, -79.4192, 4.2, "PRICE_LEVEL_INEXPENSIVE", 10, 23,
       `A budget-friendly ${category} pick nearby.`),
-    venue(`fx_${slug}_three`, `Fixture ${label} Three`, 43.6505, -79.4214, 4.0, "PRICE_LEVEL_INEXPENSIVE", 10, 23,
-      `A quieter ${category} fallback around the corner.`),
+    // Three carries NO hours — keep-on-missing makes it the any-hour
+    // survivor, so scenarios that run the pipeline at a late/odd hour
+    // (the time-gate override e2e) stay deterministic across run hours
+    {
+      id: `fx_${slug}_three`,
+      displayName: { text: `Fixture ${label} Three` },
+      location: { latitude: 43.6505, longitude: -79.4214 },
+      rating: 4.0,
+      priceLevel: "PRICE_LEVEL_INEXPENSIVE",
+      businessStatus: "OPERATIONAL",
+      editorialSummary: { text: `A quieter ${category} fallback around the corner.` },
+    } as Place,
   ];
   genericCache.set(category, pool);
   return pool;
@@ -182,6 +192,11 @@ export function poolFor(category: string, hasNeighbourhood = false): Place[] {
   // (widened) → a real open venue (see DUMPLING_* / BAO_* above)
   if (/dumpling/i.test(category)) return hasNeighbourhood ? [DUMPLING_CLOSED] : [DUMPLING_OPEN];
   if (/\bbao\b/i.test(category)) return hasNeighbourhood ? [BAO_CLOSED] : [BAO_OPEN];
+  // "beach" is the deliberately EMPTY park-family pool: it shares the park
+  // plausible band (so the time-gate fires late at night) but nothing is
+  // ever found — the deterministic trigger for "override finds nothing →
+  // lands in the recovery flow" scenarios, at any run hour
+  if (/\bbeach(es)?\b/i.test(category)) return [];
   for (const [pattern, pool] of POOL_RULES) {
     if (pattern.test(category)) return pool;
   }
@@ -216,9 +231,13 @@ export function mockParse(prompt: string): ParsedPrompt {
   if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
   if (/dessert|ice\s*cream|gelato/.test(p)) signals.push("dessert");
   if (/coffee|caf[eé]/.test(p)) signals.push("coffee");
-  // passive outdoor/nature enjoyment normalizes to "park" (mirrors the
-  // real parse prompt's normalization rule)
-  if (/bench|scenery|greenery|fresh air|people.watching|calm outside|nature/.test(p)) {
+  // "beach" is its own park-family category (the deliberately-empty pool
+  // above) — checked before the broader park rules so it isn't swallowed
+  if (/\bbeach(es)?\b/.test(p)) {
+    signals.push("beach");
+  } else if (/bench|scenery|greenery|fresh air|people.watching|calm outside|nature/.test(p)) {
+    // passive outdoor/nature enjoyment normalizes to "park" (mirrors the
+    // real parse prompt's normalization rule)
     signals.push("park");
   } else if (/walk|park|stroll|hike|picnic/.test(p)) {
     signals.push("park walk");

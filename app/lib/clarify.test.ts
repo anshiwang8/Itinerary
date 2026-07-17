@@ -1,7 +1,12 @@
 // Tests for the rule-based clarifying questions (no LLM involved).
 // Run with: npx tsx app/lib/clarify.test.ts
 import assert from "node:assert";
-import { categoriesForKindAnswer, clarifyQuestions, timeWindowForWhenAnswer } from "./clarify";
+import {
+  categoriesForKindAnswer,
+  clarifyQuestions,
+  kindQuestion,
+  timeWindowForWhenAnswer,
+} from "./clarify";
 import { ParsedPrompt } from "../api/places/search/filter";
 
 const base: ParsedPrompt = {
@@ -34,6 +39,17 @@ const cases: Array<[string, () => void]> = [
       assert.ok(ids(base).includes("kind"));
       // ...and it never displaces the existing questions
       assert.deepStrictEqual(ids({ ...base, category_signals: ["dinner"] }), ["when", "vibe"]);
+    },
+  ],
+  [
+    "kindQuestion() IS the kind question clarifyQuestions asks (one source — the time-gate reuses it)",
+    () => {
+      const asked = clarifyQuestions(base).find((q) => q.id === "kind");
+      assert.deepStrictEqual(asked, kindQuestion());
+      // every option round-trips through the answer mapping without error
+      for (const o of kindQuestion().options) {
+        assert.ok(Array.isArray(categoriesForKindAnswer(o)));
+      }
     },
   ],
   [

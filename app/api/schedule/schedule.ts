@@ -127,7 +127,17 @@ export function isPlausibleAt(
 
 export type StartResolution =
   | { ok: true; start: Date }
-  | { ok: false; reason: string };
+  | {
+      ok: false;
+      reason: string;
+      /** set ONLY on the inferred-time path (user typed NO time; our own
+       * guessed slot landed outside a known category band). The UI may
+       * offer an informed override there. NEVER set for explicit
+       * impossible requests ("brunch at 3am") — those stay hard fails. */
+      overridable?: boolean;
+      /** the banded category that blocked the inferred slot */
+      category?: string;
+    };
 
 export const IMPLAUSIBLE_TIME_MESSAGE =
   "Couldn't find a sensible time for this — add one, like “dinner at 7pm”.";
@@ -176,14 +186,16 @@ function implausibleExplicitReason(
 // hour / category default) landed outside a KNOWN category's band — e.g.
 // "sit in a park" at 10:54 PM resolves to 11 PM, past the park band's
 // 10 PM close. "Add a time" is misleading here: nothing they type fixes
-// tonight. Name the real obstacle and the realistic ways out. Returns
-// null when no category has a band (nothing specific to say → the caller
+// tonight. Name the real obstacle; the UI turns this into a CHOICE
+// ("still want it" override / "something else"), so the message carries
+// no trailing suggestion — the buttons are the suggestion. Returns null
+// when no category has a band (nothing specific to say → the caller
 // keeps the generic add-a-time message).
 function implausibleInferredReason(
   start: Date,
   categories: string[],
   timeZone: string = DEFAULT_ZONE
-): string | null {
+): { reason: string; category: string } | null {
   for (const c of categories) {
     const hit = PLAUSIBLE_BANDS.find(([p]) => p.test(c));
     if (!hit) continue;
@@ -192,9 +204,10 @@ function implausibleInferredReason(
     const h = hour + minute / 60;
     const beforeOpen = band.startHour <= band.endHour ? h < band.startHour : true;
     const window = `${c} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}`;
-    return beforeOpen
-      ? `It's ${clock12(start, timeZone)} — too early for ${c} (${window}). Try later today?`
-      : `It's ${clock12(start, timeZone)} — too late for ${c} today (${window}). Try tomorrow, or something else tonight?`;
+    const reason = beforeOpen
+      ? `It's ${clock12(start, timeZone)} — early for ${c} (${window}).`
+      : `It's ${clock12(start, timeZone)} — late for a typical ${c} visit (${window}).`;
+    return { reason, category: c };
   }
   return null;
 }
@@ -232,11 +245,14 @@ export function resolveStartTimeChecked(
     return { ok: false, reason: implausibleExplicitReason(start, categories, timeZone) };
   }
   // no stated time: if the category itself has a known window, say THAT
-  // (adding a time wouldn't help); otherwise fall back to add-a-time
-  return {
-    ok: false,
-    reason: implausibleInferredReason(start, categories, timeZone) ?? IMPLAUSIBLE_TIME_MESSAGE,
-  };
+  // (adding a time wouldn't help) and mark the failure OVERRIDABLE — the
+  // user never typed a time, so an informed "still want it" is legitimate.
+  // No banded category → the generic add-a-time message, not overridable.
+  const inferred = implausibleInferredReason(start, categories, timeZone);
+  if (inferred) {
+    return { ok: false, reason: inferred.reason, overridable: true, category: inferred.category };
+  }
+  return { ok: false, reason: IMPLAUSIBLE_TIME_MESSAGE };
 }
 
 /** Format an absolute instant as an ISO string in `timeZone` (default
