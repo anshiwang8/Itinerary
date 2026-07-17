@@ -7,6 +7,7 @@
 // pins the resolved time (deterministic filtering) and skips the clarify
 // step. See app/api/_mock/fixtures.ts (DUMPLING_CLOSED / DUMPLING_OPEN).
 import { test, expect, Page } from "@playwright/test";
+import { stripCard } from "./helpers";
 
 // plan the dumplings prompt and land on the recovery panel (no clarify,
 // since the prompt carries a time)
@@ -130,6 +131,88 @@ test.describe("@mock partial-failure recovery", () => {
     // the recovery panel is for PARTIAL failures only
     await expect(page.locator(".recover")).toHaveCount(0);
     await expect(page.locator(".lstrip")).toHaveCount(0);
+  });
+});
+
+// ── Weather-gate: a PARTIALLY weather-blocked plan gets a real choice ────
+// mockWeather rains (precip 80) at 3 PM local daily, so "… at 3pm" blocks
+// outdoor categories deterministically (today or rolled to tomorrow — both
+// inside the mock 48h horizon), while dinner survives (Noodle Letterpress
+// is open at 15:00). No clock freeze needed: the stated time makes server
+// and client agree. The ALL-blocked case stays on weatherBlockedReason —
+// pinned unchanged in failloud.spec.ts.
+test.describe("@mock weather-gate", () => {
+  async function planRainy(page: Page, prompt: string): Promise<void> {
+    await page.goto("/");
+    await page.locator(".prompt__input").fill(prompt);
+    await page.locator(".prompt__go").click();
+  }
+
+  test("weather-blocked category → gate with the REAL weather reason, no widen offer @mock", async ({ page }) => {
+    await planRainy(page, "dinner and a walk in the park at 3pm");
+    const gate = page.locator(".recover--gate");
+    await expect(gate).toBeVisible({ timeout: 30_000 });
+    // the actual weather reason, not the generic empty-pool copy
+    await expect(gate).toContainText(/Rain likely at 3pm/i);
+    await expect(gate).toContainText(/park walk might not be great right now/i);
+    await expect(gate.getByRole("button", { name: "Still want it" })).toBeVisible();
+    await expect(gate.getByRole("button", { name: "Something else" })).toBeVisible();
+    // the useless offer is gone: weather isn't a radius problem
+    await expect(page.locator(".recover__widen")).toHaveCount(0);
+    await expect(page.locator(".lstrip")).toHaveCount(0);
+  });
+
+  test("'Still want it' skips ONLY the weather gate and plans both stops @mock", async ({ page }) => {
+    await planRainy(page, "dinner and a walk in the park at 3pm");
+    await page.locator(".recover--gate").getByRole("button", { name: "Still want it" }).click();
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".lstrip__stop")).toHaveCount(2);
+    // the dinner pick proves the hours filter ran for real (Velvet Fig,
+    // 4.8 but closed at 3 PM, must lose to the open Noodle Letterpress)
+    await expect(stripCard(page, "Noodle Letterpress")).toBeVisible();
+    await expect(page.locator(".lstrip")).toContainText(/Fixture Park walk/);
+    // the stale "Skipped the park walk" weather note must be gone — the
+    // stop is planned now, not skipped
+    await expect(page.locator("main")).not.toContainText(/Skipped the park walk/i);
+  });
+
+  test("override still finds NOTHING → the EXISTING generic recovery, then replace recovers @mock", async ({ page }) => {
+    // "beach" is outdoor (gate fires in the rain) AND deliberately empty —
+    // ignoring weather can't conjure venues, so this lands in the normal
+    // empty-slot flow, never a third dead end
+    await planRainy(page, "dinner and the beach at 3pm");
+    const gate = page.locator(".recover--gate");
+    await expect(gate).toBeVisible({ timeout: 30_000 });
+    await expect(gate).toContainText(/beach might not be great right now/i);
+    await gate.getByRole("button", { name: "Still want it" }).click();
+
+    const recover = page.locator(".recover");
+    await expect(recover).toBeVisible({ timeout: 30_000 });
+    await expect(recover).toContainText(/Couldn't find any beach/i);
+    // replace the slot → a full two-stop plan
+    await page.locator(".recover__input").fill("dessert");
+    await page.locator(".recover__go").click();
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".lstrip__stop")).toHaveCount(2);
+    await expect(stripCard(page, "Sundown Scoops")).toBeVisible();
+  });
+
+  test("'Something else' → replace-the-slot rows, widen suppressed, skip still offered @mock", async ({ page }) => {
+    await planRainy(page, "dinner and a walk in the park at 3pm");
+    await page.locator(".recover--gate").getByRole("button", { name: "Something else" }).click();
+    const recover = page.locator(".recover");
+    await expect(recover).toBeVisible({ timeout: 30_000 });
+    // the weather reason travels onto the replace row; widen stays gone
+    await expect(recover).toContainText(/Rain likely at 3pm — pick something else for this stop/i);
+    await expect(page.locator(".recover__widen")).toHaveCount(0);
+    // dinner survived, so "Plan without it" is a real third option here
+    await expect(page.locator(".recover__skip")).toBeVisible();
+    // and replacing the slot completes the plan
+    await page.locator(".recover__input").fill("dessert");
+    await page.locator(".recover__go").click();
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".lstrip__stop")).toHaveCount(2);
+    await expect(stripCard(page, "Sundown Scoops")).toBeVisible();
   });
 });
 

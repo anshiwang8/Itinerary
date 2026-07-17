@@ -204,18 +204,25 @@ export default function Home() {
   const [clarifyVibe, setClarifyVibe] = useState("");
   const [clarifyKind, setClarifyKind] = useState("");
 
-  // The interactive-recovery panel — one component, two triggers:
+  // The interactive-recovery panel — one component, three triggers:
   //  - "empty": SOME (or, after an override, ALL) categories came back
-  //    empty → honest reason + widen / replace that slot.
+  //    empty → honest reason + widen / replace that slot. Rows flagged
+  //    noWiden suppress the widen offer (a weather problem isn't a radius
+  //    problem — widening can't fix rain).
   //  - "time-gate" (batch 4b): the user typed NO time and our own inferred
   //    slot landed outside a known category band → a real choice ("still
   //    want it" bypasses the gate; "something else" re-opens the kind
   //    picker) instead of a dead-end refusal string.
+  //  - "weather-gate": a category came back empty specifically because the
+  //    WEATHER blocked it while others survived → the honest reason plus
+  //    the same real choice ("still want it" retries that category with
+  //    ONLY the weather gate off; "something else" moves to replacing the
+  //    slot) — never the useless widen offer.
   const [recovery, setRecovery] = useState<
     | {
         mode: "empty";
         ctx: PlanCtx;
-        empties: { category: string; reason: string }[];
+        empties: { category: string; reason: string; noWiden?: boolean }[];
         replaceText: Record<string, string>;
         busy: boolean;
         note: string | null;
@@ -226,6 +233,15 @@ export default function Home() {
         parsed: any;
         reason: string;
         category: string;
+      }
+    | {
+        mode: "weather-gate";
+        ctx: PlanCtx;
+        blocks: { category: string; reason: string }[];
+        /** generically-empty categories waiting behind the gate — carried
+         * through so they get their normal recovery rows afterwards */
+        pendingEmpties: { category: string; reason: string }[];
+        busy: boolean;
       }
     | null
   >(null);
@@ -509,13 +525,33 @@ export default function Home() {
       // all-empty case above keeps its own noVenuesReason path.
       const emptyCats = partialEmptyCategories(sels);
       if (emptyCats.length > 0) {
+        // split WEATHER-blocked empties from genuinely-empty ones — they
+        // need different offers: widening can't fix rain, but an informed
+        // "still want it" (weather gate off, every other filter intact)
+        // genuinely can. Weather-blocked → the weather-gate panel first,
+        // carrying any generic empties behind it.
+        const wxByCat = new Map(wxBlocks.map((b) => [b.category, b.reason]));
+        const blocked = emptyCats.filter((c) => wxByCat.has(c));
+        const generic = emptyCats.filter((c) => !wxByCat.has(c));
+        const genericEmpties = generic.map((c) => ({
+          category: c,
+          reason: emptyCategoryReason(c, drops, parseData.location),
+        }));
+        if (blocked.length > 0) {
+          setRecovery({
+            mode: "weather-gate",
+            ctx,
+            blocks: blocked.map((c) => ({ category: c, reason: wxByCat.get(c)! })),
+            pendingEmpties: genericEmpties,
+            busy: false,
+          });
+          setLoadingText(null);
+          return;
+        }
         setRecovery({
           mode: "empty",
           ctx,
-          empties: emptyCats.map((c) => ({
-            category: c,
-            reason: emptyCategoryReason(c, drops, parseData.location),
-          })),
+          empties: genericEmpties,
           replaceText: {},
           busy: false,
           note: null,
@@ -582,6 +618,65 @@ export default function Home() {
     }
   }
 
+  // Search + select ONE category slot — the shared core under both the
+  // recovery panel's widen/replace and the weather-gate's override.
+  // ignoreWeather sends weather:null, which skips ONLY the weather gate
+  // (keep-on-missing) — hours, rating, price, business status all still
+  // run for real.
+  async function searchSlot(
+    ctx: PlanCtx,
+    searchCategory: string,
+    opts: { dropLocation?: boolean; ignoreWeather?: boolean }
+  ): Promise<{ sel?: Selection; pool: Place[]; drops: DropEntry[] }> {
+    const scopedParsed = {
+      ...ctx.parseData,
+      ...(opts.dropLocation ? { location: "" } : {}),
+    };
+    const placesRes = await fetch("/api/places/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        parsed: scopedParsed,
+        categoriesOverride: [searchCategory],
+        weather: opts.ignoreWeather ? null : ctx.weather,
+        timeZone: ctx.planZone,
+      }),
+    });
+    const placesData = await placesRes.json();
+    if (!placesRes.ok) throw new Error(placesData.error ?? `places failed (${placesRes.status})`);
+    const { _dropLog, _weatherBlocked, ...poolObj } = placesData;
+    void _weatherBlocked;
+    const pool: Place[] = (poolObj as Pools)[searchCategory] ?? [];
+    const drops: DropEntry[] = Array.isArray(_dropLog) ? _dropLog : [];
+
+    let sel: Selection | undefined;
+    if (pool.length > 0) {
+      const selRes = await fetch("/api/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parsed: scopedParsed, pools: { [searchCategory]: pool } }),
+      });
+      const selData = await selRes.json();
+      if (!selRes.ok) throw new Error(selData.error ?? `select failed (${selRes.status})`);
+      sel = (selData.selections as Selection[] | undefined)?.find(
+        (s) => s.category === searchCategory
+      );
+    }
+    return { sel, pool, drops };
+  }
+
+  /** Merge a resolved slot back into the plan context (prompt order is
+   *  restored later by orderByRequest via the slots map). */
+  function mergeSlot(ctx: PlanCtx, category: string, sel: Selection, pool: Place[]): PlanCtx {
+    const mergedSels = ctx.sels.map((s) => (s.category === category ? sel : s));
+    const mergedPools: Pools = { ...ctx.pools, [sel.category]: pool };
+    const mergedSlots =
+      sel.category === category
+        ? ctx.slots
+        : { ...ctx.slots, [sel.category]: ctx.slots[category] ?? category };
+    return { ...ctx, sels: mergedSels, pools: mergedPools, slots: mergedSlots };
+  }
+
   // Re-resolve ONE empty category — widen (drop the neighbourhood, search
   // city-wide) or replace (search a new category the user names) — leaving
   // every other stop untouched. Reuses the places route's categoriesOverride
@@ -596,53 +691,14 @@ export default function Home() {
     if (!searchCategory) return;
     setRecovery({ ...recovery, busy: true, note: null });
     try {
-      const scopedParsed = {
-        ...ctx.parseData,
-        ...(opts.dropLocation ? { location: "" } : {}),
-      };
-      const placesRes = await fetch("/api/places/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          parsed: scopedParsed,
-          categoriesOverride: [searchCategory],
-          weather: ctx.weather,
-          timeZone: ctx.planZone,
-        }),
+      const { sel: newSel, pool: newPool, drops: newDrops } = await searchSlot(ctx, searchCategory, {
+        dropLocation: opts.dropLocation,
       });
-      const placesData = await placesRes.json();
-      if (!placesRes.ok) throw new Error(placesData.error ?? `places failed (${placesRes.status})`);
-      const { _dropLog, _weatherBlocked, ...poolObj } = placesData;
-      void _weatherBlocked;
-      const newPool: Place[] = (poolObj as Pools)[searchCategory] ?? [];
-      const newDrops: DropEntry[] = Array.isArray(_dropLog) ? _dropLog : [];
-
-      let newSel: Selection | undefined;
-      if (newPool.length > 0) {
-        const selRes = await fetch("/api/select", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ parsed: scopedParsed, pools: { [searchCategory]: newPool } }),
-        });
-        const selData = await selRes.json();
-        if (!selRes.ok) throw new Error(selData.error ?? `select failed (${selRes.status})`);
-        newSel = (selData.selections as Selection[] | undefined)?.find(
-          (s) => s.category === searchCategory
-        );
-      }
 
       if (newSel && newSel.id !== null) {
         // resolved — swap the empty entry for the new pick (keeping order),
-        // add its pool, and drop it from the outstanding list. A replacement
-        // category records which requested slot it fills, so finishPipeline
-        // can restore the prompt's order.
-        const mergedSels = ctx.sels.map((s) => (s.category === category ? newSel! : s));
-        const mergedPools: Pools = { ...ctx.pools, [searchCategory]: newPool };
-        const mergedSlots =
-          searchCategory === category
-            ? ctx.slots
-            : { ...ctx.slots, [searchCategory]: ctx.slots[category] ?? category };
-        const newCtx: PlanCtx = { ...ctx, sels: mergedSels, pools: mergedPools, slots: mergedSlots };
+        // add its pool, and drop it from the outstanding list
+        const newCtx = mergeSlot(ctx, category, newSel, newPool);
         const remaining = recovery.empties.filter((e) => e.category !== category);
         if (remaining.length === 0) {
           setRecovery(null);
@@ -719,6 +775,87 @@ export default function Home() {
     setClarifyWhen(null);
     setClarifyTime("");
     setClarifyVibe("");
+  }
+
+  // ── weather-gate actions ──────────────────────────────────────────────
+  // "Still want it": retry the blocked category(ies) with ONLY the weather
+  // gate off (weather:null → the gate is skipped by keep-on-missing);
+  // hours, rating, price, business status all still apply. A pick merges
+  // into the plan; still-nothing becomes a normal empty slot and lands in
+  // the EXISTING generic recovery flow — never a third dead end.
+  async function overrideWeatherGate() {
+    if (recovery?.mode !== "weather-gate") return;
+    const gate = recovery;
+    setRecovery({ ...gate, busy: true });
+    setLoadingText("Checking anyway…");
+    try {
+      let ctx = gate.ctx;
+      const resolved = new Set<string>();
+      const stillEmpty: { category: string; reason: string; noWiden?: boolean }[] = [];
+      for (const b of gate.blocks) {
+        const { sel, pool, drops } = await searchSlot(ctx, b.category, { ignoreWeather: true });
+        if (sel && sel.id !== null) {
+          ctx = mergeSlot(ctx, b.category, sel, pool);
+          resolved.add(b.category);
+        } else {
+          // empty even with weather ignored — a real availability problem
+          // now, so the normal empty-slot reasons (and widen) apply
+          stillEmpty.push({
+            category: b.category,
+            reason: emptyCategoryReason(b.category, drops, ctx.parseData.location),
+          });
+        }
+      }
+      // a planned stop is no longer "skipped" — drop its stale weather note
+      // (unresolved/declined blocks keep theirs; those stay honestly skipped)
+      if (resolved.size > 0) {
+        setWeatherBlocks((prev) => prev.filter((b) => !resolved.has(b.category)));
+      }
+      const remaining = [...stillEmpty, ...gate.pendingEmpties];
+      if (remaining.length === 0) {
+        setRecovery(null);
+        await finishPipeline(ctx);
+      } else {
+        setRecovery({
+          mode: "empty",
+          ctx,
+          empties: remaining,
+          replaceText: {},
+          busy: false,
+          note: null,
+        });
+        setLoadingText(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setRecovery(null);
+      setLoadingText(null);
+    }
+  }
+
+  // "Something else": they don't want the weather-blocked thing — move to
+  // replacing that slot via the existing recovery rows. The widen offer is
+  // suppressed for these rows (rain isn't a radius problem); the replace
+  // input is the "different direction" affordance, and "Plan without it"
+  // stays available since other stops survived.
+  function weatherGateSomethingElse() {
+    if (recovery?.mode !== "weather-gate") return;
+    const gate = recovery;
+    setRecovery({
+      mode: "empty",
+      ctx: gate.ctx,
+      empties: [
+        ...gate.blocks.map((b) => ({
+          category: b.category,
+          reason: `${b.reason.charAt(0).toUpperCase()}${b.reason.slice(1)} — pick something else for this stop?`,
+          noWiden: true,
+        })),
+        ...gate.pendingEmpties,
+      ],
+      replaceText: {},
+      busy: false,
+      note: null,
+    });
   }
 
   async function storeItinerary(
@@ -1123,13 +1260,32 @@ export default function Home() {
           </div>
         </div>
       </div>
+    ) : recovery && recovery.mode === "weather-gate" ? (
+      <div className={"clarify recover recover--gate" + (itinerary ? " clarify--stage" : "")}>
+        {recovery.blocks.map((b) => (
+          <div key={b.category} className="clarify__q">
+            <div className="clarify__label recover__reason">
+              {b.reason.charAt(0).toUpperCase() + b.reason.slice(1)} — {b.category} might not be
+              great right now. Still want it, or something else?
+            </div>
+          </div>
+        ))}
+        <div className="clarify__chips">
+          <button className="chipbtn recover__override" disabled={recovery.busy} onClick={overrideWeatherGate}>
+            Still want it
+          </button>
+          <button className="chipbtn recover__else" disabled={recovery.busy} onClick={weatherGateSomethingElse}>
+            Something else
+          </button>
+        </div>
+      </div>
     ) : recovery && (
     <div className={"clarify recover" + (itinerary ? " clarify--stage" : "")}>
       {recovery.empties.map((e) => (
         <div key={e.category} className="clarify__q">
           <div className="clarify__label recover__reason">{e.reason}</div>
           <div className="clarify__chips">
-            {recoveryCanWiden && (
+            {recoveryCanWiden && !e.noWiden && (
               <button
                 className="chipbtn recover__widen"
                 disabled={recovery.busy}
