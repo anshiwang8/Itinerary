@@ -12,6 +12,18 @@ import { isMockMode, mockWeather } from "../_mock/fixtures";
 const FORECAST_URL = "https://weather.googleapis.com/v1/forecast/hours:lookup";
 const DEFAULT_LOC = { latitude: 43.6479, longitude: -79.4197 }; // Ossington
 
+// The parts of Google's forecast payload we actually read — same "declare
+// the shape you consume" pattern travel.ts uses for ComputeRoutesResponse,
+// replacing an `any` on the map callback (code-audit 2026-07-18 §4.1).
+// Every field is optional: this is an external payload, and the mapping
+// below already falls back to null for each one.
+interface RawForecastHour {
+  interval?: { startTime?: string };
+  temperature?: { degrees?: number };
+  precipitation?: { probability?: { percent?: number } };
+  weatherCondition?: { description?: { text?: string }; type?: string };
+}
+
 // A parameterless GET would otherwise be rendered statically at BUILD
 // time (stale forecast baked into the deploy). Force per-request
 // execution; the fetch below keeps its own 10-minute data cache.
@@ -61,8 +73,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const hours: WeatherHour[] = (data?.forecastHours ?? [])
-      .map((h: any): WeatherHour => ({
+    // An hour with no start time can't be matched to a plan instant, so it
+    // is dropped — the filter is a type GUARD, which is what makes the
+    // nullable hourISO safe. (Under the old `any` this mismatch with
+    // WeatherHour.hourISO: string was simply invisible.)
+    const hours: WeatherHour[] = ((data?.forecastHours ?? []) as RawForecastHour[])
+      .map((h) => ({
         hourISO: h?.interval?.startTime ?? null,
         tempC: h?.temperature?.degrees ?? null,
         precipProbability: h?.precipitation?.probability?.percent ?? null,
@@ -71,7 +87,7 @@ export async function GET(request: NextRequest) {
           h?.weatherCondition?.type ??
           null,
       }))
-      .filter((h: WeatherHour) => typeof h.hourISO === "string")
+      .filter((h): h is WeatherHour => typeof h.hourISO === "string")
       .slice(0, 24);
 
     return NextResponse.json(hours);

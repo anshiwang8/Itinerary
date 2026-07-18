@@ -33,7 +33,7 @@ import {
   timeWindowForWhenAnswer,
 } from "./lib/clarify";
 import type { Selection } from "./api/select/selectVenues";
-import type { DropEntry } from "./api/places/search/filter";
+import type { DropEntry, ParsedPrompt } from "./api/places/search/filter";
 import { isOpenAtInstant, type CurrentOpeningHours } from "./api/places/search/hours";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, { StripHome, StripStop } from "./ItineraryStrip";
@@ -67,8 +67,11 @@ interface WeatherHour {
 // captured so a partial-failure recovery can pause and resume without
 // re-deriving geocode/zone/weather/pools
 interface PlanCtx {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  parseData: any;
+  /** the parse, plus the two fields the APP injects after it (city, home)
+   * — both already optional on ParsedPrompt. This object is mutated in
+   * place and threaded through the whole client pipeline, so it was the
+   * single most-travelled untyped value in the app (code-audit §4.2). */
+  parseData: ParsedPrompt;
   planZone: string;
   hp: { label: string; location: { latitude: number; longitude: number } };
   weather: WeatherHour[] | null;
@@ -185,7 +188,7 @@ export default function Home() {
   // the plan's resolved IANA zone — all scheduling + labels use it
   const [planZone, setPlanZone] = useState("America/Toronto");
   const [pools, setPools] = useState<Pools>({});
-  const [parsedObj, setParsedObj] = useState<Record<string, unknown> | null>(null);
+  const [parsedObj, setParsedObj] = useState<ParsedPrompt | null>(null);
   const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
   const [travelLegs, setTravelLegs] = useState<TravelLeg[]>([]);
   const [homeLeg, setHomeLeg] = useState<TravelLeg | null>(null);
@@ -222,7 +225,7 @@ export default function Home() {
   // lightweight clarifying questions (rule-based, pre-search)
   const [clarify, setClarify] = useState<{
     questions: ClarifyQuestion[];
-    parsed: Record<string, unknown>;
+    parsed: ParsedPrompt;
   } | null>(null);
   const [clarifyWhen, setClarifyWhen] = useState<string | null>(null);
   const [clarifyTime, setClarifyTime] = useState("");
@@ -254,8 +257,7 @@ export default function Home() {
       }
     | {
         mode: "time-gate";
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        parsed: any;
+        parsed: ParsedPrompt;
         reason: string;
         category: string;
       }
@@ -339,7 +341,7 @@ export default function Home() {
   // clarify answered or skipped → resume the pipeline with final parse
   async function submitClarify(skip: boolean) {
     if (!clarify) return;
-    const updated: Record<string, unknown> = { ...clarify.parsed };
+    const updated: ParsedPrompt = { ...clarify.parsed };
     if (!skip) {
       const whenAns = clarifyWhen === "pick a time" ? clarifyTime.trim() : clarifyWhen ?? "";
       if (whenAns) updated.time_window = timeWindowForWhenAnswer(whenAns);
@@ -360,8 +362,10 @@ export default function Home() {
   // opts.overrideTimeGate: the user pressed "still want it" on the
   // time-gate panel — an explicit, informed confirmation — so the
   // inferred-time band check is bypassed for THIS run only.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async function continuePipeline(parseData: any, opts: { overrideTimeGate?: boolean } = {}) {
+  async function continuePipeline(
+    parseData: ParsedPrompt,
+    opts: { overrideTimeGate?: boolean } = {}
+  ) {
     const fail = (reason: string) => {
       setError(reason);
       setLoadingText(null);
@@ -1033,7 +1037,7 @@ export default function Home() {
     sched: ScheduledStop[],
     legs: TravelLeg[],
     hl: TravelLeg | null,
-    parsed: Record<string, unknown>,
+    parsed: ParsedPrompt,
     poolsIn: Pools,
     simValue: string,
     home?: { label: string; location: { latitude: number; longitude: number } } | null,
