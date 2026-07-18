@@ -6,7 +6,8 @@
 // floor_time = max(now, end of the currently active stop); locked,
 // active, and completed stops are never touched.
 import { Itinerary, ItineraryStop, withStatuses, floorTime } from "./store";
-import { filterPools, ParsedPrompt, Place } from "../places/search/filter";
+import { filterPools, ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
+import { fetchWeatherHours } from "../weather/fetchWeather";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
 import { selectVenues as realSelectVenues, Selection } from "../select/selectVenues";
 import { buildSchedule } from "../schedule/schedule";
@@ -65,6 +66,9 @@ export interface RerouteDeps {
     departureTime: string | undefined,
     excludeTransit: boolean
   ) => Promise<TravelLeg>;
+  /** hourly forecast for the plan's origin — the replan consults the
+   *  weather gate like the initial plan does (§7.6). Null = keep-on-missing. */
+  getWeather: (lat: number, lng: number) => Promise<WeatherHour[] | null>;
 }
 
 function realDeps(): RerouteDeps {
@@ -84,6 +88,7 @@ function realDeps(): RerouteDeps {
         departureTime,
         excludeTransit
       ),
+    getWeather: (lat, lng) => fetchWeatherHours(process.env.GOOGLE_WEATHER_API_KEY, lat, lng),
   };
 }
 
@@ -166,9 +171,11 @@ export async function rerouteItinerary(
   const categories = affectedIdx.map((i) => itinerary.stops[i].category);
 
   const rawPools = await deps.searchPools(parsed, categories);
-  // TODO: thread live weather through the reroute filter (null skips
-  // the weather gate, matching the keep-on-missing policy).
-  const { pools } = filterPools(rawPools, parsed, null, now, floor, tz);
+  // the replan consults the forecast like the initial plan does (§7.6);
+  // no coords or a failed lookup → null → gate skipped (keep-on-missing)
+  const origin = itinerary.home?.location ?? null;
+  const weather = origin ? await deps.getWeather(origin.latitude, origin.longitude) : null;
+  const { pools } = filterPools(rawPools, parsed, weather, now, floor, tz);
 
   // Venues already used by kept stops must not be re-proposed.
   const keptIds = new Set(

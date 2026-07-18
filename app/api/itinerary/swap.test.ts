@@ -13,7 +13,7 @@ import {
   TimeShift,
   DurationShift,
 } from "./swap";
-import { Place } from "../places/search/filter";
+import { Place, WeatherHour } from "../places/search/filter";
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
 
@@ -92,10 +92,14 @@ interface Opts {
   unusableIds?: string[];
   onSearch?: (parsed: { constraints: string[]; category_signals: string[]; budget: string | null }) => void;
   onSelect?: (pools: Record<string, Place[]>) => void;
+  /** forecast handed to the swap engine (§7.6); default null = no gate */
+  weather?: WeatherHour[] | null;
 }
 
 function mkDeps(opts: Opts = {}): SwapDeps {
   return {
+    // calm by default; opts.weather drives the §7.6 gate case
+    getWeather: async () => opts.weather ?? null,
     interpret: async (parsed, category, _currentStartISO, refinement) => {
       const localDuration = parseDurationExpr(refinement);
       const localTime = parseTimeExpr(refinement);
@@ -982,6 +986,69 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(it.stops[2].start_time, dessertStart);
       assert.strictEqual(it.stops[2].end_time, dessertEnd);
       assert.deepStrictEqual(res.downstreamShifted, []);
+    },
+  ],
+  [
+    "§7.3: a bare hour keeps AM when the stop's category band wants it",
+    async () => {
+      // no category → the outing-planner PM default, unchanged
+      assert.deepStrictEqual(parseTimeExpr("make it 10"), { mode: "absolute", targetTime: "22:00" });
+      // brunch runs 8–15: 10 AM fits, 10 PM doesn't → keep AM. Pre-fix this
+      // became 22:00 and was refused with "A 10:00 PM brunch won't work",
+      // which is a confusing answer to a request that meant 10 AM.
+      assert.deepStrictEqual(parseTimeExpr("make it 10", "brunch"), {
+        mode: "absolute",
+        targetTime: "10:00",
+      });
+      assert.deepStrictEqual(parseTimeExpr("at 9", "breakfast"), {
+        mode: "absolute",
+        targetTime: "09:00",
+      });
+      // dinner runs 11–23: BOTH 7 AM and 7 PM are outside/inside such that
+      // the evening reading stands — the PM default must not be weakened
+      assert.deepStrictEqual(parseTimeExpr("at 7", "dinner"), {
+        mode: "absolute",
+        targetTime: "19:00",
+      });
+      assert.deepStrictEqual(parseTimeExpr("make it 8", "bar"), {
+        mode: "absolute",
+        targetTime: "20:00",
+      });
+      // an explicit meridiem always wins over any band reasoning
+      assert.deepStrictEqual(parseTimeExpr("make it 10pm", "brunch"), {
+        mode: "absolute",
+        targetTime: "22:00",
+      });
+      assert.deepStrictEqual(parseTimeExpr("make it 10am", "dinner"), {
+        mode: "absolute",
+        targetTime: "10:00",
+      });
+    },
+  ],
+  [
+    "§7.6: a swap consults the forecast — an outdoor stop isn't moved into the rain",
+    async () => {
+      // rain over the whole window; the park pool is weather-blocked, so
+      // the swap refuses honestly instead of planning a soggy stop
+      const rain: WeatherHour[] = Array.from({ length: 24 }, (_, i) => ({
+        hourISO: new Date(new Date(T(12, 0)).getTime() + i * 3_600_000).toISOString(),
+        tempC: 14,
+        precipProbability: 90,
+        condition: "Rain",
+      }));
+      const it = mkItinerary();
+      it.home = { label: "Start", location: { latitude: 43.65, longitude: -79.4 } };
+      it.stops[1].category = "park walk"; // an outdoor stop to swap
+      const res = await swapStop(it, 1, "somewhere else outdoors", new Date(T(18, 0)),
+        mkDeps({ weather: rain, pool: [mkVenue("park_new")] }));
+      assert.strictEqual(res.swapped, false, "rain must block the outdoor pool");
+      // and with calm weather the same swap goes through
+      const it2 = mkItinerary();
+      it2.home = { label: "Start", location: { latitude: 43.65, longitude: -79.4 } };
+      it2.stops[1].category = "park walk";
+      const ok = await swapStop(it2, 1, "somewhere else outdoors", new Date(T(18, 0)),
+        mkDeps({ weather: null, pool: [mkVenue("park_new")] }));
+      assert.ok(ok.swapped, "calm weather must not block it");
     },
   ],
   // ── missing stored parse (code-audit 2026-07-18 §3.1) ──

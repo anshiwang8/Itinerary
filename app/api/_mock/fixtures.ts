@@ -538,6 +538,7 @@ export function mockSwapDeps(
     getSingleLeg: async (origin, destination, fromIndex, _departureTime, excludeTransit) =>
       mockLeg(fromIndex, origin, destination, excludeTransit),
     isUsableAt: mockIsUsableAt,
+    getWeather: async () => mockWeather(),
   };
 }
 
@@ -547,5 +548,6 @@ export function mockRerouteDeps(): RerouteDeps {
     selectVenues: async (parsed, pools, slots) => mockSelect(parsed, pools, slots),
     getSingleLeg: async (origin, destination, fromIndex, _departureTime, excludeTransit) =>
       mockLeg(fromIndex, origin, destination, excludeTransit),
+    getWeather: async () => mockWeather(),
   };
 }

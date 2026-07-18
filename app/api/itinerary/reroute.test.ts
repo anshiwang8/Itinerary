@@ -78,6 +78,8 @@ interface LegCall { fromIndex: number; excludeTransit: boolean }
 
 function mkDeps(legCalls: LegCall[]): RerouteDeps {
   return {
+    // calm by default — weather-gate behaviour has its own case
+    getWeather: async () => null,
     searchPools: async (_parsed, categories) =>
       Object.fromEntries(
         categories.map((c, i) => [c, [mkVenue(`${c}_new`, 43.651 + i * 0.002)]])
@@ -357,6 +359,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       const now = new Date(T(18, 0)); // nothing started
       // two distinct candidates in the shared bar pool
       const deps: RerouteDeps = {
+        getWeather: async () => null,
         searchPools: async () => ({ bar: [mkVenue("bar_A", 43.6515), mkVenue("bar_B", 43.6525)] }),
         selectVenues: async (_parsed, pools, slots) => {
           // mirrors the real slot contract: one entry per requested slot,

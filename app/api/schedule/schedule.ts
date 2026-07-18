@@ -99,11 +99,17 @@ export const DEFAULT_PLAUSIBLE_BAND: PlausibleBand = { startHour: 8, endHour: 1 
 // The band check reads the WALL-CLOCK hour in the plan's zone — a 7 PM
 // Vancouver dinner must be judged against 19:00 Pacific, not the server's
 // or Toronto's hour for that same instant.
-function inBand(d: Date, band: PlausibleBand, timeZone: string = DEFAULT_ZONE): boolean {
-  const { hour, minute } = wallClockParts(d, timeZone);
-  const h = hour + minute / 60;
+/** Is this wall-clock hour inside the band? Pure — no date, no zone, so
+ *  callers reasoning about a bare hour (the swap engine's meridiem guess)
+ *  can share the same membership rule. */
+export function hourInBand(h: number, band: PlausibleBand): boolean {
   if (band.startHour <= band.endHour) return h >= band.startHour && h < band.endHour;
   return h >= band.startHour || h < band.endHour; // wraps midnight
+}
+
+function inBand(d: Date, band: PlausibleBand, timeZone: string = DEFAULT_ZONE): boolean {
+  const { hour, minute } = wallClockParts(d, timeZone);
+  return hourInBand(hour + minute / 60, band);
 }
 
 /** The plausible-hours band for a set of categories (first match wins). */

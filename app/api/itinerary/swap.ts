@@ -16,11 +16,12 @@
 // selectVenues / schedule serialization), share floor_time with reroute,
 // never fork.
 import { Itinerary, ItineraryStop, withStatuses, floorTime } from "./store";
-import { filterPools, ParsedPrompt, Place } from "../places/search/filter";
+import { filterPools, ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
+import { fetchWeatherHours } from "../weather/fetchWeather";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
 import { selectVenues as realSelectVenues, Selection } from "../select/selectVenues";
 import { getDuration } from "../schedule/durations";
-import { toZonedISO, isPlausibleAt } from "../schedule/schedule";
+import { toZonedISO, isPlausibleAt, bandForCategories, hourInBand } from "../schedule/schedule";
 import { DEFAULT_ZONE, instantAtWallClock, wallClockParts } from "../../lib/zoneTime";
 import { isOpenAtInstant } from "../places/search/hours";
 import {
@@ -129,6 +130,9 @@ export interface SwapDeps {
     category: string,
     timeZone: string
   ) => boolean;
+  /** hourly forecast for the plan's origin — a swap consults the weather
+   *  gate like the initial plan does (§7.6). Null = keep-on-missing. */
+  getWeather: (lat: number, lng: number) => Promise<WeatherHour[] | null>;
 }
 
 const REFINE_SYSTEM = `You adjust ONE stop of an existing day plan from a short complaint. You get the stop's current settings (category, aesthetic, budget, constraints) and its current start time, plus the complaint. Classify the user's INTENT and return the parameters to act on it.
@@ -153,8 +157,14 @@ Respond with ONLY this JSON, no prose:
 
 // Deterministic fallback for time expressions, so common relative phrases
 // resolve even if the model whiffs. Earlier is negative, later positive.
-export function parseTimeExpr(text: string): TimeShift | null {
+export function parseTimeExpr(text: string, category?: string): TimeShift | null {
   const s = text.toLowerCase();
+  // The PM assumption below is right for most stops but was applied blind:
+  // on a BRUNCH stop "make it 10" became 22:00, which the plausible-band
+  // guard then refused with "A 10:00 PM brunch won't work" — a confusing
+  // answer to a request that plainly meant 10 AM. When the stop's category
+  // has a known band, prefer the reading that fits it (§7.3).
+  const band = category ? bandForCategories([category]) : null;
 
   // hour/minute (+ optional meridiem) → "HH:MM"; null when out of range so
   // callers can fall through (e.g. "by 30 minutes" is relative, not 30:00)
@@ -163,7 +173,13 @@ export function parseTimeExpr(text: string): TimeShift | null {
     else if (ap === "am" && h === 12) h = 0; // 12am → midnight
     // no meridiem: this is an outing planner — a small hour means
     // afternoon/evening ("3:30" is 15:30, "at 7" is 19:00); 12 stays noon
-    else if (!ap && h >= 1 && h <= 11) h += 12;
+    else if (!ap && h >= 1 && h <= 11) {
+      // keep AM only when the category's band actually wants it and the
+      // PM reading is outside — otherwise the evening default stands
+      const amFits = band ? hourInBand(h, band) : false;
+      const pmFits = band ? hourInBand(h + 12, band) : true;
+      if (!(amFits && !pmFits)) h += 12;
+    }
     if (h < 0 || h > 24 || m < 0 || m >= 60) return null;
     return {
       mode: "absolute",
@@ -290,7 +306,7 @@ export async function interpretRefinement(
   // Trust the local parsers as the floor — the model can only refine
   // arithmetic requests, never lose them. Duration wins over time.
   const localDuration = parseDurationExpr(refinement);
-  const localTime = parseTimeExpr(refinement);
+  const localTime = parseTimeExpr(refinement, category);
   const localFallback = (): SwapInterpretation =>
     localDuration && localTime
       ? { ...fallback, intent: "time", time: localTime, duration: localDuration }
@@ -413,6 +429,7 @@ function realDeps(): SwapDeps {
     getSingleLeg: (origin, destination, fromIndex, departureTime, excludeTransit) =>
       realGetSingleLeg(process.env.GOOGLE_ROUTES_API_KEY ?? "", origin, destination, fromIndex, departureTime, excludeTransit),
     isUsableAt: usableByHours,
+    getWeather: (lat, lng) => fetchWeatherHours(process.env.GOOGLE_WEATHER_API_KEY, lat, lng),
   };
 }
 
@@ -445,6 +462,13 @@ function placeOf(stop: ItineraryStop): Place {
     rating: stop.rating,
     location: stop.location,
   };
+}
+
+/** Forecast for the plan's origin, or null when there's nothing to ask
+ *  about (pre-multi-city plans carry no home) — keep-on-missing. */
+async function weatherFor(itinerary: Itinerary, deps: SwapDeps): Promise<WeatherHour[] | null> {
+  const origin = itinerary.home?.location;
+  return origin ? deps.getWeather(origin.latitude, origin.longitude) : null;
 }
 
 function snap(s: ItineraryStop): Snap {
@@ -638,7 +662,9 @@ async function venueSwap(
 
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const rawPools = await deps.searchPools(searchParsed, [poolKey]);
-  const { pools: filtered } = filterPools(rawPools, judgeParsed, null, now, new Date(target.start_time!), tz);
+  // a swap must not move an outdoor stop into the rain either (§7.6)
+  const wx = await weatherFor(itinerary, deps);
+  const { pools: filtered } = filterPools(rawPools, judgeParsed, wx, now, new Date(target.start_time!), tz);
 
   // never re-pick the rejected venue, nor anything already used elsewhere
   const excluded = new Set<string>(
@@ -752,7 +778,7 @@ async function timeChange(
   let anchorPick: Place | undefined;
   let anchorSel: Selection | undefined;
   if (!deps.isUsableAt(placeOf(target), nd, category, tz)) {
-    const repl = await findReplacement(category, nd, used, base, now, deps, tz);
+    const repl = await findReplacement(category, nd, used, base, now, deps, tz, await weatherFor(itinerary, deps));
     if (!repl) {
       return { swapped: false, reason: `Nothing similar to ${target.name} is open around ${clockLabel(nd, tz)}.` };
     }
@@ -882,7 +908,7 @@ async function resettleTail(
 
     // try the existing venue; adapt if it isn't usable by the new arrival
     if (!deps.isUsableAt(placeOf(stop), new Date(startMs), stop.category, tz)) {
-      const repl = await findReplacement(stop.category, new Date(startMs), used, base, now, deps, tz);
+      const repl = await findReplacement(stop.category, new Date(startMs), used, base, now, deps, tz, await weatherFor(itinerary, deps));
       if (!repl) {
         return { ok: false, reason: `Nothing similar to ${stop.name} is open by ${clockLabel(new Date(startMs), tz)}.` };
       }
@@ -930,11 +956,12 @@ async function findReplacement(
   base: ParsedPrompt,
   now: Date,
   deps: SwapDeps,
-  timeZone: string = DEFAULT_ZONE
+  timeZone: string = DEFAULT_ZONE,
+  weather: WeatherHour[] | null = null
 ): Promise<{ sel: Selection; pick: Place } | null> {
   const parsed = scoped(base, {}, category);
   const rawPools = await deps.searchPools(parsed, [category]);
-  const { pools } = filterPools(rawPools, parsed, null, now, when, timeZone);
+  const { pools } = filterPools(rawPools, parsed, weather, now, when, timeZone);
   const candidates = (pools[category] ?? []).filter(
     (p) => !excluded.has(p.id) && deps.isUsableAt(p, when, category, timeZone)
   );
