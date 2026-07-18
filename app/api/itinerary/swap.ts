@@ -1085,7 +1085,12 @@ async function finalize(
     if (deltaMs > 0) {
       for (let k = tp + 1; k < timedIdx.length; k++) {
         const s = itinerary.stops[timedIdx[k]];
-        if (s.locked || !s.start_time || new Date(s.start_time).getTime() <= floor.getTime()) continue;
+        // STOP at the first locked/past stop, don't skip over it. `continue`
+        // kept shifting the stops BEYOND a locked one, so an earlier stop
+        // could be pushed into the locked stop's slot — the ratchet held,
+        // but the chain stopped being consistent. resettleTail has always
+        // used break for this same condition (code-audit §2.3).
+        if (s.locked || !s.start_time || new Date(s.start_time).getTime() <= floor.getTime()) break;
         s.start_time = toZonedISO(new Date(new Date(s.start_time).getTime() + deltaMs), tz);
         if (s.end_time) s.end_time = toZonedISO(new Date(new Date(s.end_time).getTime() + deltaMs), tz);
         downstreamShifted.push(timedIdx[k]);

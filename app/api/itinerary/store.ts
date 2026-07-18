@@ -150,6 +150,14 @@ export function deriveStopStatus(
   return "completed";
 }
 
+/**
+ * Build an itinerary object. PURE — it does not persist. Callers must
+ * follow with `saveItinerary`, which is the only write path and the only
+ * one that enforces the serverless persistence check. This used to write
+ * straight into the in-memory Map, which made it the single store entry
+ * point that "succeeded" on Vercel without KV configured, and left a
+ * shadow copy that is never read once KV is on (code-audit §2.1).
+ */
 export function createItinerary(
   stops: ScheduledStop[],
   legs: TravelLeg[],
@@ -174,12 +182,7 @@ export function createItinerary(
     ...(timeZone ? { timeZone } : {}),
     ...(parsed ? { parsed } : {}),
   };
-  store.set(itinerary.id, itinerary);
   return itinerary;
-}
-
-export function getItinerary(id: string): Itinerary | undefined {
-  return store.get(id);
 }
 
 /**
@@ -201,17 +204,45 @@ export function floorTime(itinerary: Itinerary, now: Date): Date {
  * stop has been active (or is already past), it stays locked even if
  * the dev time control rewinds t.
  */
-export function withStatuses(itinerary: Itinerary, t: Date): Itinerary {
+export function withStatuses(
+  itinerary: Itinerary,
+  t: Date,
+  /** optional out-param: set `changed` when anything actually moved, so a
+   *  read-only GET doesn't have to write back (code-audit §2.4) */
+  out?: { changed: boolean }
+): Itinerary {
+  let changed = false;
   for (const stop of itinerary.stops) {
     if (stop.status === "skipped") continue;
     const status = deriveStopStatus(stop.start_time, stop.end_time, t);
+    if (stop.status !== status) changed = true;
     stop.status = status;
-    if (status === "active" || status === "completed") stop.locked = true;
+    if ((status === "active" || status === "completed") && !stop.locked) {
+      stop.locked = true;
+      changed = true;
+    }
   }
-  itinerary.status = itinerary.stops.every(
-    (s) => s.status === "completed" || s.status === "skipped"
-  )
-    ? "completed"
-    : "active";
+  const itineraryStatus = nextItineraryStatus(itinerary, t);
+  if (itinerary.status !== itineraryStatus) changed = true;
+  itinerary.status = itineraryStatus;
+  if (out) out.changed = changed;
   return itinerary;
+}
+
+/**
+ * "planning" until the outing actually starts, then active, then completed.
+ * The pre-start state used to be unreachable: every GET overwrote the
+ * freshly-created "planning" with "active", so a plan booked for tomorrow
+ * evening reported itself as underway all day today (code-audit §7.4).
+ */
+function nextItineraryStatus(itinerary: Itinerary, t: Date): ItineraryStatus {
+  const live = itinerary.stops.filter((s) => s.status !== "skipped");
+  if (live.length > 0 && live.every((s) => s.status === "completed")) return "completed";
+  if (itinerary.stops.every((s) => s.status === "completed" || s.status === "skipped")) {
+    return "completed";
+  }
+  const started = itinerary.stops.some(
+    (s) => s.status === "active" || s.status === "completed"
+  );
+  return started ? "active" : "planning";
 }

@@ -953,6 +953,37 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(it.stops[1].end_time, T(22, 10));
     },
   ],
+  [
+    "§2.3: a venue swap stops reflowing AT a locked stop, never shifts past it",
+    async () => {
+      // Contrived but reachable via dev time-travel + a prior time swap: a
+      // LOCKED stop sits between the swapped stop and a later one. finalize
+      // used `continue`, so it skipped the locked stop and kept shifting the
+      // ones beyond it — the ratchet held, but the chain stopped being
+      // consistent. resettleTail has always used `break` here.
+      const it = mkItinerary();
+      const now = new Date(T(18, 0));
+      // hand-lock the MIDDLE stop while the first is still upcoming
+      withStatuses(it, now);
+      it.stops[1].locked = true;
+      const dessertStart = it.stops[2].start_time;
+      const dessertEnd = it.stops[2].end_time;
+      // swap stop 0 for a LONGER kind of stop (museum = 120 vs dinner's
+      // 105) so the tail genuinely overflows and the reflow loop runs
+      const res = await swapStop(it, 0, "a museum instead", now,
+        mkDeps({ path: "research", newCategory: "museum", legMin: 10 }));
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      // the locked stop is untouched (the ratchet, as always)...
+      assert.strictEqual(it.stops[1].id, "b1");
+      assert.strictEqual(it.stops[1].start_time, T(21, 0));
+      // ...and so is everything BEYOND it — the reflow stopped at the lock
+      // rather than stepping over it
+      assert.strictEqual(it.stops[2].start_time, dessertStart);
+      assert.strictEqual(it.stops[2].end_time, dessertEnd);
+      assert.deepStrictEqual(res.downstreamShifted, []);
+    },
+  ],
   // ── missing stored parse (code-audit 2026-07-18 §3.1) ──
   // Both engines used to fall back to a hardcoded `location: "Ossington"`
   // with no city, so a re-search for a non-Toronto plan quietly went

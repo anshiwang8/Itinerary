@@ -29,10 +29,15 @@ export async function GET(
         { status: 404 }
       );
     }
-    const result = withStatuses(itinerary, t);
-    // the locked ratchet mutates — persist it or backwards time travel
-    // on another instance could unlock a stop
-    await saveItinerary(result);
+    // the locked ratchet mutates — persist it, or backwards time travel on
+    // another instance could unlock a stop. But ONLY when something
+    // actually moved: this route is polled (the dev time picker fires a GET
+    // per change), and an unconditional write was a Redis round trip per
+    // read that also refreshed the TTL, so an actively-viewed plan never
+    // expired (code-audit 2026-07-18 §2.4).
+    const touched = { changed: false };
+    const result = withStatuses(itinerary, t, touched);
+    if (touched.changed) await saveItinerary(result);
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json(

@@ -82,14 +82,54 @@ const cases: Array<[string, () => void]> = [
         []
       );
       assert.strictEqual(it.stops[1].status, "skipped");
-      // dinner still upcoming → itinerary active (skipped doesn't block)
+      // dinner still upcoming → the outing hasn't STARTED yet (§7.4: this
+      // used to report "active" before anything had happened); a skipped
+      // stop must not make it look started either
       withStatuses(it, at("2026-07-03T18:00:00-04:00"));
-      assert.strictEqual(it.status, "active");
+      assert.strictEqual(it.status, "planning");
       // dinner completed → itinerary completed even though park never ran
       withStatuses(it, at("2026-07-03T23:00:00-04:00"));
       assert.strictEqual(it.status, "completed");
       assert.strictEqual(it.stops[1].status, "skipped");
       assert.strictEqual(it.stops[1].locked, false); // skipped never locks
+    },
+  ],
+  [
+    "§2.4: withStatuses reports whether anything actually changed",
+    () => {
+      const it = createItinerary(
+        [mkStop("dinner", S1.start, S1.end), mkStop("bar", S2.start, S2.end)],
+        []
+      );
+      // reading a not-yet-started plan changes NOTHING: the stops are
+      // already "upcoming" and the outing is already "planning". This is
+      // the case that mattered — a plan booked for tomorrow can be polled
+      // all day without a single store write or TTL refresh.
+      const a = { changed: false };
+      withStatuses(it, at("2026-07-03T18:00:00-04:00"), a);
+      assert.strictEqual(a.changed, false, "a pre-start read must not write");
+      const b = { changed: false };
+      withStatuses(it, at("2026-07-03T18:00:00-04:00"), b);
+      assert.strictEqual(b.changed, false, "a no-op read must not report a change");
+      // time moves into the first stop: status + lock ratchet → changed
+      const c = { changed: false };
+      withStatuses(it, at("2026-07-03T19:30:00-04:00"), c);
+      assert.strictEqual(c.changed, true);
+      assert.strictEqual(it.status, "active");
+      // and re-reading that same instant is a no-op again
+      const d = { changed: false };
+      withStatuses(it, at("2026-07-03T19:30:00-04:00"), d);
+      assert.strictEqual(d.changed, false);
+    },
+  ],
+  [
+    "§2.1: createItinerary is a pure factory — it does not persist",
+    async () => {
+      const { loadItinerary } = await import("./store");
+      const it = createItinerary([mkStop("dinner", S1.start, S1.end)], []);
+      // building a plan must not put it in the store; saveItinerary is the
+      // one write path (and the only one that checks serverless persistence)
+      assert.strictEqual(await loadItinerary(it.id), undefined);
     },
   ],
   [
@@ -112,11 +152,13 @@ const cases: Array<[string, () => void]> = [
         };
       };
 
-      // 1. before stop 1
+      // 1. before stop 1 — nothing has started, so the outing is still
+      // "planning" (§7.4: the first GET used to overwrite that with
+      // "active", making the state unreachable for a plan booked ahead)
       assert.deepStrictEqual(snapshot("2026-07-03T18:30:00-04:00"), {
         statuses: ["upcoming", "upcoming", "upcoming"],
         locked: [false, false, false],
-        itinerary: "active",
+        itinerary: "planning",
       });
       // 2. during stop 1
       assert.deepStrictEqual(snapshot("2026-07-03T19:30:00-04:00"), {
