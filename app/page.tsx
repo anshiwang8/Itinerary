@@ -20,6 +20,7 @@ import {
   orderByRequest,
   partialEmptySelections,
   narrowedSlotReason,
+  closedOnArrivalReason,
   unmetConstraintReason,
   weatherBlockedReason,
   widenOfferLabel,
@@ -33,6 +34,7 @@ import {
 } from "./lib/clarify";
 import type { Selection } from "./api/select/selectVenues";
 import type { DropEntry } from "./api/places/search/filter";
+import { isOpenAtInstant, type CurrentOpeningHours } from "./api/places/search/hours";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, { StripHome, StripStop } from "./ItineraryStrip";
 
@@ -42,6 +44,11 @@ interface Place {
   location?: { latitude: number; longitude: number };
   rating?: number;
   priceLevel?: string;
+  /** opening hours as Places returns them — needed for the post-schedule
+   * arrival re-check (§1.4), which asks "is this open when I ARRIVE?" */
+  currentOpeningHours?: CurrentOpeningHours;
+  /** one-line blurb; carried so an adapted replacement keeps its card text */
+  editorialSummary?: { text: string };
 }
 type Pools = Record<string, Place[]>;
 interface WeatherBlock {
@@ -65,6 +72,10 @@ interface PlanCtx {
   planZone: string;
   hp: { label: string; location: { latitude: number; longitude: number } };
   weather: WeatherHour[] | null;
+  /** the plan's ONE resolved start instant. Re-searches for a single slot
+   * must be filtered against THIS, not against a time re-resolved from
+   * that slot's category alone (§1.7). */
+  startInstant: Date;
   pools: Pools;
   sels: Selection[];
   drops: DropEntry[];
@@ -494,7 +505,7 @@ export default function Home() {
           }));
           setRecovery({
             mode: "empty",
-            ctx: { parseData, planZone, hp, weather, pools: categories as Pools, sels: emptySels, drops, slots: {} },
+            ctx: { parseData, planZone, hp, weather, startInstant, pools: categories as Pools, sels: emptySels, drops, slots: {} },
             empties: poolEntries.map(([c]) => ({
               category: c,
               reason: emptyCategoryReason(c, drops, parseData.location),
@@ -539,6 +550,7 @@ export default function Home() {
         planZone,
         hp,
         weather,
+        startInstant,
         pools: categories as Pools,
         sels,
         drops,
@@ -601,44 +613,164 @@ export default function Home() {
   // Build the route + schedule from finalized selections, then store the
   // itinerary. Shared by the normal path and by post-recovery resumption,
   // so recovering a category runs the exact same tail — no forked path.
-  async function finishPipeline(ctx: PlanCtx) {
+  // opts.skipArrivalCheck: set when the user has already been shown the
+  // arrival problems and chose to move on — the failing slots were emptied
+  // when the panel opened, so re-checking would find nothing anyway; the
+  // flag makes that termination explicit rather than incidental.
+  async function finishPipeline(ctx: PlanCtx, opts: { skipArrivalCheck?: boolean } = {}) {
     const { parseData, planZone, hp, pools } = ctx;
     // stops must follow the PROMPT's order ("ramen then a bar" = ramen
     // first) — selectVenues appends empty categories last and recovery
     // resolves them in that appended position, so re-order by the parse's
     // category_signals; a replacement category takes its slot's position
-    const sels = orderByRequest(ctx.sels, parseData.category_signals, ctx.slots);
+    const orderedSels = orderByRequest(ctx.sels, parseData.category_signals, ctx.slots);
     try {
       setPools(pools);
       setParsedObj(parseData);
       setLoadingText("Timing the route…");
-      const points = sels
-        .filter((s) => s.id !== null)
-        .map((s) => (pools[s.category] ?? []).find((p) => p.id === s.id)?.location ?? null);
 
-      let legs: TravelLeg[] = [];
-      let hl: TravelLeg | null = null;
-      if (points.length >= 1 && points.every(Boolean)) {
-        const { startISO } = buildSchedule(sels, parseData.time_window ?? "", new Date(), [], undefined, null, planZone);
-        const travelRes = await fetch("/api/schedule/travel", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ points: [hp.location, ...points], departureTime: startISO }),
+      // Route + schedule ONE candidate selection set. Called twice at most:
+      // the arrival check below can adapt a venue, which moves the times,
+      // so the schedule has to be rebuilt against the new pick.
+      const planOnce = async (sels: Selection[]) => {
+        const points = sels
+          .filter((s) => s.id !== null)
+          .map((s) => (pools[s.category] ?? []).find((p) => p.id === s.id)?.location ?? null);
+
+        let legs: TravelLeg[] = [];
+        let hl: TravelLeg | null = null;
+        if (points.length >= 1 && points.every(Boolean)) {
+          const dry = buildSchedule(sels, parseData.time_window ?? "", new Date(), [], undefined, null, planZone);
+          const { startISO } = dry;
+          // how long we stay at each point, so every leg can be routed at
+          // its own departure instant (§1.5). Index 0 is home — no dwell.
+          const dwellMinutes = [
+            0,
+            ...dry.stops.filter((st) => st.id !== null).map((st) => st.durationMinutes?.total ?? 0),
+          ];
+          const travelRes = await fetch("/api/schedule/travel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              points: [hp.location, ...points],
+              departureTime: startISO,
+              dwellMinutes,
+            }),
+          });
+          const travelData = await travelRes.json();
+          if (!travelRes.ok) throw new Error(travelData.error ?? `travel failed (${travelRes.status})`);
+          const split = splitHomeLeg(travelData.legs ?? []);
+          hl = split.homeLeg;
+          legs = split.interLegs;
+        }
+        const { stops } = buildSchedule(sels, parseData.time_window ?? "", new Date(), legs, undefined, hl, planZone);
+        return { stops, legs, hl };
+      };
+
+      // ── arrival re-check (§1.4) ──────────────────────────────────────
+      // The objective filter judges EVERY category at the plan's single
+      // anchor instant, because per-stop arrival times don't exist yet at
+      // that point. They exist now, so re-check each stop's own venue at
+      // its own start_time: a bar that passed as "open at 7pm" may well be
+      // shut by the 9:20pm you'd actually arrive.
+      const closedOnArrival = (stops: ScheduledStop[]) =>
+        stops.filter((st) => {
+          if (!st.id || !st.start_time) return false;
+          const place = (pools[st.category] ?? []).find((p) => p.id === st.id);
+          return (
+            isOpenAtInstant(place?.currentOpeningHours, new Date(st.start_time), planZone) === false
+          );
         });
-        const travelData = await travelRes.json();
-        if (!travelRes.ok) throw new Error(travelData.error ?? `travel failed (${travelRes.status})`);
-        const split = splitHomeLeg(travelData.legs ?? []);
-        hl = split.homeLeg;
-        legs = split.interLegs;
+
+      let sels = orderedSels;
+      let { stops, legs, hl } = await planOnce(sels);
+      let adaptedNames: string[] = [];
+
+      if (!opts.skipArrivalCheck) {
+        let closed = closedOnArrival(stops);
+        if (closed.length > 0) {
+          // TRY → ADAPT → NOTIFY, the same ladder the swap engine uses.
+          // The pool is already in hand, so before bothering the user, look
+          // for a venue in the SAME category that IS open on arrival.
+          const used = new Set(sels.map((s) => s.id).filter((id): id is string => !!id));
+          const adapted = sels.map((s) => {
+            const bad = closed.find((c) => c.id === s.id && c.category === s.category);
+            if (!bad || !bad.start_time) return s;
+            const replacement = (pools[s.category] ?? [])
+              .filter(
+                (p) =>
+                  !used.has(p.id) &&
+                  isOpenAtInstant(p.currentOpeningHours, new Date(bad.start_time!), planZone) !== false
+              )
+              .sort((a, b) => (b.rating ?? -1) - (a.rating ?? -1))[0];
+            if (!replacement) return s;
+            used.add(replacement.id);
+            adaptedNames.push(replacement.displayName?.text ?? s.category);
+            return {
+              ...s,
+              id: replacement.id,
+              name: replacement.displayName?.text,
+              rating: replacement.rating,
+              priceLevel: replacement.priceLevel,
+              description: replacement.editorialSummary?.text,
+              reason: `Open when you get there — the earlier pick had closed.`,
+            };
+          });
+
+          if (adaptedNames.length > 0) {
+            setLoadingText("Adjusting for opening hours…");
+            sels = adapted;
+            ({ stops, legs, hl } = await planOnce(sels));
+            closed = closedOnArrival(stops);
+          }
+
+          // NOTIFY: nothing in the pool works at that hour — hand it to the
+          // recovery panel rather than shipping a plan that can't be run.
+          if (closed.length > 0) {
+            const rows: EmptyRow[] = closed.map((st) => ({
+              category: st.category,
+              slot: st.slot,
+              reason: closedOnArrivalReason(
+                st.category,
+                st.name,
+                formatStopTime(st.start_time!, new Date(), planZone)
+              ),
+            }));
+            // empty the failing slots so "Plan without it" drops them rather
+            // than shipping a closed venue — and so the check terminates
+            // instead of re-opening the panel forever
+            const clearedSels = sels.map((s) =>
+              rows.some((r) => matchesRow(s, r))
+                ? { ...s, id: null, reason: "closed by the time you'd arrive" }
+                : s
+            );
+            setRecovery({
+              mode: "empty",
+              ctx: { ...ctx, sels: clearedSels },
+              empties: rows,
+              replaceText: {},
+              busy: false,
+              note: null,
+            });
+            setLoadingText(null);
+            return;
+          }
+        }
       }
 
-      const { stops } = buildSchedule(sels, parseData.time_window ?? "", new Date(), legs, undefined, hl, planZone);
       setSchedule(stops);
       setTravelLegs(legs);
       setHomeLeg(hl);
       const ms = stopsFromSchedule(stops, pools);
       setMapStops(ms);
       setSelected(ms[0]?.id ?? null);
+      // the adapt is a real change to what they asked for — say so
+      if (adaptedNames.length > 0) {
+        setBannerFlat(true);
+        setBanner(
+          `Swapped in ${adaptedNames.join(" and ")} — the first pick would have been closed by the time you got there.`
+        );
+      }
 
       // auto-store the itinerary so the live/reroute controls work at once
       await storeItinerary(stops, legs, hl, parseData, pools, "", hp, planZone);
@@ -671,6 +803,8 @@ export default function Home() {
         categoriesOverride: [searchCategory],
         weather: opts.ignoreWeather ? null : ctx.weather,
         timeZone: ctx.planZone,
+        // filter the replacement at the SLOT's real instant (§1.7)
+        targetTime: ctx.startInstant.toISOString(),
       }),
     });
     const placesData = await placesRes.json();
@@ -777,7 +911,9 @@ export default function Home() {
     if (recovery?.mode !== "empty") return;
     const ctx = recovery.ctx;
     setRecovery(null);
-    await finishPipeline(ctx);
+    // the arrival check already ran for this plan and the user has decided
+    // — the failing slots are emptied, so don't re-litigate them (§1.4)
+    await finishPipeline(ctx, { skipArrivalCheck: true });
   }
 
   // ── time-gate actions (batch 4b) ──────────────────────────────────────

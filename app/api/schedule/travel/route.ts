@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTravelLegs, LatLng } from "../travel";
 import { isMockMode, mockTravelLegs } from "../../_mock/fixtures";
 
-// POST { points: LatLng[], departureTime?: string } → { legs: TravelLeg[] }
+// POST { points: LatLng[], departureTime?: string, dwellMinutes?: number[] }
+//   → { legs: TravelLeg[] }
+// dwellMinutes[i] = how long the traveller stays at points[i] (index 0 is
+// home, no dwell) so each leg can be routed at its own departure instant.
 export async function POST(request: NextRequest) {
   const apiKey = process.env.GOOGLE_ROUTES_API_KEY;
   if (!apiKey && !isMockMode()) {
@@ -14,10 +17,14 @@ export async function POST(request: NextRequest) {
 
   let points: LatLng[];
   let departureTime: string | undefined;
+  let dwellMinutes: number[] | undefined;
   try {
     const body = await request.json();
     points = body?.points;
     departureTime = body?.departureTime;
+    dwellMinutes = Array.isArray(body?.dwellMinutes)
+      ? body.dwellMinutes.filter((n: unknown): n is number => typeof n === "number")
+      : undefined;
   } catch {
     return NextResponse.json(
       { error: "Request body must be JSON." },
@@ -41,7 +48,7 @@ export async function POST(request: NextRequest) {
     if (isMockMode()) {
       return NextResponse.json({ legs: mockTravelLegs(points) });
     }
-    const legs = await getTravelLegs(apiKey!, points, departureTime);
+    const legs = await getTravelLegs(apiKey!, points, departureTime, dwellMinutes);
     return NextResponse.json({ legs });
   } catch (err) {
     return NextResponse.json(

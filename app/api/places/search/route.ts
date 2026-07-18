@@ -21,6 +21,7 @@ export async function POST(request: NextRequest) {
   let weather: WeatherHour[] | null;
   let timeZone: string | undefined;
   let categoriesOverride: string[] | undefined;
+  let targetTime: string | undefined;
   try {
     const body = await request.json();
     parsed = body?.parsed;
@@ -31,6 +32,14 @@ export async function POST(request: NextRequest) {
     // optional: re-search only a subset of categories (partial-failure
     // recovery + reroute), leaving the rest of the plan untouched — same
     // parameter searchPools already exposes to the reroute engine
+    // the plan's ALREADY-RESOLVED start instant. A single-category
+    // re-search (recovery's widen/replace, the weather override) would
+    // otherwise re-resolve the time from that one category alone and land
+    // on a different instant than the slot it's filling (code-audit §1.7).
+    targetTime =
+      typeof body?.targetTime === "string" && !isNaN(new Date(body.targetTime).getTime())
+        ? body.targetTime
+        : undefined;
     categoriesOverride = Array.isArray(body?.categoriesOverride)
       ? body.categoriesOverride.filter((c: unknown): c is string => typeof c === "string" && c.trim() !== "")
       : undefined;
@@ -55,7 +64,10 @@ export async function POST(request: NextRequest) {
       const cats = (categoriesOverride ?? parsed.category_signals ?? []).filter(
         (c): c is string => typeof c === "string" && c.trim() !== ""
       );
-      const resolved = resolveStartTime(parsed.time_window ?? "", new Date(), cats, timeZone);
+      const resolved =
+        targetTime !== undefined
+          ? new Date(targetTime)
+          : resolveStartTime(parsed.time_window ?? "", new Date(), cats, timeZone);
       console.log(
         `[schedule-resolve] time_window=${JSON.stringify(parsed.time_window)} ` +
           `categories=${JSON.stringify(cats)} zone=${timeZone ?? "(default Toronto)"} ` +
@@ -73,7 +85,7 @@ export async function POST(request: NextRequest) {
       parsed,
       weather,
       new Date(),
-      undefined,
+      targetTime !== undefined ? new Date(targetTime) : undefined,
       timeZone
     );
     return NextResponse.json({

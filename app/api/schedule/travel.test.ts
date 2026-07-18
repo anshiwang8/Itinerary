@@ -4,6 +4,7 @@ import assert from "node:assert";
 import {
   buildLeg,
   ComputeRoutesResponse,
+  getTravelLegs,
   MAX_WALK_LABEL_MIN,
   SHORT_LEG_WALK_METERS,
   TRANSIT_MARGIN_MIN,
@@ -255,16 +256,87 @@ const cases: Array<[string, () => void]> = [
   ],
 ];
 
-let failed = 0;
-for (const [name, fn] of cases) {
-  try {
-    fn();
-    console.log(`PASS  ${name}`);
-  } catch (err) {
-    failed++;
-    console.log(`FAIL  ${name}`);
-    console.log(`      ${err instanceof Error ? err.message : err}`);
+// ── per-leg departure times (code-audit 2026-07-18 §1.5) ──
+// Every leg used to be routed with the OUTING's start time, so a late leg
+// got early-evening transit frequencies (and sometimes services that had
+// stopped running). Each leg must depart at its own estimated instant.
+const asyncCases: Array<[string, () => Promise<void>]> = [
+  [
+    "getTravelLegs: each leg departs at its OWN accumulated instant",
+    async () => {
+      const departures: string[] = [];
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("routes.googleapis.com")) {
+          const body = JSON.parse(String(init?.body));
+          if (body.travelMode === "TRANSIT") departures.push(body.departureTime ?? "(none)");
+          // transit 10 min, walk 50 min → the leg stays TRANSIT (and so
+          // carries the 5-minute boarding margin)
+          return new Response(
+            JSON.stringify({
+              routes: [
+                {
+                  duration: body.travelMode === "TRANSIT" ? "600s" : "3000s",
+                  distanceMeters: 5000,
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const pts = [
+          { latitude: 43.65, longitude: -79.4 },
+          { latitude: 43.66, longitude: -79.41 },
+          { latitude: 43.67, longitude: -79.42 },
+        ];
+        // leave home at 23:00Z, stay 105 min at the first stop
+        const start = "2030-07-03T23:00:00.000Z";
+        const legs = await getTravelLegs("k", pts, start, [0, 105, 70]);
+        assert.strictEqual(legs.length, 2);
+        assert.strictEqual(departures.length, 2, "one TRANSIT call per leg");
+        // leg 0 departs at the outing start
+        assert.strictEqual(departures[0], start);
+        // leg 1 departs after leg 0's travel (10 min + 5 margin) AND the
+        // 105-minute stay: 23:00 + 15 + 105 = 01:00 next day
+        assert.strictEqual(departures[1], "2030-07-04T01:00:00.000Z");
+        assert.notStrictEqual(
+          departures[0],
+          departures[1],
+          "legs must not share a departure time"
+        );
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+];
+
+(async () => {
+  let failed = 0;
+  for (const [name, fn] of cases) {
+    try {
+      fn();
+      console.log(`PASS  ${name}`);
+    } catch (err) {
+      failed++;
+      console.log(`FAIL  ${name}`);
+      console.log(`      ${err instanceof Error ? err.message : err}`);
+    }
   }
-}
-console.log(`\n${cases.length - failed}/${cases.length} passed`);
-if (failed > 0) process.exit(1);
+  for (const [name, fn] of asyncCases) {
+    try {
+      await fn();
+      console.log(`PASS  ${name}`);
+    } catch (err) {
+      failed++;
+      console.log(`FAIL  ${name}`);
+      console.log(`      ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  const total = cases.length + asyncCases.length;
+  console.log(`\n${total - failed}/${total} passed`);
+  if (failed > 0) process.exit(1);
+})();

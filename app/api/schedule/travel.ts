@@ -307,15 +307,33 @@ export async function getSingleLeg(
 export async function getTravelLegs(
   apiKey: string,
   points: LatLng[],
-  departureTime?: string
+  departureTime?: string,
+  dwellMinutes: number[] = []
 ): Promise<TravelLeg[]> {
   if (points.length < 2) return [];
 
-  return Promise.all(
-    points
-      .slice(0, -1)
-      .map((origin, i) =>
-        getSingleLeg(apiKey, origin, points[i + 1], i, departureTime)
-      )
-  );
+  // Each leg is routed at ITS OWN estimated departure instant, accumulated
+  // from the outing start plus the dwell at each preceding point plus the
+  // legs already priced. Transit routing is schedule-dependent, so pricing
+  // every leg at the outing's START (as this did) gave a late leg the
+  // frequencies — sometimes the services — of the early evening
+  // (code-audit 2026-07-18 §1.5). The accumulation is inherently
+  // sequential: leg i+1's departure isn't known until leg i is priced. At
+  // demo scale (2–4 legs) a correct schedule is worth the round trips.
+  // dwellMinutes[i] is the stay at points[i]; index 0 is home (no dwell).
+  const startMs = departureTime ? new Date(departureTime).getTime() : NaN;
+  let cursorMs = startMs;
+  const legs: TravelLeg[] = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const depart = Number.isFinite(cursorMs)
+      ? new Date(cursorMs).toISOString()
+      : undefined;
+    const leg = await getSingleLeg(apiKey, points[i], points[i + 1], i, depart, false);
+    legs.push(leg);
+    if (Number.isFinite(cursorMs)) {
+      // travel, then stay at the destination before the next leg departs
+      cursorMs += (leg.totalMinutes + (dwellMinutes[i + 1] ?? 0)) * 60_000;
+    }
+  }
+  return legs;
 }

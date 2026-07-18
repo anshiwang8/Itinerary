@@ -35,7 +35,12 @@ test("price refresh: a 'cheaper' swap moves the dollar signs $$$ → $$ @mock", 
 });
 
 test("description line: renders when present, absent when missing @mock", async ({ page }) => {
-  await planEvening(page, "dinner and drinks and dessert");
+  // 5pm start so all three fixture picks are open ON ARRIVAL: dinner
+  // 17:00–18:45, drinks ~18:55, dessert ~20:15 (Sundown Scoops closes 21).
+  // Without the stated time the evening runs late enough that the arrival
+  // re-check correctly adapts dessert to Midnight Flour — see the dedicated
+  // arrival-adapt test below.
+  await planEvening(page, "dinner and drinks and dessert at 5pm");
   await expect(stripCard(page, "Velvet Fig").locator(".lstrip__desc")).toHaveText(
     "Dim-lit modern bistro known for fig-glazed duck and a serious wine list."
   );
@@ -218,5 +223,46 @@ test.describe("@mock duplicate categories", () => {
     // and the "why here" reason belongs to the second card too
     await expect(cards.nth(1).locator(".lstrip__reason")).toBeVisible();
     await expect(cards.nth(0).locator(".lstrip__reason")).toHaveCount(0);
+  });
+});
+
+// ── arrival-time correctness (code-audit 2026-07-18 §1.4) ───────────────
+// The objective filter judges every category at the PLAN's anchor instant,
+// so a later stop used to be filtered on the outing's start time rather
+// than on when you actually get there. "dinner and drinks and dessert"
+// reaches dessert around 10:15pm; Sundown Scoops (closes 21:00) passed the
+// 7pm filter and was shipped anyway — a plan that could not be executed.
+test.describe("@mock arrival-time re-check", () => {
+  test("a venue that closes before you arrive is adapted away, and said so @mock", async ({ page }) => {
+    await planEvening(page, "dinner and drinks and dessert");
+
+    const names = (await page.locator(".lstrip__stop .lstrip__name").allInnerTexts()).map((n) =>
+      n.trim()
+    );
+    expect(names).toHaveLength(3);
+    // dessert lands on the late-opening fixture, never the closed one
+    expect(names[2]).toBe("Midnight Flour");
+    expect(names).not.toContain("Sundown Scoops");
+    // and the change is announced, not silent
+    await expect(page.locator(".banner")).toContainText(/Midnight Flour/);
+    await expect(page.locator(".banner")).toContainText(/closed by the time you got there/i);
+  });
+
+  test("every scheduled stop is actually open at its own start time @mock", async ({ page }) => {
+    await planEvening(page, "dinner and drinks and dessert");
+    // Sundown Scoops shuts at 21:00 and Ten O'Clock Curfew at 22:00 — the
+    // plan must not contain any stop starting after its venue's close.
+    const cards = page.locator(".lstrip__stop");
+    const count = await cards.count();
+    for (let i = 0; i < count; i++) {
+      const name = (await cards.nth(i).locator(".lstrip__name").innerText()).trim();
+      const be = (await cards.nth(i).locator(".lstrip__be").innerText()).trim();
+      const hour = /(\d{1,2}):(\d{2})\s*(AM|PM)/i.exec(be);
+      expect(hour, `stop ${name} has no readable start time: ${be}`).not.toBeNull();
+      const h24 =
+        (parseInt(hour![1], 10) % 12) + (/pm/i.test(hour![3]) ? 12 : 0);
+      if (name === "Sundown Scoops") expect(h24).toBeLessThan(21);
+      if (name === "Ten O'Clock Curfew") expect(h24).toBeLessThan(22);
+    }
   });
 });

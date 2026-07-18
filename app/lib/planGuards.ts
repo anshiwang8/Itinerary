@@ -264,6 +264,22 @@ export function emptyCategoryReason(
     : `Couldn't find any ${category}${where}.`;
 }
 
+/**
+ * A stop whose venue is shut by the time you'd actually GET there. The
+ * objective filter can only judge the plan's single anchor instant, so a
+ * later stop is filtered on the outing's start time, not its own arrival
+ * (code-audit 2026-07-18 §1.4). The post-schedule re-check catches those,
+ * and this is how it says so — a real time, and the venue named.
+ */
+export function closedOnArrivalReason(
+  category: string,
+  venueName: string | null | undefined,
+  arrivalLabel: string
+): string {
+  const who = venueName ? `${venueName}` : `the ${category}`;
+  return `${who} is closed by the time you'd get there (${arrivalLabel}) — want to look further out, or try something else for this stop?`;
+}
+
 /** The widen-offer label, scoped to the plan's neighborhood/location. */
 export function widenOfferLabel(locationLabel?: string | null): string {
   const loc = meaningfulLocation(locationLabel);

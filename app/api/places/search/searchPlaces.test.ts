@@ -23,6 +23,53 @@ function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
 // first (code-audit 2026-07-18 §7.1). Slot bookkeeping lives in select.
 const searchCases: Array<[string, () => Promise<void>]> = [
   [
+    "targetTime (§1.7): a single-slot re-search is filtered at the PLAN's instant",
+    async () => {
+      // A recovery re-search sends ONE category, so the route used to
+      // re-resolve the start time from that category alone — landing on a
+      // different instant than the slot it is filling. With targetTime the
+      // caller's already-resolved anchor wins.
+      process.env.E2E_MOCK = "1";
+      const { POST } = await import("./route");
+      const body = (targetTime?: string) => ({
+        parsed: {
+          time_window: "7pm", stop_count: null, aesthetic: "unspecified",
+          category_signals: ["dessert"], group_context: "unspecified",
+          budget: null, constraints: [], location: "Ossington",
+        },
+        categoriesOverride: ["dessert"],
+        timeZone: "America/Toronto",
+        ...(targetTime ? { targetTime } : {}),
+      });
+      const call = async (targetTime?: string) => {
+        const res = await POST(
+          new Request("http://localhost/api/places/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body(targetTime)),
+          }) as never
+        );
+        return (await res.json()) as Record<string, Array<{ id: string }>>;
+      };
+      // Sundown Scoops closes at 21:00. At a 7pm anchor it survives...
+      const early = await call();
+      const earlyIds = (early.dessert ?? []).map((p) => p.id);
+      assert.ok(earlyIds.includes("fx_dessert_sundown"), "expected Sundown at the 7pm anchor");
+      // ...and at an explicit 10pm target it must be filtered out, proving
+      // the route used the instant it was GIVEN, not one it re-derived.
+      const lateTarget = new Date();
+      lateTarget.setHours(22, 0, 0, 0);
+      const late = await call(lateTarget.toISOString());
+      const lateIds = (late.dessert ?? []).map((p) => p.id);
+      assert.ok(
+        !lateIds.includes("fx_dessert_sundown"),
+        `Sundown should be closed at 10pm, got ${JSON.stringify(lateIds)}`
+      );
+      assert.ok(lateIds.includes("fx_dessert_midnight"), "the late-opening fixture should survive");
+      delete process.env.E2E_MOCK;
+    },
+  ],
+  [
     "DUPLICATE CATEGORY: one search per distinct category, pool keyed once",
     async () => {
       const queries: string[] = [];
