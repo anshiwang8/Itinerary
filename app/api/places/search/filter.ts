@@ -1,7 +1,7 @@
 // Objective (non-LLM) filter for Places candidate pools. Applies hard
 // rules per venue, in order, and records every drop so filter
 // aggressiveness stays visible. Weather gating is a later step.
-import { CurrentOpeningHours, isOpenAt, TargetTime } from "./hours";
+import { CurrentOpeningHours, isOpenAt, TargetTime, targetTimeAt } from "./hours";
 import { resolveStartTime } from "../../schedule/schedule";
 import { DEFAULT_ZONE, wallClockParts } from "../../../lib/zoneTime";
 
@@ -162,8 +162,7 @@ export function filterPools(
   // Toronto's offset can be a different weekday at the same instant, which
   // would silently look up the wrong day's opening hours. NOTE: TargetTime.day
   // is the day-of-WEEK (0=Sun), so use `weekday`, not the day-of-month.
-  const { weekday, hour, minute } = wallClockParts(startInstant, timeZone);
-  const target: TargetTime = { day: weekday, hour, minute };
+  const target: TargetTime = targetTimeAt(startInstant, timeZone);
   // No usable weather data → weather rule skipped entirely (same
   // keep-on-missing policy as hours/price).
   const forecast =

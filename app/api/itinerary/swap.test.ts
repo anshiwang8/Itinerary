@@ -9,6 +9,7 @@ import {
   interpretRefinement,
   parseTimeExpr,
   parseDurationExpr,
+  usableByHours,
   TimeShift,
   DurationShift,
 } from "./swap";
@@ -950,6 +951,63 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(it.stops[1].id, "b1");
       assert.strictEqual(it.stops[1].start_time, T(21, 0));
       assert.strictEqual(it.stops[1].end_time, T(22, 10));
+    },
+  ],
+  // ── the PRODUCTION availability default (code-audit 2026-07-18 §1.1) ──
+  // Every case above injects its own isUsableAt, so `usableByHours` — the
+  // real seam implementation — had zero coverage. These exercise it directly
+  // and in situ, with NO stub. Instants are explicit and absolute, so the
+  // assertions hold under any runner TZ (verified under TZ=UTC too).
+  [
+    "REGRESSION §1.1: usableByHours judges the PLAN's zone, not the server's",
+    async () => {
+      // Mon–Sun 09:00–17:00 local.
+      const venue: Place = {
+        id: "v_hours",
+        displayName: { text: "Nine To Five" },
+        currentOpeningHours: {
+          periods: Array.from({ length: 7 }, (_, day) => ({
+            open: { day, hour: 9, minute: 0 },
+            close: { day, hour: 17, minute: 0 },
+          })),
+        },
+      };
+      // 23:30 UTC = 16:30 Vancouver (OPEN) / 19:30 Toronto (closed).
+      const when = new Date("2026-07-06T23:30:00Z");
+      assert.strictEqual(usableByHours(venue, when, "dinner", "America/Vancouver"), true);
+      assert.strictEqual(usableByHours(venue, when, "dinner", "America/Toronto"), false);
+      // day-of-week half: Mon 20:30 Vancouver is already Tuesday in UTC
+      const mondayOnly: Place = {
+        id: "v_mon",
+        currentOpeningHours: {
+          periods: [{ open: { day: 1, hour: 20, minute: 0 }, close: { day: 1, hour: 22, minute: 0 } }],
+        },
+      };
+      const monNight = new Date("2026-07-07T03:30:00Z");
+      assert.strictEqual(usableByHours(mondayOnly, monNight, "bar", "America/Vancouver"), true);
+      assert.strictEqual(usableByHours(mondayOnly, monNight, "bar", "UTC"), false);
+      // keep-on-missing: a venue with no hours data is never ruled out
+      assert.strictEqual(usableByHours({ id: "v_none" }, when, "bar", "UTC"), true);
+    },
+  ],
+  [
+    "the real availability default is wired in when deps omit isUsableAt",
+    async () => {
+      // No stub at all — swapStop falls through to realDeps().isUsableAt.
+      // Stored stops carry no hours, so keep-on-missing keeps the venue and
+      // the time-swap completes; this pins the WIRING (signature, zone
+      // argument, no crash) that the stubbed cases can't see.
+      const it = mkItinerary();
+      const { isUsableAt: _omitted, ...depsWithoutSeam } = mkDeps({ legMin: 10 });
+      // dessert (last stop, 22:20) pushed an hour later — no downstream tail
+      // and no collision with the bar's 22:10 end, so the ONLY thing that can
+      // refuse this is the availability seam.
+      const res = await swapStop(it, 2, "an hour later", new Date(T(18, 0)), depsWithoutSeam);
+      assert.ok(res.swapped, "swap should complete on the production default");
+      if (!res.swapped) return;
+      assert.strictEqual(res.path, "time");
+      assert.strictEqual(it.stops[2].start_time, T(23, 20));
+      assert.strictEqual(it.stops[2].id, "s1"); // kept, not adapted
     },
   ],
 ];

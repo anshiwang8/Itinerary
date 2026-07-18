@@ -236,7 +236,7 @@ export function resolveStartTimeChecked(
   if (bands.length === 0) bands.push(DEFAULT_PLAUSIBLE_BAND);
   if (bands.some((b) => inBand(start, b, timeZone))) return { ok: true, start };
 
-  const hasClockTime = parseTargetTime(tw, now) !== null;
+  const hasClockTime = parseTargetTime(tw) !== null;
   const hasDayPart = Object.keys(DAY_PART_DEFAULTS).some((k) => tw.includes(k));
   // an explicit "now" (clarify answer) is a stated time too — a 3 AM
   // refusal must say "nothing's open then", never "add a time" (they just did)
@@ -272,7 +272,8 @@ export function toTorontoISO(d: Date): string {
  * Resolve time_window to a concrete start Date. This is the single
  * source of truth for "when does the outing start" — the hours filter,
  * weather gate, and schedule all call it so they agree on one instant.
- * 1. Clock time present → parseTargetTime (day-of-week aware).
+ * 1. Clock time present → parseTargetTime (hour/minute only; which DAY that
+ *    hour lands on is decided here, in the plan's zone, never by the parser).
  * 2. Day-part keyword → DAY_PART_DEFAULTS (respecting "tomorrow").
  * 3. Neither → infer from categories: earliest table default among the
  *    categories that match (anchor).
@@ -296,7 +297,7 @@ export function resolveStartTime(
     return nextFullHourInZone(now, timeZone);
   }
 
-  const target = parseTargetTime(tw, now);
+  const target = parseTargetTime(tw);
   if (target) {
     return instantAtWallClock(now, timeZone, target.hour, target.minute, dayOffset, true);
   }
@@ -381,8 +382,14 @@ export function buildSchedule(
   const start =
     startOverride ??
     resolveStartTime(timeWindow, now, selections.map((s) => s.category), timeZone);
-  const cursor = new Date(start);
-  if (homeLeg) cursor.setMinutes(cursor.getMinutes() + homeLeg.totalMinutes);
+  // Elapsed-time arithmetic on absolute instants. This was local-FIELD math
+  // (`cursor.setMinutes(cursor.getMinutes() + n)`), which normalizes against
+  // the SERVER's wall clock and therefore shifts by an hour across the
+  // server's DST transition — in a function whose whole contract is per-plan
+  // zone correctness. Stop durations are elapsed time, so milliseconds are
+  // the correct unit (code-audit 2026-07-18 §1.6).
+  let cursor = new Date(start);
+  if (homeLeg) cursor = new Date(cursor.getTime() + homeLeg.totalMinutes * 60_000);
 
   const timed: ScheduledStop[] = [];
   let timedIndex = 0;
@@ -394,7 +401,7 @@ export function buildSchedule(
     const { baseMinutes, bufferMinutes } = getDuration(sel.category);
     const total = baseMinutes + bufferMinutes;
     const stopStart = new Date(cursor);
-    cursor.setMinutes(cursor.getMinutes() + total);
+    cursor = new Date(cursor.getTime() + total * 60_000);
 
     const leg = travelLegs.find((l) => l.fromIndex === timedIndex);
     timed.push({
@@ -406,7 +413,7 @@ export function buildSchedule(
       ...(leg ? { travelToNext: leg } : {}),
     });
     // next stop starts after the travel leg (0 when no leg data)
-    cursor.setMinutes(cursor.getMinutes() + (leg?.totalMinutes ?? 0));
+    cursor = new Date(cursor.getTime() + (leg?.totalMinutes ?? 0) * 60_000);
     timedIndex++;
   }
 

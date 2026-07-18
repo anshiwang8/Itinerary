@@ -22,7 +22,7 @@ import { selectVenues as realSelectVenues, Selection } from "../select/selectVen
 import { getDuration } from "../schedule/durations";
 import { toZonedISO, isPlausibleAt } from "../schedule/schedule";
 import { DEFAULT_ZONE, instantAtWallClock, wallClockParts } from "../../lib/zoneTime";
-import { isOpenAt } from "../places/search/hours";
+import { isOpenAtInstant } from "../places/search/hours";
 import {
   getSingleLeg as realGetSingleLeg,
   haversineMeters,
@@ -119,8 +119,15 @@ export interface SwapDeps {
   // Availability seam: the ONE place that answers "can we use this venue
   // at this time?" Default is the objective hours check (keep-on-missing);
   // a real reservation/availability API slots in here later without
-  // touching the swap flow.
-  isUsableAt: (place: Place, when: Date, category: string) => boolean;
+  // touching the swap flow. `timeZone` is the PLAN's zone — the instant is
+  // absolute, but "which hour / which weekday is that for this venue" is
+  // not, so every caller passes it explicitly.
+  isUsableAt: (
+    place: Place,
+    when: Date,
+    category: string,
+    timeZone: string
+  ) => boolean;
 }
 
 const REFINE_SYSTEM = `You adjust ONE stop of an existing day plan from a short complaint. You get the stop's current settings (category, aesthetic, budget, constraints) and its current start time, plus the complaint. Classify the user's INTENT and return the parameters to act on it.
@@ -411,13 +418,21 @@ function realDeps(): SwapDeps {
 // Default availability seam — objective hours only (keep-on-missing: no
 // hours data means we can't rule it out, so it stays usable). A real
 // availability API replaces this function body, nothing else.
-function usableByHours(place: Place, when: Date): boolean {
-  const verdict = isOpenAt(place.currentOpeningHours, {
-    day: when.getDay(),
-    hour: when.getHours(),
-    minute: when.getMinutes(),
-  });
-  return verdict !== false;
+//
+// The instant is judged on the VENUE's local clock (the plan's zone), via
+// the shared isOpenAtInstant. It previously read the SERVER's wall clock
+// (when.getDay()/getHours()), so on Vercel's UTC runtime every plan — even
+// a Toronto one — was checked against the wrong hour, and often the wrong
+// weekday. Exported for direct testing: every swap test injects its own
+// isUsableAt, so this production default had no coverage at all.
+// See code-audit 2026-07-18 §1.1.
+export function usableByHours(
+  place: Place,
+  when: Date,
+  _category?: string,
+  timeZone: string = DEFAULT_ZONE
+): boolean {
+  return isOpenAtInstant(place.currentOpeningHours, when, timeZone) !== false;
 }
 
 // A Place view of a stored stop — for the availability check. Stored stops
@@ -738,7 +753,7 @@ async function timeChange(
   // adapt, else notify.
   let anchorPick: Place | undefined;
   let anchorSel: Selection | undefined;
-  if (!deps.isUsableAt(placeOf(target), nd, category)) {
+  if (!deps.isUsableAt(placeOf(target), nd, category, tz)) {
     const repl = await findReplacement(category, nd, used, base, now, deps, tz);
     if (!repl) {
       return { swapped: false, reason: `Nothing similar to ${target.name} is open around ${clockLabel(nd, tz)}.` };
@@ -868,7 +883,7 @@ async function resettleTail(
     let sel: Selection | undefined;
 
     // try the existing venue; adapt if it isn't usable by the new arrival
-    if (!deps.isUsableAt(placeOf(stop), new Date(startMs), stop.category)) {
+    if (!deps.isUsableAt(placeOf(stop), new Date(startMs), stop.category, tz)) {
       const repl = await findReplacement(stop.category, new Date(startMs), used, base, now, deps, tz);
       if (!repl) {
         return { ok: false, reason: `Nothing similar to ${stop.name} is open by ${clockLabel(new Date(startMs), tz)}.` };
@@ -923,7 +938,7 @@ async function findReplacement(
   const rawPools = await deps.searchPools(parsed, [category]);
   const { pools } = filterPools(rawPools, parsed, null, now, when, timeZone);
   const candidates = (pools[category] ?? []).filter(
-    (p) => !excluded.has(p.id) && deps.isUsableAt(p, when, category)
+    (p) => !excluded.has(p.id) && deps.isUsableAt(p, when, category, timeZone)
   );
   if (candidates.length === 0) return null;
   const sels = await deps.selectVenues(parsed, { [category]: candidates });

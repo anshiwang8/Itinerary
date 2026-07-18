@@ -13,7 +13,7 @@
 //  - three named categories (dinner / drinks / dessert) + a generated
 //    generic pool for anything else
 import type { ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
-import { isOpenAt, CurrentOpeningHours } from "../places/search/hours";
+import { isOpenAt, isOpenAtInstant, CurrentOpeningHours } from "../places/search/hours";
 import type { LatLng, TravelLeg } from "../schedule/travel";
 import type { Selection } from "../select/selectVenues";
 import type {
@@ -455,15 +455,18 @@ function fixtureHoursById(id: string): CurrentOpeningHours | undefined {
   return all.find((v) => v.id === id)?.currentOpeningHours;
 }
 
-export function mockIsUsableAt(place: Place, when: Date): boolean {
+// Only the LOOKUP is mock-specific — the openness logic itself delegates to
+// the shared zone-aware helper. Reimplementing it here meant the fixture
+// reproduced production's server-local-clock bug faithfully, so mock e2e
+// could never fail on it (code-audit 2026-07-18 §1.3).
+export function mockIsUsableAt(
+  place: Place,
+  when: Date,
+  _category?: string,
+  timeZone?: string
+): boolean {
   const hours = place.currentOpeningHours ?? fixtureHoursById(place.id);
-  return (
-    isOpenAt(hours, {
-      day: when.getDay(),
-      hour: when.getHours(),
-      minute: when.getMinutes(),
-    }) !== false
-  );
+  return isOpenAtInstant(hours, when, timeZone) !== false;
 }
 
 // ── engine deps. The deterministic time/duration parsers are injected by
