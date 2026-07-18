@@ -1061,7 +1061,13 @@ export default function Home() {
     });
     const data = await res.json();
     if (!res.ok) {
-      setError(data.error ?? `itinerary failed (${res.status})`);
+      // the plan is already rendered at this point, but without a stored id
+      // there is no swapping or rerouting it — say so rather than leaving a
+      // map whose controls quietly do nothing (§6.4)
+      setError(
+        (data.error ?? `itinerary failed (${res.status})`) +
+          " — the plan is shown but can't be swapped or rerouted; try planning again."
+      );
       return;
     }
     await refreshItinerary(data.id, simValue);
@@ -1070,9 +1076,27 @@ export default function Home() {
   async function refreshItinerary(id: string, simValue: string) {
     const nowISO = simValue ? new Date(simValue).toISOString() : "";
     const url = `/api/itinerary/${id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`;
-    const res = await fetch(url);
-    const data: Itinerary = await res.json();
-    if (!res.ok) return;
+    let res: Response;
+    let data: Itinerary;
+    try {
+      res = await fetch(url);
+      data = await res.json();
+    } catch (err) {
+      // a silent return left the strip and map showing state the store no
+      // longer agrees with — including right after a swap or reroute that
+      // actually succeeded server-side (code-audit 2026-07-18 §6.4)
+      setError(
+        `Couldn't refresh the plan — what you see may be out of date. (${err instanceof Error ? err.message : String(err)})`
+      );
+      return;
+    }
+    if (!res.ok) {
+      setError(
+        (data as unknown as { error?: string })?.error ??
+          "Couldn't refresh the plan — what you see may be out of date."
+      );
+      return;
+    }
     setItinerary(data);
     const active = data.stops.find((s) => s.status === "active");
     if (active?.id) setSelected(active.id);

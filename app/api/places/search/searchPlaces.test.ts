@@ -2,7 +2,7 @@
 // Run with: npx tsx app/api/places/search/searchPlaces.test.ts
 import assert from "node:assert";
 import { buildQuery, GENERAL_QUERIES, includedTypeFor, searchPools } from "./searchPlaces";
-import { ParsedPrompt } from "./filter";
+import { DropEntry, ParsedPrompt } from "./filter";
 
 function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
   return {
@@ -67,6 +67,70 @@ const searchCases: Array<[string, () => Promise<void>]> = [
       );
       assert.ok(lateIds.includes("fx_dessert_midnight"), "the late-opening fixture should survive");
       delete process.env.E2E_MOCK;
+    },
+  ],
+  [
+    "§6.1: ONE category's search failure doesn't discard the others",
+    async () => {
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          const q = JSON.parse(String(init?.body)).textQuery as string;
+          // the "bar" search rate-limits; dinner is fine
+          if (q.includes("bar")) {
+            return new Response(JSON.stringify({ error: { message: "RESOURCE_EXHAUSTED" } }), {
+              status: 429,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response(JSON.stringify({ places: [{ id: "ok1" }] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const out = { failures: [] as DropEntry[] };
+        // pre-fix this threw and the whole request 500'd
+        const pools = await searchPools(
+          "k",
+          mkParsed({ category_signals: ["dinner", "bar"] }),
+          undefined,
+          out
+        );
+        assert.deepStrictEqual(pools.dinner.map((p) => p.id), ["ok1"], "good category survives");
+        assert.deepStrictEqual(pools.bar, [], "failed category becomes an EMPTY pool");
+        assert.strictEqual(out.failures.length, 1);
+        assert.strictEqual(out.failures[0].category, "bar");
+        assert.strictEqual(out.failures[0].rule, "searchFailed");
+        assert.match(out.failures[0].detail, /RESOURCE_EXHAUSTED/);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
+    "§6.1: only a TOTAL wipeout still throws",
+    async () => {
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          return new Response(JSON.stringify({ error: { message: "boom" } }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        await assert.rejects(
+          () => searchPools("k", mkParsed({ category_signals: ["dinner", "bar"] })),
+          /boom/
+        );
+      } finally {
+        globalThis.fetch = realFetch;
+      }
     },
   ],
   [

@@ -41,8 +41,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ selections });
   } catch (err) {
     if (err instanceof SelectParseError) {
+      // the model's answer wasn't usable — say something a person can act
+      // on, keep the technical detail for the server log/response (§6.3)
       return NextResponse.json(
-        { error: err.message, raw: err.raw },
+        {
+          error: "Couldn't pick venues for that just now — try again?",
+          detail: err.message,
+          raw: err.raw,
+        },
         { status: 500 }
       );
     }

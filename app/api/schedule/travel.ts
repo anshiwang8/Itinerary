@@ -293,7 +293,20 @@ export async function getSingleLeg(
       : computeRoute(apiKey, origin, destination, "TRANSIT", departureTime),
     computeRoute(apiKey, origin, destination, "WALK", departureTime),
   ]);
-  return buildLeg(fromIndex, transitRes, walkRes);
+  const leg = buildLeg(fromIndex, transitRes, walkRes);
+  // Neither mode came back. "We don't know how long this takes" was being
+  // rendered as "this takes zero minutes", which schedules the next stop
+  // the instant this one ends, across any distance — a WRONG time, not a
+  // missing one (code-audit 2026-07-18 §6.2). Fall back to a conservative
+  // straight-line walking estimate (5 km/h over the crow-flies distance,
+  // which under-states real walking routes) and keep mode "unknown" so the
+  // UI can say the number is an estimate rather than a promise.
+  if (leg.mode === "unknown") {
+    const meters = haversineMeters(origin, destination);
+    const estimate = Math.max(1, Math.ceil((meters / 1000 / 5) * 60));
+    return { ...leg, rawMinutes: estimate, totalMinutes: estimate, distanceMeters: meters };
+  }
+  return leg;
 }
 
 /**

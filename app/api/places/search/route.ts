@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { filterPools, ParsedPrompt, WeatherHour } from "./filter";
+import { DropEntry, filterPools, ParsedPrompt, WeatherHour } from "./filter";
 import { searchPools } from "./searchPlaces";
 import { resolveStartTime } from "../../schedule/schedule";
 import { isMockMode, mockPools } from "../../_mock/fixtures";
@@ -77,9 +77,12 @@ export async function POST(request: NextRequest) {
 
     // fixture seam: swap the DATA SOURCE only — the objective filter
     // below still runs for real over the fixture pools
+    // a category whose search failed comes back as an empty pool plus a
+    // drop entry saying so, instead of 500-ing the whole request (§6.1)
+    const searchOut = { failures: [] as DropEntry[] };
     const rawPools = isMockMode()
       ? mockPools(categoriesOverride ?? parsed.category_signals ?? [], parsed)
-      : await searchPools(apiKey!, parsed, categoriesOverride);
+      : await searchPools(apiKey!, parsed, categoriesOverride, searchOut);
     const { pools, dropLog, weatherBlocked } = filterPools(
       rawPools,
       parsed,
@@ -90,7 +93,7 @@ export async function POST(request: NextRequest) {
     );
     return NextResponse.json({
       ...pools,
-      _dropLog: dropLog,
+      _dropLog: [...searchOut.failures, ...dropLog],
       _weatherBlocked: weatherBlocked,
     });
   } catch (err) {

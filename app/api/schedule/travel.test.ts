@@ -262,6 +262,42 @@ const cases: Array<[string, () => void]> = [
 // stopped running). Each leg must depart at its own estimated instant.
 const asyncCases: Array<[string, () => Promise<void>]> = [
   [
+    "§6.2: an unpriceable leg gets an ESTIMATE, never a confident zero",
+    async () => {
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("routes.googleapis.com")) {
+          // both TRANSIT and WALK fail — Routes outage
+          return new Response(JSON.stringify({ error: { message: "unavailable" } }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        // ~4.5 km apart
+        const legs = await getTravelLegs("k", [
+          { latitude: 43.65, longitude: -79.4 },
+          { latitude: 43.69, longitude: -79.4 },
+        ]);
+        assert.strictEqual(legs.length, 1);
+        const leg = legs[0];
+        assert.strictEqual(leg.mode, "unknown", "honest about not knowing");
+        // "we don't know" must NOT be scheduled as "zero minutes", which
+        // would put the next stop the instant this one ends
+        assert.ok(leg.totalMinutes > 0, `expected a positive estimate, got ${leg.totalMinutes}`);
+        assert.ok(
+          leg.totalMinutes >= 45 && leg.totalMinutes <= 60,
+          `~4.5km at walking pace should be ~53 min, got ${leg.totalMinutes}`
+        );
+        assert.ok((leg.distanceMeters ?? 0) > 4000, "distance is reported so the UI can qualify it");
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
     "getTravelLegs: each leg departs at its OWN accumulated instant",
     async () => {
       const departures: string[] = [];

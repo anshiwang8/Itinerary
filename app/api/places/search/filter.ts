@@ -45,7 +45,10 @@ export type DropRule =
   | "hours"
   | "rating"
   | "price"
-  | "dedup";
+  | "dedup"
+  /** the venue search itself failed for this category (§6.1) — not a
+   *  judgment about any venue, so it's recorded separately */
+  | "searchFailed";
 
 export interface DropEntry {
   category: string;

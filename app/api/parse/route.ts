@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isMockMode, mockParse } from "../_mock/fixtures";
+import type { ParsedPrompt } from "../places/search/filter";
+import { UNPARSEABLE_MESSAGE } from "../../lib/planGuards";
 
 // Standalone LLM parse step: natural-language prompt → structured plan
 // parameters. Not connected to Places yet — this route only proves Groq
@@ -21,6 +23,32 @@ Respond with ONLY a single JSON object. No prose, no explanations, no markdown f
   "constraints": string[],      // hard requirements — dietary/accessibility AND venue-feature modifiers attached to a category, e.g. ["wheelchair accessible", "vegetarian options", "patio", "live music", "indoors only"]; [] if none
   "location": string            // a neighbourhood/area WITHIN the city, only if the prompt states one ("west end", "downtown", "near the harbour"); "" if none. NEVER a city name — the city is supplied separately by the app, never inferred from the prompt
 }`;
+
+// The model returns JSON, but not necessarily the RIGHT JSON. A missing
+// `location` used to sail through here and get rejected two routes later
+// by a body-shape check, whose developer-facing message ("`parsed` (the
+// /api/parse output object) is required in the body.") went straight to
+// the user — precisely what planGuards exists to prevent. Coercing every
+// field to its documented empty value turns a shape miss into a
+// vague-but-plannable prompt instead (code-audit 2026-07-18 §6.3).
+function normalizeParse(raw: unknown): ParsedPrompt {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const str = (v: unknown, fallback: string) =>
+    typeof v === "string" && v.trim() !== "" ? v : fallback;
+  const strArray = (v: unknown) =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "") : [];
+  return {
+    time_window: str(o.time_window, "unspecified"),
+    stop_count: typeof o.stop_count === "number" ? o.stop_count : null,
+    aesthetic: str(o.aesthetic, "unspecified"),
+    category_signals: strArray(o.category_signals),
+    group_context: str(o.group_context, "unspecified"),
+    budget: typeof o.budget === "string" && o.budget.trim() !== "" ? o.budget : null,
+    constraints: strArray(o.constraints),
+    // "" is the documented "no neighbourhood stated" value
+    location: typeof o.location === "string" ? o.location : "",
+  };
+}
 
 export async function POST(request: NextRequest) {
   let prompt: string;
@@ -86,12 +114,12 @@ export async function POST(request: NextRequest) {
     }
 
     raw = data?.choices?.[0]?.message?.content ?? "";
-    const parsed = JSON.parse(raw);
-    return NextResponse.json(parsed);
+    return NextResponse.json(normalizeParse(JSON.parse(raw)));
   } catch (err) {
     return NextResponse.json(
       {
-        error: "Failed to parse Groq response as JSON.",
+        error: UNPARSEABLE_MESSAGE,
+        detail: "Failed to parse Groq response as JSON.",
         details: err instanceof Error ? err.message : String(err),
         raw, // surfaced so prompt-formatting issues are debuggable
       },

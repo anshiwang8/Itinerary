@@ -1,6 +1,6 @@
 // Places Text Search core, shared by the /api/places/search route and
 // the reroute engine (which re-searches only the affected categories).
-import { ParsedPrompt, Place } from "./filter";
+import { DropEntry, ParsedPrompt, Place } from "./filter";
 
 const SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText";
 
@@ -121,7 +121,10 @@ function dedupeById(places: Place[]): Place[] {
 export async function searchPools(
   apiKey: string,
   parsed: ParsedPrompt,
-  categoriesOverride?: string[]
+  categoriesOverride?: string[],
+  /** optional out-param: per-category search failures, as drop entries the
+   *  caller can fold into its drop log (code-audit 2026-07-18 §6.1) */
+  out?: { failures: DropEntry[] }
 ): Promise<Record<string, Place[]>> {
   // Pools are keyed by category, so a category requested twice ("a drink,
   // then another drink somewhere else") needs only ONE search — the second
@@ -137,21 +140,58 @@ export async function searchPools(
     ),
   ];
 
+  // allSettled, not all: one category's transient failure (rate limit,
+  // timeout) used to reject the whole search and throw away every OTHER
+  // category's perfectly good results as a 500. A failed category becomes
+  // an EMPTY pool plus a drop entry saying why, which routes it into the
+  // existing recovery panel — the flow built for exactly this shape.
+  // Only a total wipeout still throws (§6.1).
+  const note = (category: string, err: unknown) => {
+    out?.failures.push({
+      category,
+      name: "(search unavailable)",
+      id: "",
+      rule: "searchFailed",
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  };
+
   if (categories.length === 0) {
-    const results = await Promise.all(
+    const settled = await Promise.allSettled(
       GENERAL_QUERIES.map((q) => searchText(apiKey, buildQuery(parsed, q)))
     );
-    return { general: dedupeById(results.flat()) };
+    const ok = settled.filter(
+      (r): r is PromiseFulfilledResult<Place[]> => r.status === "fulfilled"
+    );
+    if (ok.length === 0) {
+      throw new Error(
+        settled[0] && settled[0].status === "rejected"
+          ? String(settled[0].reason?.message ?? settled[0].reason)
+          : "Places search failed."
+      );
+    }
+    for (const r of settled) if (r.status === "rejected") note("general", r.reason);
+    return { general: dedupeById(ok.flatMap((r) => r.value)) };
   }
 
-  const results = await Promise.all(
+  const settled = await Promise.allSettled(
     categories.map((category) =>
       searchText(apiKey, buildQuery(parsed, category), includedTypeFor(category))
     )
   );
+  if (settled.every((r) => r.status === "rejected")) {
+    const first = settled[0] as PromiseRejectedResult;
+    throw new Error(String(first.reason?.message ?? first.reason));
+  }
   const pools: Record<string, Place[]> = {};
   categories.forEach((category, i) => {
-    pools[category] = results[i];
+    const r = settled[i];
+    if (r.status === "fulfilled") {
+      pools[category] = r.value;
+    } else {
+      pools[category] = [];
+      note(category, r.reason);
+    }
   });
   return pools;
 }

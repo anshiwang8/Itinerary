@@ -90,6 +90,13 @@ function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
             </div>
           )}
         </>
+      ) : leg.mode === "unknown" ? (
+        <>
+          {/* neither routing mode came back — the number is a straight-line
+              estimate, and must never read as a promise (§6.2) */}
+          <div className="lstrip__legline">travel time unavailable</div>
+          <div className="lstrip__legmeta">~{leg.totalMinutes} min (estimated)</div>
+        </>
       ) : (
         <>
           <div className="lstrip__legline">walk</div>

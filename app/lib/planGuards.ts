@@ -241,6 +241,9 @@ function reasonFromDrops(category: string, drops: DropEntry[]): string | null {
       return one ? "the only one nearby doesn't fit your budget" : "the ones nearby don't fit your budget";
     case "dedup":
       return "the only match is already elsewhere in your plan";
+    case "searchFailed":
+      // not a verdict about any venue — the lookup itself didn't come back
+      return "the venue search didn't come back for this one — worth trying again";
     default:
       return null;
   }
