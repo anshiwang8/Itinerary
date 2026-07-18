@@ -123,9 +123,19 @@ export async function searchPools(
   parsed: ParsedPrompt,
   categoriesOverride?: string[]
 ): Promise<Record<string, Place[]>> {
-  const categories = (categoriesOverride ?? parsed.category_signals ?? []).filter(
-    (c): c is string => typeof c === "string" && c.trim() !== ""
-  );
+  // Pools are keyed by category, so a category requested twice ("a drink,
+  // then another drink somewhere else") needs only ONE search — the second
+  // would return the same venues and overwrite the first. De-duplicating
+  // here also halves the API calls on such a request; the SLOT bookkeeping
+  // that keeps two stops distinct lives in selectVenues, which is where
+  // "one venue per requested stop" actually belongs.
+  const categories = [
+    ...new Set(
+      (categoriesOverride ?? parsed.category_signals ?? []).filter(
+        (c): c is string => typeof c === "string" && c.trim() !== ""
+      )
+    ),
+  ];
 
   if (categories.length === 0) {
     const results = await Promise.all(

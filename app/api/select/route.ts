@@ -12,10 +12,16 @@ export async function POST(request: NextRequest) {
 
   let parsed: ParsedPrompt;
   let poolsIn: Record<string, Place[]>;
+  let slots: string[] | undefined;
   try {
     const body = await request.json();
     parsed = body?.parsed;
     poolsIn = body?.pools;
+    // the requested stops in order, duplicates intact — a repeated category
+    // is two stops sharing one pool, not one stop (code-audit §7.1)
+    slots = Array.isArray(body?.slots)
+      ? body.slots.filter((c: unknown): c is string => typeof c === "string" && c.trim() !== "")
+      : undefined;
   } catch {
     return NextResponse.json({ error: "Request body must be JSON." }, { status: 400 });
   }
@@ -29,9 +35,9 @@ export async function POST(request: NextRequest) {
   try {
     // fixture seam: deterministic highest-rated pick, no Groq call
     if (isMockMode()) {
-      return NextResponse.json({ selections: mockSelect(parsed, poolsIn) });
+      return NextResponse.json({ selections: mockSelect(parsed, poolsIn, slots) });
     }
-    const selections = await selectVenues(apiKey!, parsed, poolsIn);
+    const selections = await selectVenues(apiKey!, parsed, poolsIn, slots);
     return NextResponse.json({ selections });
   } catch (err) {
     if (err instanceof SelectParseError) {

@@ -243,6 +243,12 @@ export function mockParse(prompt: string): ParsedPrompt {
   if (/\bbao\b/.test(p)) signals.push("bao");
   if (/dinner|restaurant|ramen|sushi|food|eat/.test(p)) signals.push("dinner");
   if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
+  // A SECOND stop of the same kind — "drinks then another bar" is two
+  // stops, not one. The deterministic duplicate-category trigger (§7.1):
+  // both slots share the BAR pool and must still get different venues.
+  if (/another (?:bar|drink|round)|two bars|bar hop|second bar/.test(p)) {
+    signals.push("drinks");
+  }
   if (/dessert|ice\s*cream|gelato/.test(p)) signals.push("dessert");
   if (/coffee|caf[eé]/.test(p)) signals.push("coffee");
   // "beach" is its own park-family category (the deliberately-empty pool
@@ -294,7 +300,8 @@ function meetsConstraint(place: Place, constraint: string): boolean {
 
 export function mockSelect(
   parsed: ParsedPrompt,
-  poolsIn: Record<string, Place[]>
+  poolsIn: Record<string, Place[]>,
+  slotsIn?: string[]
 ): Selection[] {
   const cheap = /cheap|budget/i.test(parsed.budget ?? "");
   const constraints = (parsed.constraints ?? []).filter(
@@ -306,11 +313,18 @@ export function mockSelect(
   // ordering behavior depends on this shape, so the fixture must not
   // quietly keep them in place
   const empties: Selection[] = [];
-  for (const [category, places] of Object.entries(poolsIn)) {
-    if (category.startsWith("_") || !Array.isArray(places)) continue;
-    if (places.length === 0) {
-      empties.push({ category, id: null, reason: "no venues survived filtering" });
-      continue;
+  // ...and mirror the SLOT contract too: one entry per REQUESTED stop, with
+  // repeated categories getting DIFFERENT venues. A fixture that collapsed
+  // duplicates would make mock e2e agree with the very bug §7.1 fixes.
+  const slots = (slotsIn ?? Object.keys(poolsIn)).filter(
+    (c) => typeof c === "string" && c.trim() !== "" && !c.startsWith("_")
+  );
+  const taken = new Set<string>();
+  slots.forEach((category, slot) => {
+    const places = poolsIn[category];
+    if (!Array.isArray(places) || places.length === 0) {
+      empties.push({ category, slot, id: null, reason: "no venues survived filtering" });
+      return;
     }
     let pool = places;
     if (constraints.length > 0) {
@@ -318,15 +332,18 @@ export function mockSelect(
       if (unmet) {
         out.push({
           category,
+          slot,
           id: null,
           reason: `no ${category} candidate actually meets "${unmet}"`,
           unmetConstraint: unmet,
         });
-        continue;
+        return;
       }
       pool = places.filter((p) => constraints.every((c) => meetsConstraint(p, c)));
     }
-    const ranked = [...pool].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+    const ranked = [...pool]
+      .filter((p) => !taken.has(p.id))
+      .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
     const pick = cheap
       ? ranked.find(
           (v) =>
@@ -334,8 +351,21 @@ export function mockSelect(
             v.priceLevel !== "PRICE_LEVEL_VERY_EXPENSIVE"
         ) ?? ranked[0]
       : ranked[0];
+    if (!pick) {
+      // fewer distinct venues than requested stops — narrowed, not dropped
+      out.push({
+        category,
+        slot,
+        id: null,
+        narrowed: true,
+        reason: `only found ${taken.size === 1 ? "one" : String(taken.size)} ${category} nearby`,
+      });
+      return;
+    }
+    taken.add(pick.id);
     out.push({
       category,
+      slot,
       id: pick.id,
       reason: `A reliable ${category} spot that suits the evening.`,
       name: pick.displayName?.text,
@@ -343,7 +373,7 @@ export function mockSelect(
       priceLevel: pick.priceLevel,
       description: pick.editorialSummary?.text,
     });
-  }
+  });
   return [...out, ...empties];
 }
 
@@ -514,7 +544,7 @@ export function mockSwapDeps(
 export function mockRerouteDeps(): RerouteDeps {
   return {
     searchPools: async (_parsed, categories) => mockPools(categories),
-    selectVenues: async (parsed, pools) => mockSelect(parsed, pools),
+    selectVenues: async (parsed, pools, slots) => mockSelect(parsed, pools, slots),
     getSingleLeg: async (origin, destination, fromIndex, _departureTime, excludeTransit) =>
       mockLeg(fromIndex, origin, destination, excludeTransit),
   };

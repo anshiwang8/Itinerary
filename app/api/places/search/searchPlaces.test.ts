@@ -1,7 +1,7 @@
 // buildQuery unit tests — constraints must shape the search query.
 // Run with: npx tsx app/api/places/search/searchPlaces.test.ts
 import assert from "node:assert";
-import { buildQuery, GENERAL_QUERIES, includedTypeFor } from "./searchPlaces";
+import { buildQuery, GENERAL_QUERIES, includedTypeFor, searchPools } from "./searchPlaces";
 import { ParsedPrompt } from "./filter";
 
 function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
@@ -17,6 +17,37 @@ function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
     ...overrides,
   };
 }
+
+// A repeated category must not cost a second identical Places call — the
+// pools are keyed by category, so the duplicate would just overwrite the
+// first (code-audit 2026-07-18 §7.1). Slot bookkeeping lives in select.
+const searchCases: Array<[string, () => Promise<void>]> = [
+  [
+    "DUPLICATE CATEGORY: one search per distinct category, pool keyed once",
+    async () => {
+      const queries: string[] = [];
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          queries.push(JSON.parse(String(init?.body)).textQuery);
+          return new Response(JSON.stringify({ places: [{ id: "p1" }, { id: "p2" }] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const pools = await searchPools("k", mkParsed({ category_signals: ["bar", "bar"] }));
+        assert.strictEqual(queries.length, 1, `expected ONE search, got ${queries.length}`);
+        assert.deepStrictEqual(Object.keys(pools), ["bar"]);
+        assert.strictEqual(pools.bar.length, 2);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+];
 
 const cases: Array<[string, () => void]> = [
   [
@@ -124,16 +155,29 @@ const cases: Array<[string, () => void]> = [
   ],
 ];
 
-let failed = 0;
-for (const [name, fn] of cases) {
-  try {
-    fn();
-    console.log(`PASS  ${name}`);
-  } catch (err) {
-    failed++;
-    console.log(`FAIL  ${name}`);
-    console.log(`      ${err instanceof Error ? err.message : err}`);
+(async () => {
+  let failed = 0;
+  for (const [name, fn] of cases) {
+    try {
+      fn();
+      console.log(`PASS  ${name}`);
+    } catch (err) {
+      failed++;
+      console.log(`FAIL  ${name}`);
+      console.log(`      ${err instanceof Error ? err.message : err}`);
+    }
   }
-}
-console.log(`\n${cases.length - failed}/${cases.length} passed`);
-if (failed > 0) process.exit(1);
+  for (const [name, fn] of searchCases) {
+    try {
+      await fn();
+      console.log(`PASS  ${name}`);
+    } catch (err) {
+      failed++;
+      console.log(`FAIL  ${name}`);
+      console.log(`      ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  const total = cases.length + searchCases.length;
+  console.log(`\n${total - failed}/${total} passed`);
+  if (failed > 0) process.exit(1);
+})();

@@ -60,6 +60,13 @@ mocked pipeline source.
   hours (20°, precip 10%) with a built-in daily **rain window at 3 PM
   local** (precip 80, `MOCK_RAIN_HOUR`) — plan an outdoor category "at
   3pm" to trigger the weather gate / empty-pool net.
+- **Duplicate categories** (§7.1/§7.2): a prompt matching `another bar|another
+  drink|another round|two bars|bar hop|second bar` pushes the **drinks** signal
+  TWICE, so two stops share the one BAR pool. Pair it with a stated time —
+  "drinks at 7pm then another bar" — and the picks are deterministic: the two
+  highest-rated bars open at 19:00, **Ten O'Clock Curfew** then **The Standing
+  Room**. Selecting the second card exercises stop identity being the venue id
+  rather than the category string.
 - **"beach"** is the deliberately EMPTY park-family pool: it shares the
   park plausible band (a late no-time beach prompt fires the batch-4b
   time-gate) but nothing is ever found — the deterministic trigger for

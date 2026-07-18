@@ -195,6 +195,106 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(data.selections[0].unmetConstraint, undefined);
     },
   ],
+  // ── duplicate categories: two stops of the same kind (code-audit §7.1) ──
+  [
+    "DUPLICATE CATEGORY: two bar slots get two DIFFERENT venues, one entry each",
+    async () => {
+      groqCalls = [];
+      responder = () =>
+        JSON.stringify({
+          selections: [
+            { slot: 0, category: "bar", id: "a", reason: "Start here." },
+            { slot: 1, category: "bar", id: "b", reason: "Then here." },
+          ],
+        });
+      const res = await POST(
+        req({
+          parsed: { ...parsed, category_signals: ["bar", "bar"] },
+          pools: { bar: [mkPlace("a", 4.2), mkPlace("b", 4.8)] },
+          slots: ["bar", "bar"],
+        })
+      );
+      const data = await res.json();
+      // pre-fix this collapsed to ONE selection and the second stop vanished
+      assert.strictEqual(data.selections.length, 2, "two slots → two selections");
+      assert.deepStrictEqual(
+        data.selections.map((s: { slot: number }) => s.slot),
+        [0, 1]
+      );
+      const ids = data.selections.map((s: { id: string }) => s.id);
+      assert.deepStrictEqual(ids, ["a", "b"]);
+      assert.strictEqual(new Set(ids).size, 2, "the two stops must be different venues");
+      // the model was told there are two slots to fill
+      const sent = JSON.parse(groqCalls[0].messages[1].content);
+      assert.deepStrictEqual(sent.slots, [
+        { slot: 0, category: "bar" },
+        { slot: 1, category: "bar" },
+      ]);
+    },
+  ],
+  [
+    "DUPLICATE CATEGORY: a repeated venue is rejected, retried, then filled distinctly",
+    async () => {
+      groqCalls = [];
+      // the model picks the SAME venue for both slots on attempt 1
+      responder = (n) =>
+        n === 1
+          ? JSON.stringify({
+              selections: [
+                { slot: 0, category: "bar", id: "b", reason: "Nice." },
+                { slot: 1, category: "bar", id: "b", reason: "Also nice." },
+              ],
+            })
+          : JSON.stringify({
+              selections: [
+                { slot: 0, category: "bar", id: "b", reason: "Nice." },
+                { slot: 1, category: "bar", id: "a", reason: "Different." },
+              ],
+            });
+      const res = await POST(
+        req({
+          parsed: { ...parsed, category_signals: ["bar", "bar"] },
+          pools: { bar: [mkPlace("a", 4.2), mkPlace("b", 4.8)] },
+          slots: ["bar", "bar"],
+        })
+      );
+      const data = await res.json();
+      assert.strictEqual(groqCalls.length, 2, "a repeated venue must trigger the retry");
+      assert.match(groqCalls[1].messages[3].content, /already used by an earlier slot/);
+      assert.deepStrictEqual(
+        data.selections.map((s: { id: string }) => s.id),
+        ["b", "a"]
+      );
+    },
+  ],
+  [
+    "DUPLICATE CATEGORY: fewer distinct venues than stops → narrowed, never silently dropped",
+    async () => {
+      groqCalls = [];
+      // only ONE venue in the pool, but two stops asked for
+      responder = () =>
+        JSON.stringify({
+          selections: [
+            { slot: 0, category: "bar", id: "a", reason: "The one." },
+            { slot: 1, category: "bar", id: "a", reason: "The one again." },
+          ],
+        });
+      const res = await POST(
+        req({
+          parsed: { ...parsed, category_signals: ["bar", "bar"] },
+          pools: { bar: [mkPlace("a", 4.2)] },
+          slots: ["bar", "bar"],
+        })
+      );
+      const data = await res.json();
+      assert.strictEqual(data.selections.length, 2, "the unfillable slot still reports back");
+      assert.strictEqual(data.selections[0].id, "a");
+      const second = data.selections[1];
+      assert.strictEqual(second.id, null);
+      assert.strictEqual(second.narrowed, true, "must be flagged as narrowed, not dropped");
+      assert.match(second.reason, /only found one bar/);
+    },
+  ],
   [
     "parsed.home → each candidate carries a CODE-computed kmFromHome; absent without it",
     async () => {

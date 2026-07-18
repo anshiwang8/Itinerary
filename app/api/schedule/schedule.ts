@@ -335,6 +335,9 @@ export interface SelectionLike {
   name?: string;
   reason?: string;
   fallback?: boolean;
+  /** which requested stop this fills — two stops can share a category, so
+   * the slot (not the category) is the identity (code-audit §7.1) */
+  slot?: number;
   rating?: number;
   /** venue price level — carried on the stop so the strip's dollar signs
    * survive swaps/reroutes (pools-only lookups go stale) */

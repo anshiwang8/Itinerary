@@ -7,10 +7,11 @@ import { haversineMeters } from "../schedule/travel";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "llama-3.3-70b-versatile";
 
-const SYSTEM_PROMPT = `You are the venue selector for a day-plan generator. You receive the user's parsed request and candidate venue pools grouped by category. Pick exactly ONE venue per category.
+const SYSTEM_PROMPT = `You are the venue selector for a day-plan generator. You receive the user's parsed request, the SLOTS to fill (the stops of the outing, in order), and candidate venue pools grouped by category. Pick exactly ONE venue for EACH SLOT.
 
 Rules:
-- Select by "id", ONLY from the provided candidates within that same category. Never invent an id and never borrow one from another category.
+- Every slot gets its own entry, identified by its "slot" number. Two slots can share a category (the user asked for two stops of the same kind) — when they do, they MUST get DIFFERENT venues. Never repeat a venue across slots.
+- Select by "id", ONLY from the provided candidates for that slot's category. Never invent an id and never borrow one from another category.
 - Judge fit against the parsed request (aesthetic, group_context, budget, constraints) AND cohesion across the full set: the chosen venues should make sense together as one outing — compatible vibe, and reasonable proximity to each other (use the lat/lng provided).
 - Prefer a coherent outing over individually highest-rated venues.
 - DISTANCE (applies when candidates carry "kmFromHome" — the straight-line km from the user's starting point, computed by code): treat distance as a real cost, not a tiebreaker. Prefer the nearer candidate when quality is comparable, and NEVER pick a venue tens of kilometres away when an acceptable option exists much nearer — a slightly lower rating close by beats a slightly higher rating across the region. Mention distance in the reason only when it drove the pick.
@@ -20,15 +21,25 @@ Rules:
 - "reason": exactly one sentence in a user-facing tone, e.g. "Cozy and low-key, a natural fit for a quiet date." Never meta commentary about ids, JSON, data, or your selection process.
 
 Respond with ONLY a single JSON object, no prose, no markdown fences:
-{ "selections": [ { "category": string, "id": string | null, "reason": string, "unmet_constraint": string | null } ] }
+{ "selections": [ { "slot": number, "category": string, "id": string | null, "reason": string, "unmet_constraint": string | null } ] }
 "id" may be null ONLY together with a non-null "unmet_constraint".
-Exactly one entry per category, in the order the categories were given.`;
+Exactly one entry per slot, in the order the slots were given.`;
 
 export interface Selection {
   category: string;
   id: string | null;
   reason: string;
   fallback?: boolean;
+  /** which requested stop this fills. Two stops can share a category
+   * ("a drink, then another drink somewhere else"), so the SLOT — not the
+   * category string — is a selection's identity. Absent on legacy/simple
+   * callers, where category is unique and doubles as the identity. */
+  slot?: number;
+  /** set (with id: null) when the request asked for more stops of this
+   * category than there are distinct venues to fill them — the plan is
+   * narrower than asked, and the user must be told, never silently
+   * collapsed (code-audit 2026-07-18 §7.1). */
+  narrowed?: boolean;
   name?: string;
   rating?: number;
   /** price + one-line description travel with the pick so the UI never
@@ -96,10 +107,40 @@ async function callGroq(apiKey: string, messages: unknown[]) {
 // Raw selection shape as the model returns it (unmet_constraint is the
 // wire name; Selection carries it as unmetConstraint).
 interface RawSelection {
+  slot?: unknown;
   category?: string;
   id?: unknown;
   reason?: unknown;
   unmet_constraint?: unknown;
+}
+
+/** Index the model's answers by slot. Tolerant by design: a model that
+ *  answers by category only (the pre-slot contract) still lines up as long
+ *  as the category is unambiguous — so a shape regression degrades to the
+ *  old behaviour instead of failing every slot into the fallback ladder. */
+function indexBySlot(raw: unknown, slots: string[]): Map<number, RawSelection> {
+  const bySlot = new Map<number, RawSelection>();
+  if (!Array.isArray(raw)) return bySlot;
+  const byCategory = new Map<string, RawSelection[]>();
+  for (const s of raw as RawSelection[]) {
+    if (!s || typeof s !== "object") continue;
+    if (typeof s.slot === "number" && Number.isInteger(s.slot)) {
+      if (!bySlot.has(s.slot)) bySlot.set(s.slot, s);
+      continue;
+    }
+    if (typeof s.category === "string") {
+      const list = byCategory.get(s.category) ?? [];
+      list.push(s);
+      byCategory.set(s.category, list);
+    }
+  }
+  // fill any slot the model didn't number, in request order per category
+  slots.forEach((category, i) => {
+    if (bySlot.has(i)) return;
+    const queue = byCategory.get(category);
+    if (queue && queue.length > 0) bySlot.set(i, queue.shift()!);
+  });
+  return bySlot;
 }
 
 function unmetOf(sel: RawSelection | undefined): string | null {
@@ -108,35 +149,44 @@ function unmetOf(sel: RawSelection | undefined): string | null {
     : null;
 }
 
-// Check the model's selections against the pools. Returns a list of
-// human-readable problems (empty = valid). id: null is valid ONLY as an
-// honest unmet-constraint answer.
+// Check the model's selections against the pools, SLOT by slot. Returns a
+// list of human-readable problems (empty = valid). id: null is valid ONLY
+// as an honest unmet-constraint answer. Two slots sharing a category must
+// get different venues — a repeat is a problem, not a preference.
 function findProblems(
   selections: unknown,
-  pools: Record<string, Place[]>
+  pools: Record<string, Place[]>,
+  slots: string[]
 ): string[] {
   const problems: string[] = [];
   if (!Array.isArray(selections)) {
     return ["`selections` is missing or not an array"];
   }
-  const byCategory = new Map<string, RawSelection>();
-  for (const s of selections as RawSelection[]) {
-    if (s && typeof s.category === "string") byCategory.set(s.category, s);
-  }
-  for (const [category, places] of Object.entries(pools)) {
-    const sel = byCategory.get(category);
+  const bySlot = indexBySlot(selections, slots);
+  const usedIds = new Set<string>();
+  slots.forEach((category, i) => {
+    const places = pools[category] ?? [];
+    const sel = bySlot.get(i);
     if (!sel) {
-      problems.push(`no selection for category "${category}"`);
-      continue;
+      problems.push(`no selection for slot ${i} ("${category}")`);
+      return;
     }
-    if (sel.id === null && unmetOf(sel)) continue; // honest constraint failure
+    if (sel.id === null && unmetOf(sel)) return; // honest constraint failure
     const validIds = new Set(places.map((p) => p.id));
     if (typeof sel.id !== "string" || !validIds.has(sel.id)) {
       problems.push(
-        `selected id "${String(sel.id)}" is not in the "${category}" pool`
+        `slot ${i}: selected id "${String(sel.id)}" is not in the "${category}" pool`
       );
+      return;
     }
-  }
+    if (usedIds.has(sel.id)) {
+      problems.push(
+        `slot ${i}: venue "${sel.id}" is already used by an earlier slot — each stop needs a different venue`
+      );
+      return;
+    }
+    usedIds.add(sel.id);
+  });
   return problems;
 }
 
@@ -146,7 +196,9 @@ function findProblems(
 const HEDGE_PATTERN =
   /\b(worth confirming|check with|double[- ]?check|call ahead|ask (?:them|ahead|the venue)|may (?:be able to )?accommodate|might (?:be able to )?accommodate|verify|confirm (?:with|that|they))\b/i;
 
-function highestRated(places: Place[]): Place {
+/** Highest-rated of the given places; undefined when there are none left
+ *  (every candidate already taken by an earlier slot). */
+function highestRated(places: Place[]): Place | undefined {
   return [...places].sort((a, b) => (b.rating ?? -1) - (a.rating ?? -1))[0];
 }
 
@@ -159,34 +211,66 @@ function highestRated(places: Place[]): Place {
 export async function selectVenues(
   apiKey: string,
   parsed: ParsedPrompt,
-  poolsIn: Record<string, Place[]>
+  poolsIn: Record<string, Place[]>,
+  slotsIn?: string[]
 ): Promise<Selection[]> {
   // Ignore meta keys (e.g. _dropLog passed through by mistake) and
   // split empty pools out — they're answered without the LLM.
   const pools: Record<string, Place[]> = {};
-  const emptyCategories: string[] = [];
+  const emptyCategories = new Set<string>();
   for (const [k, v] of Object.entries(poolsIn)) {
     if (k.startsWith("_") || !Array.isArray(v)) continue;
-    if (v.length === 0) emptyCategories.push(k);
+    if (v.length === 0) emptyCategories.add(k);
     else pools[k] = v;
   }
 
-  const emptySelections: Selection[] = emptyCategories.map((category) => ({
-    category,
-    id: null,
-    reason: "no venues survived filtering",
-  }));
+  // The SLOTS are the requested stops, in order, duplicates intact — pools
+  // are keyed by category, so a repeated category shares one pool but still
+  // needs its own stop. Callers that don't care (single stop, or a
+  // guaranteed-unique category list) can omit them and get the old
+  // one-per-pool behaviour.
+  const allSlots = (slotsIn ?? Object.keys(poolsIn)).filter(
+    (c): c is string => typeof c === "string" && c.trim() !== "" && !c.startsWith("_")
+  );
 
-  if (Object.keys(pools).length === 0) return emptySelections;
+  // slots whose pool never materialized — answered without the LLM, and
+  // appended LAST (the recovery flow's ordering depends on this shape)
+  const emptySelections: Selection[] = [];
+  const liveSlots: Array<{ slot: number; category: string }> = [];
+  allSlots.forEach((category, slot) => {
+    if (pools[category] && pools[category].length > 0) {
+      liveSlots.push({ slot, category });
+    } else if (emptyCategories.has(category) || !pools[category]) {
+      emptySelections.push({
+        category,
+        slot,
+        id: null,
+        reason: "no venues survived filtering",
+      });
+    }
+  });
 
+  if (liveSlots.length === 0) return emptySelections;
+
+  const liveCategories = [...new Set(liveSlots.map((s) => s.category))];
   const candidates: Record<string, unknown[]> = {};
-  for (const [category, places] of Object.entries(pools)) {
-    candidates[category] = places.map((p) => candidateView(p, parsed.home));
+  for (const category of liveCategories) {
+    candidates[category] = pools[category].map((p) => candidateView(p, parsed.home));
   }
 
   const messages: unknown[] = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: JSON.stringify({ request: parsed, candidates }) },
+    {
+      role: "system",
+      content: SYSTEM_PROMPT,
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        request: parsed,
+        slots: liveSlots.map((s) => ({ slot: s.slot, category: s.category })),
+        candidates,
+      }),
+    },
   ];
 
   let raw = await callGroq(apiKey, messages);
@@ -201,13 +285,14 @@ export async function selectVenues(
     );
   }
 
-  let problems = findProblems(parsedOut.selections, pools);
+  const liveSlotCategories = liveSlots.map((s) => s.category);
+  let problems = findProblems(parsedOut.selections, pools, liveSlotCategories);
   if (problems.length > 0) {
     // One correction retry with the problems spelled out.
     messages.push({ role: "assistant", content: raw });
     messages.push({
       role: "user",
-      content: `Your previous answer was invalid: ${problems.join("; ")}. Respond again with ONLY the JSON object, selecting ids strictly from the provided candidates for each category.`,
+      content: `Your previous answer was invalid: ${problems.join("; ")}. Respond again with ONLY the JSON object, one entry per slot, selecting ids strictly from the provided candidates for that slot's category, and never repeating a venue across slots.`,
     });
     raw = await callGroq(apiKey, messages);
     try {
@@ -221,31 +306,29 @@ export async function selectVenues(
     }
   }
 
-  // Assemble final selections in pool order; per-category fallback to
-  // highest-rated for anything still invalid after the retry.
-  const byCategory = new Map<string, Selection & RawSelection>();
-  if (Array.isArray(parsedOut.selections)) {
-    for (const s of parsedOut.selections) {
-      if (s && typeof s.category === "string") byCategory.set(s.category, s);
-    }
-  }
+  // Assemble final selections in SLOT order; per-slot fallback to the
+  // highest-rated venue not already taken by an earlier slot.
+  const bySlot = indexBySlot(parsedOut.selections, liveSlotCategories);
   const hasConstraints = (parsed.constraints ?? []).some(
     (c) => typeof c === "string" && c.trim() !== ""
   );
-  const selections = Object.entries(pools).map(([category, places]): Selection => {
+  const taken = new Set<string>();
+  const selections = liveSlots.map(({ slot, category }): Selection => {
+    const places = pools[category];
     const validIds = new Set(places.map((p) => p.id));
-    const sel = byCategory.get(category);
+    const sel = bySlot.get(slot);
     const unmet = unmetOf(sel);
     if (sel && sel.id === null && unmet) {
       // honest constraint failure — surfaced, never papered over
       return {
         category,
+        slot,
         id: null,
         reason: `no ${category} candidate actually meets "${unmet}"`,
         unmetConstraint: unmet,
       };
     }
-    if (sel && typeof sel.id === "string" && validIds.has(sel.id)) {
+    if (sel && typeof sel.id === "string" && validIds.has(sel.id) && !taken.has(sel.id)) {
       const place = places.find((p) => p.id === sel.id)!;
       const reason = typeof sel.reason === "string" ? sel.reason : "";
       if (hasConstraints && HEDGE_PATTERN.test(reason)) {
@@ -255,13 +338,16 @@ export async function selectVenues(
         )!;
         return {
           category,
+          slot,
           id: null,
           reason: `no ${category} candidate verifiably meets "${c}"`,
           unmetConstraint: c,
         };
       }
+      taken.add(sel.id);
       return {
         category,
+        slot,
         id: sel.id,
         reason,
         name: place.displayName?.text,
@@ -270,9 +356,23 @@ export async function selectVenues(
         description: place.editorialSummary?.text,
       };
     }
-    const fb = highestRated(places);
+    const fb = highestRated(places.filter((p) => !taken.has(p.id)));
+    if (!fb) {
+      // The request asked for more stops of this category than there are
+      // distinct venues to fill them. Narrower than asked — say so, don't
+      // silently drop the stop (code-audit 2026-07-18 §7.1).
+      return {
+        category,
+        slot,
+        id: null,
+        narrowed: true,
+        reason: `only found ${taken.size === 1 ? "one" : String(taken.size)} ${category} nearby`,
+      };
+    }
+    taken.add(fb.id);
     return {
       category,
+      slot,
       id: fb.id,
       reason: "Top-rated option in this category.",
       fallback: true,

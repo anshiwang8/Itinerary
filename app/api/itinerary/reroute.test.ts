@@ -320,6 +320,76 @@ const cases: Array<[string, () => Promise<void>]> = [
       assertFloorGuarantee(before, it, res.floor_time);
     },
   ],
+  [
+    "DUPLICATE CATEGORY (§7.1): two affected bar stops get two DIFFERENT venues",
+    async () => {
+      // an evening with TWO bars — "a drink, then another drink somewhere
+      // else". Pre-fix, indexing the selections by CATEGORY made both
+      // affected stops resolve to the same Selection object, so the reroute
+      // planned the same venue twice in one night.
+      const stops: ScheduledStop[] = [
+        {
+          category: "dinner", id: "d1", name: "Dinner Spot",
+          start_time: T(19, 0), end_time: T(20, 45),
+          durationMinutes: { base: 90, buffer: 15, total: 105 },
+          location: { latitude: 43.647, longitude: -79.42 },
+          travelMinutesToNext: 15, travelToNext: leg(0, "transit", 15),
+        },
+        {
+          category: "bar", id: "b1", name: "First Bar",
+          start_time: T(21, 0), end_time: T(22, 10),
+          durationMinutes: { base: 60, buffer: 10, total: 70 },
+          location: { latitude: 43.649, longitude: -79.41 },
+          travelMinutesToNext: 10, travelToNext: leg(1, "walk", 10),
+        },
+        {
+          category: "bar", id: "b2", name: "Second Bar",
+          start_time: T(22, 20), end_time: T(23, 30),
+          durationMinutes: { base: 60, buffer: 10, total: 70 },
+          location: { latitude: 43.65, longitude: -79.405 },
+        },
+      ];
+      const it = createItinerary(stops, [leg(0, "transit", 15), leg(1, "walk", 10)], {
+        time_window: "evening", stop_count: null, aesthetic: "lively",
+        category_signals: ["dinner", "bar", "bar"], group_context: "date",
+        budget: null, constraints: [], location: "Ossington",
+      });
+      const now = new Date(T(18, 0)); // nothing started
+      // two distinct candidates in the shared bar pool
+      const deps: RerouteDeps = {
+        searchPools: async () => ({ bar: [mkVenue("bar_A", 43.6515), mkVenue("bar_B", 43.6525)] }),
+        selectVenues: async (_parsed, pools, slots) => {
+          // mirrors the real slot contract: one entry per requested slot,
+          // never repeating a venue
+          const list = (slots ?? Object.keys(pools)) as string[];
+          const taken = new Set<string>();
+          return list.map((category, slot) => {
+            const pick = (pools[category] ?? []).find((p) => !taken.has(p.id));
+            if (pick) taken.add(pick.id);
+            return pick
+              ? { category, slot, id: pick.id, reason: `Fresh ${category}.`, name: pick.displayName?.text }
+              : { category, slot, id: null, narrowed: true, reason: "only found one bar nearby" };
+          });
+        },
+        getSingleLeg: async (_o, _d, fromIndex, _dep, excludeTransit) => ({
+          fromIndex, mode: excludeTransit ? "walk" : "transit",
+          rawMinutes: 10, marginMinutes: excludeTransit ? 0 : 5,
+          totalMinutes: excludeTransit ? 10 : 15,
+          distanceMeters: 900, encodedPolyline: "enc_new",
+        }),
+      };
+      // break leg 0 (dinner → first bar): BOTH bars are downstream
+      const res = await rerouteItinerary(it, { type: "transit_cancelled", legIndex: 0 }, now, deps);
+      assert.ok(res.rerouted, "both bars are downstream of the broken leg");
+      if (!res.rerouted) return;
+      assert.strictEqual(res.changed.length, 2, "both bar stops replanned");
+      const ids = [it.stops[1].id, it.stops[2].id];
+      assert.strictEqual(new Set(ids).size, 2, `the two bars must be different venues, got ${JSON.stringify(ids)}`);
+      assert.deepStrictEqual(ids, ["bar_A", "bar_B"]);
+      // dinner untouched
+      assert.strictEqual(it.stops[0].id, "d1");
+    },
+  ],
 ];
 
 (async () => {

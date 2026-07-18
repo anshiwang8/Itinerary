@@ -81,7 +81,9 @@ interface Props {
   selected: string | null;
   /** the plan's zone — pin times render in it (default Toronto) */
   timeZone?: string;
-  onSelect: (category: string) => void;
+  /** the selected stop, identified by VENUE ID (two stops can share a
+   *  category — see code-audit 2026-07-18 §7.2) */
+  onSelect: (stopId: string) => void;
 }
 
 export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect }: Props) {
@@ -246,7 +248,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   for (let i = 0; i < stops.length - 1; i++) {
     if (stops[i].legLabel) {
       const p = midPx(stops[i], stops[i + 1]);
-      if (p) legLabels.push({ key: stops[i].category, x: p.x, y: p.y, text: stops[i].legLabel! });
+      if (p) legLabels.push({ key: stops[i].id, x: p.x, y: p.y, text: stops[i].legLabel! });
     }
   }
 
@@ -288,12 +290,12 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
           // shows compact pin tags only, highlighted when selected.
           const live = s.status === "active";
           const changed = !!s.changed;
-          const isSel = selected === s.category;
+          const isSel = selected === s.id;
           const mkClass =
             "mk " +
             (live ? "mk--live" : changed ? "mk--changed" : s.status === "completed" ? "mk--done" : "");
           return (
-            <div key={s.category}>
+            <div key={s.id}>
               <div className={mkClass} style={{ left: p.x, top: p.y }} aria-hidden="true">
                 <div className="mk__dot" />
               </div>
@@ -306,7 +308,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
                   (s.changed ? " chip--changed" : "")
                 }
                 style={{ left: p.x, top: p.y, zIndex: isSel ? 9 : s.changed ? 8 : undefined }}
-                onClick={() => onSelect(s.category)}
+                onClick={() => onSelect(s.id)}
               >
                 <span className="chip__num">{i + 1}</span>
                 <span className="chip__name">{s.name}</span>

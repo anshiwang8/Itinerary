@@ -225,7 +225,8 @@ export default function ItineraryStrip({
   home?: StripHome | null;
   stops: StripStop[];
   selected: string | null;
-  onSelect: (category: string) => void;
+  /** selects by VENUE ID — a category is not a stop identity (§7.2) */
+  onSelect: (stopId: string) => void;
   swap?: SwapInline | null;
   timeZone?: string;
 }) {
@@ -250,9 +251,9 @@ export default function ItineraryStrip({
           <StopCard
             stop={s}
             index={i}
-            selected={selected === s.category}
-            onSelect={() => onSelect(s.category)}
-            swap={selected === s.category ? swap : null}
+            selected={selected === s.id}
+            onSelect={() => onSelect(s.id)}
+            swap={selected === s.id ? swap : null}
             timeZone={timeZone}
           />
           {s.legToNext && <LegCard leg={s.legToNext} timeZone={timeZone} />}

@@ -53,7 +53,9 @@ export interface RerouteDeps {
   ) => Promise<Record<string, Place[]>>;
   selectVenues: (
     parsed: ParsedPrompt,
-    pools: Record<string, Place[]>
+    pools: Record<string, Place[]>,
+    /** the affected stops in order, duplicates intact — see §7.1 */
+    slots?: string[]
   ) => Promise<Selection[]>;
   getSingleLeg: (
     origin: LatLng,
@@ -70,8 +72,8 @@ function realDeps(): RerouteDeps {
   return {
     searchPools: (parsed, categories) =>
       realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories),
-    selectVenues: (parsed, pools) =>
-      realSelectVenues(process.env.GROQ_API_KEY ?? "", parsed, pools),
+    selectVenues: (parsed, pools, slots) =>
+      realSelectVenues(process.env.GROQ_API_KEY ?? "", parsed, pools, slots),
     getSingleLeg: (origin, destination, fromIndex, departureTime, excludeTransit) =>
       realGetSingleLeg(
         process.env.GOOGLE_ROUTES_API_KEY ?? "",
@@ -188,17 +190,36 @@ export async function rerouteItinerary(
     pools[k] = pools[k].filter((p) => !keptIds.has(p.id));
   }
 
-  const selections = await deps.selectVenues(parsed, pools);
-  // order selections to match the affected category order
-  const byCategory = new Map(selections.map((s) => [s.category, s]));
-  const ordered: Selection[] = categories.map(
-    (c) =>
-      byCategory.get(c) ?? {
+  // SLOT-aware: two affected stops can share a category, and they must get
+  // DIFFERENT venues. Indexing the answers by category (as this did) made
+  // both resolve to the SAME Selection object — the reroute planned one
+  // venue twice in one evening (code-audit 2026-07-18 §7.1).
+  const selections = await deps.selectVenues(parsed, pools, categories);
+  const bySlot = new Map(
+    selections.filter((s) => typeof s.slot === "number").map((s) => [s.slot!, s])
+  );
+  const leftoverByCategory = new Map<string, Selection[]>();
+  for (const s of selections) {
+    if (typeof s.slot === "number") continue;
+    const list = leftoverByCategory.get(s.category) ?? [];
+    list.push(s);
+    leftoverByCategory.set(s.category, list);
+  }
+  const ordered: Selection[] = categories.map((c, i) => {
+    const bySlotHit = bySlot.get(i);
+    if (bySlotHit) return bySlotHit;
+    // tolerate a slot-less answer (older dep implementations/tests): take
+    // the next unused selection for that category, never the same one twice
+    const queue = leftoverByCategory.get(c);
+    const next = queue && queue.length > 0 ? queue.shift() : undefined;
+    return (
+      next ?? {
         category: c,
         id: null,
         reason: "no venues survived filtering",
       }
-  );
+    );
+  });
 
   // attach coordinates for travel + map
   const venueOf = (sel: Selection): Place | undefined =>

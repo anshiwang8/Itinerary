@@ -183,3 +183,40 @@ test("active stop can't be swapped; an upcoming one still can @mock", async ({ p
   await stripCard(page, "Ten O'Clock Curfew").click();
   await expect(page.locator(".lstrip__swapinput")).toBeVisible();
 });
+
+// ── duplicate categories (code-audit 2026-07-18 §7.1 / §7.2) ────────────
+// "drinks at 7pm then another bar" is TWO stops sharing ONE pool. Before
+// the fix, pools keyed by category collapsed them into a single stop and
+// the second silently never existed — no message, no recovery panel.
+test.describe("@mock duplicate categories", () => {
+  test("a repeated category plans TWO stops with DIFFERENT venues @mock", async ({ page }) => {
+    await planEvening(page, "drinks at 7pm then another bar");
+
+    const names = await page.locator(".lstrip__stop .lstrip__name").allInnerTexts();
+    expect(names.length).toBe(2);
+    // the two highest-rated bars open at 7pm, in rating order
+    expect(names[0].trim()).toBe("Ten O'Clock Curfew");
+    expect(names[1].trim()).toBe("The Standing Room");
+    expect(new Set(names.map((n) => n.trim())).size).toBe(2);
+
+    // both cards say "drinks" — the category repeats, the venue must not
+    const eyebrows = await page.locator(".lstrip__stop .eyebrow").allInnerTexts();
+    // (the eyebrow is uppercased in CSS)
+    expect(eyebrows.map((e) => e.trim().toLowerCase())).toEqual(["drinks", "drinks"]);
+  });
+
+  test("selecting the SECOND duplicate card acts on that stop, not the first @mock", async ({ page }) => {
+    await planEvening(page, "drinks at 7pm then another bar");
+
+    const cards = page.locator(".lstrip__stop");
+    // open the second card's swap prompt — identity is the venue id, so
+    // this must target The Standing Room, not the first bar (§7.2)
+    await cards.nth(1).click();
+    const swapBox = cards.nth(1).locator(".lstrip__swap");
+    await expect(swapBox).toBeVisible();
+    await expect(cards.nth(0).locator(".lstrip__swap")).toHaveCount(0);
+    // and the "why here" reason belongs to the second card too
+    await expect(cards.nth(1).locator(".lstrip__reason")).toBeVisible();
+    await expect(cards.nth(0).locator(".lstrip__reason")).toHaveCount(0);
+  });
+});

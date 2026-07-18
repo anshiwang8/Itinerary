@@ -18,7 +18,8 @@ import {
   emptyParseReason,
   noVenuesReason,
   orderByRequest,
-  partialEmptyCategories,
+  partialEmptySelections,
+  narrowedSlotReason,
   unmetConstraintReason,
   weatherBlockedReason,
   widenOfferLabel,
@@ -71,6 +72,25 @@ interface PlanCtx {
    * (recovery's follow-up path), so ordering can restore prompt order */
   slots: Record<string, string>;
 }
+
+/** One unfilled slot in the recovery panel. `slot` is present whenever the
+ *  plan knows which requested stop this is — two stops can share a category
+ *  ("a drink, then another drink"), so the category alone is not an
+ *  identity and resolving one must not overwrite the other (§7.1/§7.2). */
+interface EmptyRow {
+  category: string;
+  slot?: number;
+  reason: string;
+  noWiden?: boolean;
+}
+
+/** Stable per-row identity: the slot when known, else the category. */
+const rowKey = (e: { category: string; slot?: number }): string =>
+  e.slot != null ? `${e.category}#${e.slot}` : e.category;
+
+/** Does this selection fill the given row's slot? */
+const matchesRow = (s: Selection, e: { category: string; slot?: number }): boolean =>
+  e.slot != null ? s.slot === e.slot : s.category === e.category;
 
 function WeatherIcon({ condition, precip }: { condition: string | null; precip: number | null }) {
   const c = (condition ?? "").toLowerCase();
@@ -222,7 +242,7 @@ export default function Home() {
     | {
         mode: "empty";
         ctx: PlanCtx;
-        empties: { category: string; reason: string; noWiden?: boolean }[];
+        empties: EmptyRow[];
         replaceText: Record<string, string>;
         busy: boolean;
         note: string | null;
@@ -240,7 +260,7 @@ export default function Home() {
         blocks: { category: string; reason: string }[];
         /** generically-empty categories waiting behind the gate — carried
          * through so they get their normal recovery rows afterwards */
-        pendingEmpties: { category: string; reason: string }[];
+        pendingEmpties: EmptyRow[];
         busy: boolean;
       }
     | null
@@ -497,7 +517,13 @@ export default function Home() {
       const selectRes = await fetch("/api/select", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parsed: parseData, pools: categories }),
+        body: JSON.stringify({
+          parsed: parseData,
+          pools: categories,
+          // the requested stops in order, duplicates intact — a category asked
+          // for twice is TWO stops sharing one pool (code-audit §7.1)
+          slots: (parseData.category_signals ?? []).length > 0 ? parseData.category_signals : undefined,
+        }),
       });
       const selectData = await selectRes.json();
       if (!selectRes.ok) throw new Error(selectData.error ?? `select failed (${selectRes.status})`);
@@ -523,25 +549,30 @@ export default function Home() {
       // Never drop the empty one silently — pause with the honest reason
       // and an offer to recover (widen / replace) that ONE category. The
       // all-empty case above keeps its own noVenuesReason path.
-      const emptyCats = partialEmptyCategories(sels);
-      if (emptyCats.length > 0) {
+      const emptySels = partialEmptySelections(sels);
+      if (emptySels.length > 0) {
         // split WEATHER-blocked empties from genuinely-empty ones — they
         // need different offers: widening can't fix rain, but an informed
         // "still want it" (weather gate off, every other filter intact)
         // genuinely can. Weather-blocked → the weather-gate panel first,
         // carrying any generic empties behind it.
         const wxByCat = new Map(wxBlocks.map((b) => [b.category, b.reason]));
-        const blocked = emptyCats.filter((c) => wxByCat.has(c));
-        const generic = emptyCats.filter((c) => !wxByCat.has(c));
-        const genericEmpties = generic.map((c) => ({
-          category: c,
-          reason: emptyCategoryReason(c, drops, parseData.location),
+        const blocked = emptySels.filter((s) => wxByCat.has(s.category));
+        const generic = emptySels.filter((s) => !wxByCat.has(s.category));
+        const genericEmpties: EmptyRow[] = generic.map((s) => ({
+          category: s.category,
+          slot: s.slot,
+          // a NARROWED slot isn't an empty pool — the venue exists, it's
+          // just already in the plan, so say that instead (§7.1)
+          reason: s.narrowed
+            ? narrowedSlotReason(s.category, parseData.location)
+            : emptyCategoryReason(s.category, drops, parseData.location),
         }));
         if (blocked.length > 0) {
           setRecovery({
             mode: "weather-gate",
             ctx,
-            blocks: blocked.map((c) => ({ category: c, reason: wxByCat.get(c)! })),
+            blocks: blocked.map((s) => ({ category: s.category, reason: wxByCat.get(s.category)! })),
             pendingEmpties: genericEmpties,
             busy: false,
           });
@@ -607,7 +638,7 @@ export default function Home() {
       setHomeLeg(hl);
       const ms = stopsFromSchedule(stops, pools);
       setMapStops(ms);
-      setSelected(ms[0]?.category ?? null);
+      setSelected(ms[0]?.id ?? null);
 
       // auto-store the itinerary so the live/reroute controls work at once
       await storeItinerary(stops, legs, hl, parseData, pools, "", hp, planZone);
@@ -667,13 +698,22 @@ export default function Home() {
 
   /** Merge a resolved slot back into the plan context (prompt order is
    *  restored later by orderByRequest via the slots map). */
-  function mergeSlot(ctx: PlanCtx, category: string, sel: Selection, pool: Place[]): PlanCtx {
-    const mergedSels = ctx.sels.map((s) => (s.category === category ? sel : s));
+  function mergeSlot(
+    ctx: PlanCtx,
+    row: { category: string; slot?: number },
+    sel: Selection,
+    pool: Place[]
+  ): PlanCtx {
+    // Replace ONLY the slot being resolved. Matching on category alone
+    // overwrote a filled twin when the request repeated a category (§7.1).
+    const mergedSels = ctx.sels.map((s) =>
+      matchesRow(s, row) ? { ...sel, slot: s.slot ?? sel.slot } : s
+    );
     const mergedPools: Pools = { ...ctx.pools, [sel.category]: pool };
     const mergedSlots =
-      sel.category === category
+      sel.category === row.category
         ? ctx.slots
-        : { ...ctx.slots, [sel.category]: ctx.slots[category] ?? category };
+        : { ...ctx.slots, [sel.category]: ctx.slots[row.category] ?? row.category };
     return { ...ctx, sels: mergedSels, pools: mergedPools, slots: mergedSlots };
   }
 
@@ -682,11 +722,12 @@ export default function Home() {
   // every other stop untouched. Reuses the places route's categoriesOverride
   // (the same subset-search the reroute engine uses) + the select route.
   async function resolveEmpty(
-    category: string,
+    row: EmptyRow,
     opts: { searchCategory: string; dropLocation: boolean }
   ) {
     if (recovery?.mode !== "empty") return;
     const { ctx } = recovery;
+    const category = row.category;
     const searchCategory = opts.searchCategory.trim();
     if (!searchCategory) return;
     setRecovery({ ...recovery, busy: true, note: null });
@@ -698,8 +739,8 @@ export default function Home() {
       if (newSel && newSel.id !== null) {
         // resolved — swap the empty entry for the new pick (keeping order),
         // add its pool, and drop it from the outstanding list
-        const newCtx = mergeSlot(ctx, category, newSel, newPool);
-        const remaining = recovery.empties.filter((e) => e.category !== category);
+        const newCtx = mergeSlot(ctx, row, newSel, newPool);
+        const remaining = recovery.empties.filter((e) => rowKey(e) !== rowKey(row));
         if (remaining.length === 0) {
           setRecovery(null);
           await finishPipeline(newCtx);
@@ -795,7 +836,7 @@ export default function Home() {
       for (const b of gate.blocks) {
         const { sel, pool, drops } = await searchSlot(ctx, b.category, { ignoreWeather: true });
         if (sel && sel.id !== null) {
-          ctx = mergeSlot(ctx, b.category, sel, pool);
+          ctx = mergeSlot(ctx, { category: b.category }, sel, pool);
           resolved.add(b.category);
         } else {
           // empty even with weather ignored — a real availability problem
@@ -900,7 +941,7 @@ export default function Home() {
     if (!res.ok) return;
     setItinerary(data);
     const active = data.stops.find((s) => s.status === "active");
-    if (active) setSelected(active.category);
+    if (active?.id) setSelected(active.id);
   }
 
   function applyItinerary(it: Itinerary) {
@@ -959,7 +1000,7 @@ export default function Home() {
     // surface the change: expand the first replanned stop so its new venue
     // and settled time are the hero of the moment
     const firstChanged = (data.changed as { stopIndex: number }[])[0];
-    if (firstChanged) setSelected(updated.stops[firstChanged.stopIndex].category);
+    if (firstChanged) setSelected(updated.stops[firstChanged.stopIndex].id ?? null);
 
     // the banner shows the instant the new chain actually departs from —
     // for an unstarted plan that's the kept stop's committed end, not `now`
@@ -978,7 +1019,9 @@ export default function Home() {
     if (!itinerary || !selected) return;
     const refinement = swapText.trim();
     if (!refinement) return;
-    const stopIndex = itinerary.stops.findIndex((s) => s.category === selected);
+    // stops are identified by VENUE ID: two stops can share a category, and
+    // findIndex by category always returned the FIRST one (§7.2)
+    const stopIndex = itinerary.stops.findIndex((s) => s.id === selected);
     if (stopIndex < 0) return;
 
     setSwapping(true);
@@ -1027,7 +1070,7 @@ export default function Home() {
     applyItinerary(updated);
     setChangedIds(ids);
     setOldStarts(olds);
-    setSelected(swapped.category);
+    setSelected(swapped.id ?? null);
     setSwapText("");
     setBannerFlat(false);
     // time/duration reasons are self-contained ("Moved dinner to 7:29 PM",
@@ -1045,14 +1088,14 @@ export default function Home() {
     () =>
       mapStops.map((ms) => ({
         ...ms,
-        status: itinerary?.stops.find((s) => s.category === ms.category)?.status,
+        status: itinerary?.stops.find((s) => s.id === ms.id)?.status,
         changed: changedIds.has(ms.id),
         oldStart: oldStarts[ms.id] ?? null,
       })),
     [mapStops, itinerary, changedIds, oldStarts]
   );
 
-  const selectedStop = itinerary?.stops.find((s) => s.category === selected) ?? null;
+  const selectedStop = itinerary?.stops.find((s) => s.id === selected) ?? null;
   const canSwap = !!selectedStop && selectedStop.status === "upcoming" && selectedStop.id !== null;
 
   // the plan's origin: per-itinerary geocoded home, else the classic default
@@ -1282,32 +1325,32 @@ export default function Home() {
     ) : recovery && (
     <div className={"clarify recover" + (itinerary ? " clarify--stage" : "")}>
       {recovery.empties.map((e) => (
-        <div key={e.category} className="clarify__q">
+        <div key={rowKey(e)} className="clarify__q">
           <div className="clarify__label recover__reason">{e.reason}</div>
           <div className="clarify__chips">
             {recoveryCanWiden && !e.noWiden && (
               <button
                 className="chipbtn recover__widen"
                 disabled={recovery.busy}
-                onClick={() => resolveEmpty(e.category, { searchCategory: e.category, dropLocation: true })}
+                onClick={() => resolveEmpty(e, { searchCategory: e.category, dropLocation: true })}
               >
                 {widenOfferLabel(recovery.ctx.parseData.location)}
               </button>
             )}
             <input
               className="clarify__input recover__input"
-              value={recovery.replaceText[e.category] ?? ""}
+              value={recovery.replaceText[rowKey(e)] ?? ""}
               onChange={(ev) =>
                 setRecovery((r) =>
                   r && r.mode === "empty"
-                    ? { ...r, replaceText: { ...r.replaceText, [e.category]: ev.target.value } }
+                    ? { ...r, replaceText: { ...r.replaceText, [rowKey(e)]: ev.target.value } }
                     : r
                 )
               }
               onKeyDown={(ev) => {
-                if (ev.key === "Enter" && recovery.replaceText[e.category]?.trim())
-                  resolveEmpty(e.category, {
-                    searchCategory: recovery.replaceText[e.category],
+                if (ev.key === "Enter" && recovery.replaceText[rowKey(e)]?.trim())
+                  resolveEmpty(e, {
+                    searchCategory: recovery.replaceText[rowKey(e)],
                     dropLocation: false,
                   });
               }}
@@ -1316,10 +1359,10 @@ export default function Home() {
             />
             <button
               className="chipbtn recover__go"
-              disabled={recovery.busy || !recovery.replaceText[e.category]?.trim()}
+              disabled={recovery.busy || !recovery.replaceText[rowKey(e)]?.trim()}
               onClick={() =>
-                resolveEmpty(e.category, {
-                  searchCategory: recovery.replaceText[e.category],
+                resolveEmpty(e, {
+                  searchCategory: recovery.replaceText[rowKey(e)],
                   dropLocation: false,
                 })
               }

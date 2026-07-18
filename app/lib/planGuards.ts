@@ -187,15 +187,35 @@ function isEmptyPoolPick(s: Selection): boolean {
 }
 
 /**
- * The categories that came back empty in a PARTIAL failure — at least one
- * real pick exists alongside ≥1 empty pool. Returns [] when nothing is
- * empty OR when EVERYTHING is empty (all-empty stays on noVenuesReason).
+ * The SELECTIONS that came back unfilled in a PARTIAL failure — at least one
+ * real pick exists alongside ≥1 unfilled slot. Returns [] when nothing is
+ * unfilled OR when EVERYTHING is (all-empty stays on noVenuesReason).
+ * Returns the selections themselves, not their categories, because two slots
+ * can share a category and only one of them may be unfilled (§7.1).
  */
-export function partialEmptyCategories(selections: Selection[]): string[] {
+export function partialEmptySelections(selections: Selection[]): Selection[] {
   const empties = selections.filter(isEmptyPoolPick);
   const hasRealPick = selections.some((s) => s.id !== null);
   if (empties.length === 0 || !hasRealPick) return [];
-  return empties.map((s) => s.category);
+  return empties;
+}
+
+/** Category-only view of the above — kept for callers that don't deal in
+ *  slots (and for the pre-slot tests). */
+export function partialEmptyCategories(selections: Selection[]): string[] {
+  return partialEmptySelections(selections).map((s) => s.category);
+}
+
+/**
+ * A slot the plan couldn't fill because the request asked for MORE stops of
+ * that category than there are distinct venues nearby. Distinct from an
+ * empty pool: there IS a venue, it's just already in the plan. Never let
+ * this collapse silently — the user asked for two and is getting one.
+ */
+export function narrowedSlotReason(category: string, locationLabel?: string | null): string {
+  const loc = meaningfulLocation(locationLabel);
+  const where = loc ? ` near ${loc}` : " nearby";
+  return `You asked for more than one ${category}, but I could only find one${where} — want to look further out, or try something different for the second stop?`;
 }
 
 const meaningfulLocation = (label?: string | null): string | null =>
