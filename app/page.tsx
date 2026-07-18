@@ -207,19 +207,13 @@ export default function Home() {
   const [swapError, setSwapError] = useState<string | null>(null);
   const [weather, setWeather] = useState<WeatherHour[] | null>(null);
 
-  // ambient weather chip — fetched once, independent of the pipeline
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/weather")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (!cancelled && Array.isArray(d)) setWeather(d);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // The weather chip renders ONLY the plan's own forecast, fetched with the
+  // plan's coordinates in continuePipeline. There used to be a parameterless
+  // fetch on mount, which fell back to the route's hardcoded Ossington
+  // coordinates — so a user who typed "Vancouver" saw a Toronto forecast
+  // under a Vancouver label until the plan ran (code-audit 2026-07-18 §3.2).
+  // The chip only appears on the map stage, where plan weather always
+  // exists, so there is nothing to fetch ambiently.
 
   const [error, setError] = useState<string | null>(null);
   const [loadingText, setLoadingText] = useState<string | null>(null);

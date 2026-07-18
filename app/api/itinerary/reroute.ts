@@ -17,6 +17,7 @@ import {
   TravelLeg,
 } from "../schedule/travel";
 import { isMockMode, mockRerouteDeps } from "../_mock/fixtures";
+import { fallbackParsedFor, UNKNOWN_LOCATION_MESSAGE } from "./fallbackParsed";
 
 export interface Disruption {
   type: "transit_cancelled";
@@ -85,17 +86,6 @@ function realDeps(): RerouteDeps {
       ),
   };
 }
-
-const FALLBACK_PARSED: ParsedPrompt = {
-  time_window: "unspecified",
-  stop_count: null,
-  aesthetic: "unspecified",
-  category_signals: [],
-  group_context: "unspecified",
-  budget: null,
-  constraints: [],
-  location: "Ossington",
-};
 
 function snap(s: ItineraryStop) {
   return {
@@ -171,7 +161,8 @@ export async function rerouteItinerary(
   const beforeSnaps = affectedIdx.map((i) => snap(itinerary.stops[i]));
 
   // ── Re-run the pipeline scoped to the affected categories ──
-  const parsed = itinerary.parsed ?? FALLBACK_PARSED;
+  const parsed = itinerary.parsed ?? fallbackParsedFor(itinerary);
+  if (!parsed) return { rerouted: false, reason: UNKNOWN_LOCATION_MESSAGE };
   const categories = affectedIdx.map((i) => itinerary.stops[i].category);
 
   const rawPools = await deps.searchPools(parsed, categories);

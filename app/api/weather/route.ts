@@ -4,8 +4,11 @@ import { isMockMode, mockWeather } from "../_mock/fixtures";
 
 // Google Weather API hourly forecast, next 24h.
 // GET /api/weather?lat=..&lng=.. — forecast for the plan's geocoded
-// location; absent/invalid coords fall back to the original Ossington
-// anchor (pre-plan ambient chip, old clients).
+// location. The app ALWAYS passes coordinates; the fallback below exists
+// only for old clients calling without them, and is deliberately not
+// relied on any more — a parameterless call used to power the pre-plan
+// ambient chip, which meant a Vancouver plan showed a Toronto forecast
+// until the pipeline ran (code-audit 2026-07-18 §3.2).
 const FORECAST_URL = "https://weather.googleapis.com/v1/forecast/hours:lookup";
 const DEFAULT_LOC = { latitude: 43.6479, longitude: -79.4197 }; // Ossington
 

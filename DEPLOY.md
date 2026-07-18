@@ -18,10 +18,21 @@ refuses loudly with a message pointing here, instead of silent 404s
 mid-demo. The engines (swap/reroute) never touch the store and are
 unchanged.
 
-A second serverless gotcha: the scheduler's date math is server-local
-(documented Toronto assumption in `schedule.ts`), and Vercel functions run
-in **UTC** — evening plans would compute 4–5 hours off. Setting `TZ` (below)
-fixes it with zero code change.
+A second serverless gotcha: Vercel functions run in **UTC**, and some date
+math still reads the server's clock. Set `TZ` (below).
+
+**The reason for this changed — read it before you decide to drop it.** The
+original rationale was that the scheduler did server-local date math. That
+is no longer true: since Phase 5 every plan carries its own IANA timezone
+and `schedule.ts` computes against *that*, so the headline scheduling path
+genuinely does not care what `TZ` says. The conclusion still holds anyway,
+for a narrower reason found in the 2026-07-18 audit (§1.1/§1.6): the swap
+engine's availability check and `buildSchedule`'s cursor arithmetic both
+read the server's wall clock. Group A of the audit fixes closed both, but
+`TZ=America/Toronto` remains cheap insurance against the next such leak,
+and the `[schedule-resolve]` log prints the server TZ on every plan so you
+can confirm it. Don't remove it just because the *old* explanation is
+stale.
 
 ## Environment variables (Vercel → Project → Settings → Environment Variables)
 
@@ -32,7 +43,7 @@ fixes it with zero code change.
 | `GOOGLE_ROUTES_API_KEY` | Routes computeRoutes — server-side only |
 | `GOOGLE_WEATHER_API_KEY` | Weather hourly forecast — server-side only |
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Maps JS (browser-side by design — see referrer note) |
-| `TZ` | `America/Toronto` — REQUIRED, see above |
+| `TZ` | `America/Toronto` — recommended; see the note above for what it does and does NOT do now |
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | injected automatically when you connect Upstash Redis / Vercel KV storage (the `UPSTASH_REDIS_REST_URL`/`_TOKEN` names work too) |
 
 Only the Maps key is ever exposed to the browser; your mentor never sees

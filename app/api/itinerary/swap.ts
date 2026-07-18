@@ -31,6 +31,7 @@ import {
 } from "../schedule/travel";
 import { HOME, HOME_LEG_INDEX } from "../schedule/home";
 import { isMockMode, mockSwapDeps } from "../_mock/fixtures";
+import { fallbackParsedFor, UNKNOWN_LOCATION_MESSAGE } from "./fallbackParsed";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "llama-3.3-70b-versatile";
@@ -446,12 +447,6 @@ function placeOf(stop: ItineraryStop): Place {
   };
 }
 
-const FALLBACK_PARSED: ParsedPrompt = {
-  time_window: "unspecified", stop_count: null, aesthetic: "unspecified",
-  category_signals: [], group_context: "unspecified", budget: null,
-  constraints: [], location: "Ossington",
-};
-
 function snap(s: ItineraryStop): Snap {
   return { name: s.name ?? null, start: s.start_time, end: s.end_time, category: s.category };
 }
@@ -488,7 +483,10 @@ export async function swapStop(
     };
   }
 
-  const base = itinerary.parsed ?? FALLBACK_PARSED;
+  // no stored parse → a minimal fallback that invents no location, and an
+  // honest refusal when we can't even know the city (§3.1)
+  const base = itinerary.parsed ?? fallbackParsedFor(itinerary);
+  if (!base) return { swapped: false, reason: UNKNOWN_LOCATION_MESSAGE };
   const interp = await deps.interpret(base, target.category, target.start_time, refinement);
 
   // observability at the apply step (like the weather-gate log): parsed

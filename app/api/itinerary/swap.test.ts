@@ -953,6 +953,51 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(it.stops[1].end_time, T(22, 10));
     },
   ],
+  // ── missing stored parse (code-audit 2026-07-18 §3.1) ──
+  // Both engines used to fall back to a hardcoded `location: "Ossington"`
+  // with no city, so a re-search for a non-Toronto plan quietly went
+  // looking in Toronto's west end. Neither fallback branch had any test.
+  [
+    "§3.1: no stored parse on a TORONTO plan → fallback searches, inventing no neighbourhood",
+    async () => {
+      const it = mkItinerary();
+      delete it.parsed; // pre-multi-city itinerary
+      let searchedLocation: string | null = null;
+      const deps = mkDeps({ legMin: 10 });
+      const res = await swapStop(it, 1, "somewhere cheaper", new Date(T(18, 0)), {
+        ...deps,
+        searchPools: async (parsed, cats) => {
+          searchedLocation = parsed.location;
+          return { [cats[0]]: [mkVenue("fallback_pick")] };
+        },
+      });
+      assert.ok(res.swapped, "a Toronto plan should still be swappable");
+      // no invented neighbourhood — searches the city broadly instead
+      assert.strictEqual(searchedLocation, "");
+    },
+  ],
+  [
+    "§3.1: no stored parse on a VANCOUVER plan → refuses honestly, never searches Toronto",
+    async () => {
+      const it = mkItinerary();
+      delete it.parsed;
+      it.timeZone = "America/Vancouver"; // knowably NOT Toronto
+      let searched = false;
+      const deps = mkDeps({ legMin: 10 });
+      const res = await swapStop(it, 1, "somewhere cheaper", new Date(T(18, 0)), {
+        ...deps,
+        searchPools: async (parsed, cats) => {
+          searched = true;
+          return { [cats[0]]: [mkVenue("wrong_city")] };
+        },
+      });
+      assert.strictEqual(res.swapped, false, "must not guess a city");
+      assert.strictEqual(searched, false, "must not search at all");
+      if (!res.swapped) assert.match(res.reason, /missing the details/i);
+      // the stop is left exactly as it was
+      assert.strictEqual(it.stops[1].id, "b1");
+    },
+  ],
   // ── the PRODUCTION availability default (code-audit 2026-07-18 §1.1) ──
   // Every case above injects its own isUsableAt, so `usableByHours` — the
   // real seam implementation — had zero coverage. These exercise it directly
