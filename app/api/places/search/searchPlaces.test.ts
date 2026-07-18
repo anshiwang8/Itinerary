@@ -3,6 +3,9 @@
 import assert from "node:assert";
 import { buildQuery, GENERAL_QUERIES, includedTypeFor, searchPools } from "./searchPlaces";
 import { DropEntry, ParsedPrompt } from "./filter";
+import { isOutdoorCategory } from "../../../lib/categoryTraits";
+import { resolveCategory } from "../../schedule/durations";
+import { isPlausibleAt } from "../../schedule/schedule";
 
 function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
   return {
@@ -224,6 +227,35 @@ const cases: Array<[string, () => void]> = [
       // the text query itself is unchanged for parks (type filter does the work)
       const q = buildQuery(mkParsed({ aesthetic: "quiet" }), "park");
       assert.strictEqual(q, "quiet park Ossington Toronto");
+    },
+  ],
+  [
+    "§5.3: one traits table — park treatment is coherent across the pipeline",
+    () => {
+      // membership the four old regexes disagreed on:
+      // "bench" was park-filtered in SEARCH but never weather-gated
+      assert.strictEqual(includedTypeFor("bench"), "park");
+      assert.strictEqual(isOutdoorCategory("bench"), true);
+      assert.strictEqual(resolveCategory("bench"), "park");
+      assert.ok(isPlausibleAt(new Date(2026, 6, 3, 10, 0), ["bench"]));
+      assert.ok(!isPlausibleAt(new Date(2026, 6, 3, 23, 30), ["bench"]));
+      // "green space" likewise
+      assert.strictEqual(includedTypeFor("green space"), "park");
+      assert.strictEqual(isOutdoorCategory("green space"), true);
+      assert.strictEqual(resolveCategory("green space"), "park");
+      // "patio" is weather-exposed but NOT green space — it must NOT get
+      // the park type filter, the park duration, or the park band
+      assert.strictEqual(isOutdoorCategory("patio"), true);
+      assert.strictEqual(includedTypeFor("patio"), undefined);
+      assert.notStrictEqual(resolveCategory("patio"), "park");
+      // and the walk boundary still holds: a boardwalk cafe is a cafe
+      assert.strictEqual(includedTypeFor("boardwalk cafe"), undefined);
+      assert.strictEqual(resolveCategory("boardwalk cafe"), "coffee shop");
+      assert.strictEqual(isOutdoorCategory("boardwalk cafe"), false);
+      // the ordinary park case is unchanged on every axis
+      assert.strictEqual(includedTypeFor("park walk"), "park");
+      assert.strictEqual(isOutdoorCategory("park walk"), true);
+      assert.strictEqual(resolveCategory("park walk"), "park");
     },
   ],
   [

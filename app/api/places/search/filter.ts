@@ -4,6 +4,7 @@
 import { CurrentOpeningHours, isOpenAt, TargetTime, targetTimeAt } from "./hours";
 import { resolveStartTime } from "../../schedule/schedule";
 import { DEFAULT_ZONE, wallClockParts } from "../../../lib/zoneTime";
+import { isOutdoorCategory } from "../../../lib/categoryTraits";
 
 export interface Place {
   id: string;
@@ -78,13 +79,10 @@ export interface WeatherBlock {
 export const PRECIP_BLOCK_THRESHOLD = 50;
 export const COLD_BLOCK_THRESHOLD_C = -5;
 
-const OUTDOOR_PATTERN =
-  /park|walk|stroll|patio|garden|beach|trail|market|picnic|hike|outdoor/i;
-
-/** Keyword matcher for weather-sensitive categories. */
-export function isOutdoorCategory(raw: string): boolean {
-  return OUTDOOR_PATTERN.test(raw ?? "");
-}
+/** Keyword matcher for weather-sensitive categories. Re-exported from the
+ *  shared traits table so the weather gate, the search type filter, the
+ *  duration table and the plausible bands agree on membership (§5.3). */
+export { isOutdoorCategory } from "../../../lib/categoryTraits";
 
 // weather-block reason hour, in the venue's local zone ("rain at 8pm")
 function hourLabel(d: Date, timeZone: string = DEFAULT_ZONE): string {

@@ -5,7 +5,7 @@
 // THE guarantee: no stop at or before floor_time is ever changed.
 // floor_time = max(now, end of the currently active stop); locked,
 // active, and completed stops are never touched.
-import { Itinerary, ItineraryStop, withStatuses, floorTime } from "./store";
+import { Itinerary, ItineraryStop, withStatuses, floorTime, timedIndexes, rebuildLegs } from "./store";
 import { filterPools, ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
 import { fetchWeatherHours } from "../weather/fetchWeather";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
@@ -117,10 +117,7 @@ export async function rerouteItinerary(
 
   // Timed-stop bookkeeping first — legs join timed pairs, and the
   // disruption's blast radius is defined in timed positions.
-  const timedIdx: number[] = [];
-  itinerary.stops.forEach((s, i) => {
-    if (s.start_time) timedIdx.push(i);
-  });
+  const timedIdx = timedIndexes(itinerary);
 
   // Affected: strictly DOWNSTREAM of the broken leg (leg k joins timed
   // stops k → k+1, so positions ≥ k+1), strictly after the floor, and
@@ -303,9 +300,7 @@ export async function rerouteItinerary(
     prevTimedStop.travelMinutesToNext = inbound.totalMinutes;
   }
   // legs array rebuilt from the stops' travelToNext chain
-  itinerary.legs = itinerary.stops
-    .filter((s) => s.start_time && s.travelToNext)
-    .map((s) => s.travelToNext!);
+  rebuildLegs(itinerary);
 
   withStatuses(itinerary, now);
 

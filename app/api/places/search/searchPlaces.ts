@@ -1,6 +1,7 @@
 // Places Text Search core, shared by the /api/places/search route and
 // the reroute engine (which re-searches only the affected categories).
 import { DropEntry, ParsedPrompt, Place } from "./filter";
+import { isParkLike } from "../../../lib/categoryTraits";
 
 const SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText";
 
@@ -47,14 +48,12 @@ export function buildQuery(parsed: ParsedPrompt, category: string): string {
 //  - casino → "casino": the text query "casino <city>" returns poker
 //    clubs, arcade bars, and jazz lounges — often HIGHER-rated than the
 //    real casinos, so select drifts to a nightclub without the filter
-const PARK_PATTERN = /park|trail|garden|green\s*space|greenspace|beach|bench|stroll|hike|\bwalk\b/i;
-const TYPE_FILTERS: Array<[RegExp, string]> = [
-  [PARK_PATTERN, "park"],
-  [/\bcasinos?\b/i, "casino"],
-];
+const TYPE_FILTERS: Array<[RegExp, string]> = [[/\bcasinos?\b/i, "casino"]];
 
-/** Places type filter for a category, when one applies. */
+/** Places type filter for a category, when one applies. Park membership
+ *  comes from the shared traits table (§5.3), not a fourth local regex. */
 export function includedTypeFor(category: string): string | undefined {
+  if (isParkLike(category ?? "")) return "park";
   return TYPE_FILTERS.find(([pattern]) => pattern.test(category ?? ""))?.[1];
 }
 

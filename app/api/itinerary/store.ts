@@ -186,6 +186,27 @@ export function createItinerary(
 }
 
 /**
+ * Indexes of the stops that have a time — "which stops are timed" is a real
+ * domain concept, and legs join TIMED pairs, so both engines need it. It was
+ * written out four times (code-audit 2026-07-18 §5.4).
+ */
+export function timedIndexes(itinerary: Itinerary): number[] {
+  const out: number[] = [];
+  itinerary.stops.forEach((s, i) => {
+    if (s.start_time) out.push(i);
+  });
+  return out;
+}
+
+/** Rebuild `itinerary.legs` from the stops' own travelToNext chain — the
+ *  legs array is a projection of the stops, never an independent source. */
+export function rebuildLegs(itinerary: Itinerary): void {
+  itinerary.legs = itinerary.stops
+    .filter((s) => s.start_time && s.travelToNext)
+    .map((s) => s.travelToNext!);
+}
+
+/**
  * floor_time = max(now, end of the currently active stop). Stops at or
  * before this instant are underway/past and never change. The single
  * source of this rule — the reroute and swap engines both call it.

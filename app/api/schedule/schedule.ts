@@ -7,6 +7,7 @@
 // wall clock. Toronto plans are byte-identical to the pre-Phase-5 code.
 import { parseTargetTime } from "../places/search/hours";
 import { getDuration } from "./durations";
+import { isParkLike } from "../../lib/categoryTraits";
 import { TravelLeg } from "./travel";
 import {
   DEFAULT_ZONE,
@@ -67,11 +68,17 @@ export interface PlausibleBand {
   startHour: number;
   endHour: number;
 }
+/** A RegExp-shaped adapter so the bands table keeps its uniform shape
+ *  while park membership is decided by the shared traits table. */
+const PARK_BAND_MATCH = {
+  test: (c: string) => isParkLike(c),
+} as RegExp;
+
 export const PLAUSIBLE_BANDS: Array<[RegExp, PlausibleBand]> = [
   // parks are a daylight-hours activity with no "typical" start — they
   // keep the immediate next-full-hour anchor, but get a dawn-to-dusk band
   // so a 6 AM bench-sit passes and a midnight one honestly refuses
-  [/park|garden|trail|stroll|hike|beach|\bwalk\b/i, { startHour: 6, endHour: 22 }],
+  [PARK_BAND_MATCH, { startHour: 6, endHour: 22 }],
   [/brunch/i, { startHour: 8, endHour: 15 }],
   [/breakfast/i, { startHour: 6, endHour: 12 }],
   [/lunch/i, { startHour: 11, endHour: 16 }],

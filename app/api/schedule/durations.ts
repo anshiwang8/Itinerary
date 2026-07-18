@@ -2,6 +2,8 @@
 // Tune the table freely; resolver maps parse's free-vocab categories
 // onto table keys.
 
+import { isParkLike } from "../../lib/categoryTraits";
+
 export interface StopDuration {
   baseMinutes: number;
   bufferMinutes: number;
@@ -30,7 +32,6 @@ const RESOLVER_RULES: Array<[DurationKey, RegExp]> = [
   ["dessert", /dessert|ice\s*cream|gelato|bakery|pastr|cake|donut|doughnut|sweet|creamery|patisserie/i],
   ["movie", /movie|cinema|film/i],
   ["museum", /museum|galler|exhibit/i],
-  ["park", /park|walk|trail|garden|beach|hike|stroll/i],
   ["bar", /\bbar\b|\bbars\b|cocktail|pub|brewery|wine|drink|lounge|club|speakeasy/i],
   [
     "restaurant",
@@ -42,9 +43,15 @@ const RESOLVER_RULES: Array<[DurationKey, RegExp]> = [
 export function resolveCategory(raw: string): DurationKey {
   const s = (raw ?? "").trim();
   if (!s) return "default";
+  // green space comes from the shared traits table (§5.3) so "bench" and
+  // "green space" get the park duration too, and a "boardwalk cafe" —
+  // which the old substring rule called a park — stays a cafe. Checked
+  // in the same position the local park rule occupied.
   for (const [key, pattern] of RESOLVER_RULES) {
+    if (key === "museum" && isParkLike(s)) return "park";
     if (pattern.test(s)) return key;
   }
+  if (isParkLike(s)) return "park";
   return "default";
 }
 

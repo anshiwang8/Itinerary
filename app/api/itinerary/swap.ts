@@ -15,7 +15,7 @@
 // Same discipline: reuse the pipeline cores (searchPools / filterPools /
 // selectVenues / schedule serialization), share floor_time with reroute,
 // never fork.
-import { Itinerary, ItineraryStop, withStatuses, floorTime } from "./store";
+import { Itinerary, ItineraryStop, withStatuses, floorTime, timedIndexes, rebuildLegs } from "./store";
 import { filterPools, ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
 import { fetchWeatherHours } from "../weather/fetchWeather";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
@@ -601,10 +601,7 @@ async function durationChange(
   const startISO = target.start_time!;
   const anchorEnd = new Date(new Date(startISO).getTime() + newTotal * 60_000);
 
-  const timedIdx: number[] = [];
-  itinerary.stops.forEach((s, i) => {
-    if (s.start_time) timedIdx.push(i);
-  });
+  const timedIdx = timedIndexes(itinerary);
   const used = new Set<string>(itinerary.stops.map((s) => s.id).filter((id): id is string => !!id));
 
   // resettle downstream from the new end (start + venue unchanged, so the
@@ -616,7 +613,7 @@ async function durationChange(
   const anchorOutbound = settle.changes[0]?.inbound ?? target.travelToNext ?? null;
   itinerary.stops[stopIndex] = buildStop(category, startISO, { keep: target }, anchorOutbound, newTotal, tz);
   commitTail(itinerary, settle.changes);
-  itinerary.legs = itinerary.stops.filter((s) => s.start_time && s.travelToNext).map((s) => s.travelToNext!);
+  rebuildLegs(itinerary);
   withStatuses(itinerary, now);
 
   const grew = newTotal >= currentTotal;
@@ -761,10 +758,7 @@ async function timeChange(
   if (newStartMs <= floor.getTime()) {
     return { swapped: false, reason: `Can't move ${target.name} earlier than where the evening already is.` };
   }
-  const timedIdx: number[] = [];
-  itinerary.stops.forEach((s, i) => {
-    if (s.start_time) timedIdx.push(i);
-  });
+  const timedIdx = timedIndexes(itinerary);
   const tp = timedIdx.indexOf(stopIndex);
   const prevStop = tp > 0 ? itinerary.stops[timedIdx[tp - 1]] : null;
   if (prevStop?.end_time && newStartMs < new Date(prevStop.end_time).getTime()) {
@@ -840,7 +834,7 @@ async function timeChange(
   }
   commitTail(itinerary, settle.changes);
 
-  itinerary.legs = itinerary.stops.filter((s) => s.start_time && s.travelToNext).map((s) => s.travelToNext!);
+  rebuildLegs(itinerary);
   withStatuses(itinerary, now);
 
   let reason = `Moved ${category} to ${clockLabel(nd, tz)}`;
@@ -1056,10 +1050,7 @@ async function finalize(
   const newLoc = pick.location ?? target.location;
   const endISO = toZonedISO(new Date(new Date(startISO).getTime() + total * 60_000), tz);
 
-  const timedIdx: number[] = [];
-  itinerary.stops.forEach((s, i) => {
-    if (s.start_time) timedIdx.push(i);
-  });
+  const timedIdx = timedIndexes(itinerary);
   const tp = timedIdx.indexOf(stopIndex);
   const prevStop = tp > 0 ? itinerary.stops[timedIdx[tp - 1]] : null;
   const nextStop = tp < timedIdx.length - 1 ? itinerary.stops[timedIdx[tp + 1]] : null;
@@ -1079,23 +1070,17 @@ async function finalize(
     outbound = await deps.getSingleLeg(newLoc, nextStop.location, tp, endISO, false);
   }
 
-  itinerary.stops[stopIndex] = {
+  // one stop-construction path: buildStop already owns the field set, the
+  // buffer clamp, and the duration override, so finalize no longer keeps a
+  // parallel copy of all three (code-audit 2026-07-18 §5.5)
+  itinerary.stops[stopIndex] = buildStop(
     category,
-    id: sel.id,
-    name: pick.displayName?.text ?? sel.name,
-    reason: sel.reason,
-    ...(sel.fallback ? { fallback: true } : {}),
-    rating: pick.rating,
-    priceLevel: pick.priceLevel,
-    description: pick.editorialSummary?.text,
-    location: newLoc,
-    start_time: startISO,
-    end_time: endISO,
-    durationMinutes: { base: baseMinutes, buffer: bufferMinutes, total },
-    ...(outbound ? { travelToNext: outbound, travelMinutesToNext: outbound.totalMinutes } : {}),
-    status: "upcoming",
-    locked: false,
-  };
+    startISO,
+    { pick, sel },
+    outbound,
+    total,
+    tz
+  );
 
   if (prevStop && inbound) {
     prevStop.travelToNext = inbound;
@@ -1125,9 +1110,7 @@ async function finalize(
     }
   }
 
-  itinerary.legs = itinerary.stops
-    .filter((s) => s.start_time && s.travelToNext)
-    .map((s) => s.travelToNext!);
+  rebuildLegs(itinerary);
 
   withStatuses(itinerary, now);
 
