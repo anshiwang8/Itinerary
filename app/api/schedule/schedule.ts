@@ -5,7 +5,7 @@
 // America/Toronto). "now", "today", "which hour" and the ISO output are
 // all computed in THAT zone via app/lib/zoneTime — never the server's
 // wall clock. Toronto plans are byte-identical to the pre-Phase-5 code.
-import { parseTargetTime } from "../places/search/hours";
+import { CurrentOpeningHours, parseTargetTime } from "../places/search/hours";
 import { getDuration } from "./durations";
 import { isParkLike } from "../../lib/categoryTraits";
 import { TravelLeg } from "./travel";
@@ -357,6 +357,10 @@ export interface SelectionLike {
   priceLevel?: string;
   /** one-line venue description (Places editorialSummary) */
   description?: string;
+  /** opening hours travel with the stop so a later availability check
+   * doesn't need a pools lookup that has gone stale. Absent means Places
+   * had no hours data — keep-on-missing, still usable. */
+  currentOpeningHours?: CurrentOpeningHours;
   /** venue coordinates — passthrough; the reroute engine needs them */
   location?: { latitude: number; longitude: number };
 }

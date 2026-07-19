@@ -2,6 +2,9 @@
 // reroute engine. One Groq call over all pools, validation ladder:
 // invalid ids → one correction retry → highest-rated fallback.
 import { ParsedPrompt, Place } from "../places/search/filter";
+// CurrentOpeningHours lives in hours.ts (filter.ts imports it there too and
+// doesn't re-export it) — take it from the canonical source.
+import type { CurrentOpeningHours } from "../places/search/hours";
 import { haversineMeters } from "../schedule/travel";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
@@ -46,6 +49,11 @@ export interface Selection {
    * depends on a stale pools lookup after a swap/reroute */
   priceLevel?: string;
   description?: string;
+  /** opening hours travel with the pick for the same reason: a LATER
+   * availability check (the swap engine's adapt step) must be able to ask
+   * "is this venue open then" without a pools lookup that has gone stale —
+   * or, as it did before, without any hours at all. */
+  currentOpeningHours?: CurrentOpeningHours;
   /** set (with id: null) when no candidate actually meets a hard
    * constraint — the caller fails loud instead of hedging */
   unmetConstraint?: string;
@@ -354,6 +362,7 @@ export async function selectVenues(
         rating: place.rating,
         priceLevel: place.priceLevel,
         description: place.editorialSummary?.text,
+        currentOpeningHours: place.currentOpeningHours,
       };
     }
     const fb = highestRated(places.filter((p) => !taken.has(p.id)));
@@ -380,6 +389,7 @@ export async function selectVenues(
       rating: fb.rating,
       priceLevel: fb.priceLevel,
       description: fb.editorialSummary?.text,
+      currentOpeningHours: fb.currentOpeningHours,
     };
   });
 

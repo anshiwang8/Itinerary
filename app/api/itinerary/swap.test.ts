@@ -14,7 +14,8 @@ import {
   DurationShift,
 } from "./swap";
 import { Place, WeatherHour } from "../places/search/filter";
-import { ScheduledStop } from "../schedule/schedule";
+import { buildSchedule, ScheduledStop } from "../schedule/schedule";
+import type { CurrentOpeningHours } from "../places/search/hours";
 import { TravelLeg } from "../schedule/travel";
 
 const T = (h: number, m: number) =>
@@ -1094,6 +1095,139 @@ const cases: Array<[string, () => Promise<void>]> = [
       if (!res.swapped) assert.match(res.reason, /missing the details/i);
       // the stop is left exactly as it was
       assert.strictEqual(it.stops[1].id, "b1");
+    },
+  ],
+  // ── hours travel WITH the stop (the Group A follow-up gap) ──────────
+  // Stored stops used to carry no opening hours, so placeOf() handed the
+  // availability seam an hours-less Place, keep-on-missing said "usable",
+  // and the try → adapt → notify ladder's ADAPT step could never fire in
+  // production — only in mock mode, where a fixture registry patched the
+  // hours back in by id. These build the itinerary through the REAL
+  // buildSchedule → placeOf chain, with NO injected isUsableAt.
+  [
+    "GAP FIX: the adapt path fires on real stored hours, no fixture patch",
+    async () => {
+      // a 9-to-5 venue, exactly as Places would return it
+      const nineToFive: CurrentOpeningHours = {
+        periods: Array.from({ length: 7 }, (_, day) => ({
+          open: { day, hour: 9, minute: 0 },
+          close: { day, hour: 17, minute: 0 },
+        })),
+      };
+      // build stops through buildSchedule from Selections carrying hours —
+      // the same path the live pipeline uses
+      const { stops } = buildSchedule(
+        [
+          {
+            category: "dinner", id: "d1", name: "Dinner Spot",
+            location: { latitude: 43.647, longitude: -79.42 },
+          },
+          {
+            category: "museum", id: "m1", name: "Nine To Five Museum",
+            location: { latitude: 43.649, longitude: -79.41 },
+            // the downstream stop is only open until 17:00
+            currentOpeningHours: nineToFive,
+          },
+        ],
+        "3pm",
+        new Date(T(12, 0)),
+        [leg(0, "walk", 10)]
+      );
+      // the hours survived select → schedule
+      assert.ok(stops[1].currentOpeningHours, "hours must ride onto the scheduled stop");
+
+      const it = createItinerary(stops, [leg(0, "walk", 10)], {
+        time_window: "3pm", stop_count: null, aesthetic: "unspecified",
+        category_signals: ["dinner", "museum"], group_context: "unspecified",
+        budget: null, constraints: [], location: "Ossington",
+      });
+
+      // push dinner later so the museum lands after 17:00. NO isUsableAt in
+      // the injected deps → the real usableByHours runs against placeOf().
+      const { isUsableAt: _omit, ...deps } = mkDeps({
+        legMin: 10,
+        pool: [mkVenue("late_museum")],
+      });
+      const res = await swapStop(it, 0, "3 hours later", new Date(T(12, 0)), deps);
+
+      assert.ok(res.swapped, `expected the swap to go through: ${JSON.stringify(res)}`);
+      if (!res.swapped) return;
+      // THE POINT: the museum was closed by its new arrival time, so the
+      // ladder ADAPTED it. Before hours travelled with the stop, placeOf()
+      // returned no hours, keep-on-missing said "usable", and the closed
+      // venue was silently kept.
+      assert.notStrictEqual(
+        it.stops[1].id,
+        "m1",
+        "closed downstream venue should have been adapted away, not kept"
+      );
+      assert.strictEqual(it.stops[1].id, "late_museum");
+    },
+  ],
+  [
+    "hours survive select → schedule → store → placeOf's reconstruction",
+    async () => {
+      const hours: CurrentOpeningHours = {
+        periods: [{ open: { day: 1, hour: 10, minute: 0 }, close: { day: 1, hour: 20, minute: 0 } }],
+      };
+      const { stops } = buildSchedule(
+        [{ category: "bar", id: "b9", name: "Carrier", currentOpeningHours: hours }],
+        "7pm",
+        new Date(T(12, 0))
+      );
+      const it = createItinerary(stops, []);
+      // survives the store round-trip (JSON, as KV would)
+      const roundTripped = JSON.parse(JSON.stringify(it)) as typeof it;
+      assert.deepStrictEqual(roundTripped.stops[0].currentOpeningHours, hours);
+      // ...and comes back out of placeOf unchanged, which is what the
+      // availability seam actually reads
+      assert.strictEqual(
+        usableByHours(
+          { id: "b9", currentOpeningHours: roundTripped.stops[0].currentOpeningHours },
+          new Date("2026-07-06T15:00:00-04:00"), // Mon 15:00 → open
+          "bar",
+          "America/Toronto"
+        ),
+        true
+      );
+      assert.strictEqual(
+        usableByHours(
+          { id: "b9", currentOpeningHours: roundTripped.stops[0].currentOpeningHours },
+          new Date("2026-07-06T21:00:00-04:00"), // Mon 21:00 → shut
+          "bar",
+          "America/Toronto"
+        ),
+        false
+      );
+    },
+  ],
+  [
+    "KEEP-ON-MISSING: a venue Places has no hours for stays usable end to end",
+    async () => {
+      // this is the intentional rule, NOT the bug — it must not regress
+      const { stops } = buildSchedule(
+        [
+          { category: "dinner", id: "d1", name: "Dinner Spot", location: { latitude: 43.647, longitude: -79.42 } },
+          // no currentOpeningHours at all, as Places returns for many venues
+          { category: "museum", id: "m1", name: "Hours Unknown", location: { latitude: 43.649, longitude: -79.41 } },
+        ],
+        "3pm",
+        new Date(T(12, 0)),
+        [leg(0, "walk", 10)]
+      );
+      assert.strictEqual(stops[1].currentOpeningHours, undefined, "absent stays absent");
+      const it = createItinerary(stops, [leg(0, "walk", 10)], {
+        time_window: "3pm", stop_count: null, aesthetic: "unspecified",
+        category_signals: ["dinner", "museum"], group_context: "unspecified",
+        budget: null, constraints: [], location: "Ossington",
+      });
+      const { isUsableAt: _omit, ...deps } = mkDeps({ legMin: 10 });
+      const res = await swapStop(it, 0, "3 hours later", new Date(T(12, 0)), deps);
+      assert.ok(res.swapped);
+      // kept, not adapted — we can't rule it out, so we don't
+      assert.strictEqual(it.stops[1].id, "m1", "hours-less venue must stay usable");
+      // and the seam agrees directly
+      assert.strictEqual(usableByHours({ id: "x" }, new Date(T(3, 0)), "bar", "America/Toronto"), true);
     },
   ],
   // ── the PRODUCTION availability default (code-audit 2026-07-18 §1.1) ──

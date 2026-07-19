@@ -418,7 +418,7 @@ export async function interpretRefinement(
 
 function realDeps(): SwapDeps {
   // e2e fixture seam — deterministic interpret/search/select/legs/hours
-  if (isMockMode()) return mockSwapDeps(parseTimeExpr, parseDurationExpr);
+  if (isMockMode()) return mockSwapDeps(parseTimeExpr, parseDurationExpr, usableByHours);
   return {
     interpret: (parsed, category, currentStartISO, refinement) =>
       interpretRefinement(process.env.GROQ_API_KEY ?? "", parsed, category, currentStartISO, refinement),
@@ -453,14 +453,23 @@ export function usableByHours(
   return isOpenAtInstant(place.currentOpeningHours, when, timeZone) !== false;
 }
 
-// A Place view of a stored stop — for the availability check. Stored stops
-// carry no hours, so by default they read as usable (keep-on-missing).
+// A Place view of a stored stop — for the availability check. The hours now
+// travel WITH the stop (like price/description/rating already did), so this
+// hands back real data instead of always-undefined. Until that field
+// existed, every availability check on a stored stop hit keep-on-missing
+// and returned "usable", which meant the try → adapt → notify ladder's
+// adapt step could never fire in production — only in mock mode, where a
+// fixture-registry lookup papered over the gap. Found during the Group A
+// work on code-audit 2026-07-18 §1.1; NOT in the original audit.
+// A venue Places genuinely has no hours for still arrives undefined here,
+// and still reads as usable. That is the intentional rule, not the bug.
 function placeOf(stop: ItineraryStop): Place {
   return {
     id: stop.id ?? "",
     displayName: stop.name ? { text: stop.name } : undefined,
     rating: stop.rating,
     location: stop.location,
+    currentOpeningHours: stop.currentOpeningHours,
   };
 }
 
@@ -994,6 +1003,9 @@ function buildStop(
     rating: picked ? picked.pick.rating : kept!.rating,
     priceLevel: picked ? picked.pick.priceLevel : kept!.priceLevel,
     description: picked ? picked.pick.editorialSummary?.text : kept!.description,
+    currentOpeningHours: picked
+      ? picked.pick.currentOpeningHours
+      : kept!.currentOpeningHours,
     location: picked ? picked.pick.location : kept!.location,
     start_time: startISO,
     end_time: endISO,

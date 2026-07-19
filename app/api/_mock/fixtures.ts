@@ -13,7 +13,9 @@
 //  - three named categories (dinner / drinks / dessert) + a generated
 //    generic pool for anything else
 import type { ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
-import { isOpenAt, isOpenAtInstant, CurrentOpeningHours } from "../places/search/hours";
+// only the hours TYPE is needed now — the fixture layer no longer does any
+// openness reasoning of its own (see the availability-seam note below)
+import type { CurrentOpeningHours } from "../places/search/hours";
 import type { LatLng, TravelLeg } from "../schedule/travel";
 import type { Selection } from "../select/selectVenues";
 import type {
@@ -372,6 +374,10 @@ export function mockSelect(
       rating: pick.rating,
       priceLevel: pick.priceLevel,
       description: pick.editorialSummary?.text,
+      // hours travel with the pick, exactly as the real selectVenues does —
+      // a fixture that withheld them would leave mock stops hours-less and
+      // keep the production gap invisible all over again
+      currentOpeningHours: pick.currentOpeningHours,
     });
   });
   return [...out, ...empties];
@@ -472,38 +478,25 @@ export function mockWeather(): WeatherHour[] {
   });
 }
 
-// ── availability seam, mock flavor: stored stops carry no hours, so look
-// the venue up in the fixture registry by id (exactly what a real
-// availability API would do). Unknown id → keep-on-missing. ──
-function fixtureHoursById(id: string): CurrentOpeningHours | undefined {
-  const all = [
-    ...DINNER,
-    ...BAR,
-    ...DESSERT,
-    ...Array.from(genericCache.values()).flat(),
-  ];
-  return all.find((v) => v.id === id)?.currentOpeningHours;
-}
-
-// Only the LOOKUP is mock-specific — the openness logic itself delegates to
-// the shared zone-aware helper. Reimplementing it here meant the fixture
-// reproduced production's server-local-clock bug faithfully, so mock e2e
-// could never fail on it (code-audit 2026-07-18 §1.3).
-export function mockIsUsableAt(
-  place: Place,
-  when: Date,
-  _category?: string,
-  timeZone?: string
-): boolean {
-  const hours = place.currentOpeningHours ?? fixtureHoursById(place.id);
-  return isOpenAtInstant(hours, when, timeZone) !== false;
-}
+// ── availability seam: NOTHING mock-specific left. There used to be a
+// fixtureHoursById registry lookup here, because stored stops carried no
+// opening hours and the mock had to patch them back in by id — which meant
+// mock mode exercised an adapt path that production could never reach.
+// Hours now travel ON the stop (like price/description/rating), so the
+// fixture layer supplies DATA and the real `usableByHours` supplies the
+// LOGIC: swap.ts injects it below, exactly as it injects the deterministic
+// time/duration parsers. Verified dead before removal by making the lookup
+// throw and running the full mock e2e suite: 38/38 still passed. ──
 
 // ── engine deps. The deterministic time/duration parsers are injected by
 // swap.ts (they live there; injecting avoids a runtime import cycle). ──
 export function mockSwapDeps(
   parseTime: (s: string) => TimeShift | null,
-  parseDuration: (s: string) => DurationShift | null
+  parseDuration: (s: string) => DurationShift | null,
+  /** the REAL availability default from swap.ts — injected rather than
+   *  re-implemented, so mock and production can no longer disagree about
+   *  what "open then" means (injection, not import, avoids a cycle) */
+  isUsableAt: SwapDeps["isUsableAt"]
 ): SwapDeps {
   return {
     interpret: async (parsed, category, _startISO, refinement) => {
@@ -537,7 +530,7 @@ export function mockSwapDeps(
     selectVenues: async (parsed, pools) => mockSelect(parsed, pools),
     getSingleLeg: async (origin, destination, fromIndex, _departureTime, excludeTransit) =>
       mockLeg(fromIndex, origin, destination, excludeTransit),
-    isUsableAt: mockIsUsableAt,
+    isUsableAt,
     getWeather: async () => mockWeather(),
   };
 }
