@@ -45,6 +45,30 @@ export interface StripHome {
   leg?: StripLeg | null;
 }
 
+/**
+ * Star row for a rating. Presentation only — it renders the `rating` the
+ * pipeline already carries on the stop, rounded to the nearest whole star,
+ * with the numeric value alongside. Deliberately NO review count: Places'
+ * userRatingCount isn't in the search field mask, so showing one would mean
+ * changing what the pipeline fetches, which is a data change, not a design
+ * one.
+ */
+function Stars({ rating }: { rating: number }) {
+  const full = Math.round(rating);
+  return (
+    <span className="lstrip__stars" aria-hidden="true">
+      {[0, 1, 2, 3, 4].map((i) => (
+        <svg key={i} viewBox="0 0 24 24">
+          <path
+            className={i < full ? "st-on" : "st-off"}
+            d="M12 3.4l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.6 9.5l5.8-.8z"
+          />
+        </svg>
+      ))}
+    </span>
+  );
+}
+
 const PRICE_LABEL: Record<string, string> = {
   PRICE_LEVEL_INEXPENSIVE: "$",
   PRICE_LEVEL_MODERATE: "$$",
@@ -174,7 +198,12 @@ function StopCard({
         </div>
       )}
       <div className="lstrip__facts">
-        {stop.rating != null && <span className="lstrip__rating">{stop.rating.toFixed(1)}★</span>}
+        {stop.rating != null && (
+          <>
+            <Stars rating={stop.rating} />
+            <span className="lstrip__rating">{stop.rating.toFixed(1)}</span>
+          </>
+        )}
         {price && <span className="lstrip__price">{price}</span>}
         {/* parks with no price data are free — say so instead of a blank
             (keep-on-missing elsewhere: unknown price on a venue stays silent) */}

@@ -1548,44 +1548,79 @@ export default function Home() {
   if (!itinerary) {
     return (
       <main className="empty">
+        {/* decorative sky layers — the horizon curve and reflection band
+            live in CSS (.empty::before/::after); this is the wordmark glow */}
+        <div className="empty__glow" />
         <div className="empty__mark">Itinerary</div>
-        <h1 className="empty__title">Plan your day</h1>
-        <div className="wherebar">
-          <input
-            className="where__input"
-            value={city}
-            onChange={(e) => setCity(e.target.value)}
-            placeholder="City"
-            aria-label="City"
-          />
-          <input
-            className="where__input where__input--addr"
-            value={startAddress}
-            onChange={(e) => setStartAddress(e.target.value)}
-            placeholder="Starting address (optional — city centre)"
-            aria-label="Starting address"
-          />
-        </div>
+        <h1 className="empty__title">Itinerary</h1>
+        <div className="empty__sub">life moves simpler.</div>
+        {/* ONE pill, three labelled sections. Exactly the same three inputs,
+            state, validation and submit trigger as before — only the
+            presentation changed from three separate controls to one. */}
         <div className="prompt">
-          <input
-            className="prompt__input"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") runPipeline();
-            }}
-            placeholder="ramen then a quiet bar in Ossington"
-            aria-label="Describe your evening"
-            autoFocus
-          />
+          <div className="prompt__sec prompt__sec--search">
+            <label className="prompt__label" htmlFor="q-search">
+              Search
+            </label>
+            <input
+              id="q-search"
+              className="prompt__input"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") runPipeline();
+              }}
+              placeholder="ramen then a quiet bar in Ossington"
+              aria-label="Describe your evening"
+              autoFocus
+            />
+          </div>
+          <div className="prompt__sec">
+            <label className="prompt__label" htmlFor="q-city">
+              City
+            </label>
+            <input
+              id="q-city"
+              className="where__input"
+              value={city}
+              onChange={(e) => setCity(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") runPipeline();
+              }}
+              placeholder="City"
+              aria-label="City"
+            />
+          </div>
+          <div className="prompt__sec">
+            <label className="prompt__label" htmlFor="q-start">
+              Starting location
+            </label>
+            <input
+              id="q-start"
+              className="where__input where__input--addr"
+              value={startAddress}
+              onChange={(e) => setStartAddress(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") runPipeline();
+              }}
+              placeholder="optional — city centre"
+              aria-label="Starting address"
+            />
+          </div>
           <button
             className="prompt__go"
             onClick={runPipeline}
             disabled={busy || !prompt.trim() || !city.trim()}
+            aria-label={busy ? loadingText ?? "Planning" : "Plan it"}
+            title={busy ? loadingText ?? "Planning" : "Plan it"}
           >
-            {busy ? loadingText : "Plan it"}
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <path d="M20 20l-3.5-3.5" />
+            </svg>
           </button>
         </div>
+        {busy && loadingText && <div className="empty__status">{loadingText}</div>}
         {clarifyBlock}
         {recoveryBlock}
         {error && <div className="empty__err">{error}</div>}

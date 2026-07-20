@@ -40,25 +40,28 @@ export interface MapHome {
   leaveBy?: string | null;
 }
 
-// Warm-paper cartography — desaturated greys, POIs and transit stripped
-// so the cards ARE the points of interest.
+// Pale-blue cartography — cool desaturated tones, POIs and transit labels
+// stripped so the cards ARE the points of interest. The stripping rules are
+// unchanged from the original warm-paper theme; only the colours moved.
 const PAPER_STYLE: google.maps.MapTypeStyle[] = [
-  { elementType: "geometry", stylers: [{ color: "#e9e6df" }] },
-  { elementType: "labels.text.fill", stylers: [{ color: "#5c5f57" }] },
-  { elementType: "labels.text.stroke", stylers: [{ color: "#e9e6df" }] },
+  { elementType: "geometry", stylers: [{ color: "#dfeaf1" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#6b8797" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#eaf3f8" }] },
   { elementType: "labels.icon", stylers: [{ visibility: "off" }] },
   { featureType: "poi", stylers: [{ visibility: "off" }] },
   { featureType: "transit", stylers: [{ visibility: "off" }] },
-  { featureType: "road", elementType: "geometry", stylers: [{ color: "#f1ede5" }] },
-  { featureType: "road", elementType: "labels.text.fill", stylers: [{ color: "#7a7d74" }] },
-  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#e6e1d6" }] },
-  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#ddd7ca" }] },
-  { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#e4e0d5" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#f4fafd" }] },
+  { featureType: "road", elementType: "labels.text.fill", stylers: [{ color: "#87a3b2" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#e9f2f7" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#d8e8f0" }] },
+  { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#dbebe8" }] },
   { featureType: "administrative", elementType: "geometry", stylers: [{ visibility: "off" }] },
-  { featureType: "water", elementType: "geometry", stylers: [{ color: "#d9d5cb" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#bcdcea" }] },
 ];
 
-const INK = "#17212E";
+// Route lines: a deep teal that reads on the pale map. Dashed transit vs
+// solid walk is unchanged — only the hue moved off the old ink-navy.
+const INK = "#2E6F8A";
 const LIVE = "#C8F000";
 
 let libsPromise: Promise<
