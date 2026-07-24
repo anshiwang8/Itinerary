@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { isMockMode, mockParse } from "../_mock/fixtures";
 import type { ParsedPrompt } from "../places/search/filter";
 import { UNPARSEABLE_MESSAGE } from "../../lib/planGuards";
+import { hasImmediateTimeSignal } from "../../lib/immediateTime";
 
 // Standalone LLM parse step: natural-language prompt → structured plan
 // parameters. Not connected to Places yet — this route only proves Groq
@@ -14,7 +15,7 @@ const SYSTEM_PROMPT = `You are a parser for a day-plan generator. Convert the us
 Respond with ONLY a single JSON object. No prose, no explanations, no markdown fences, no leading or trailing text. The object must match this exact schema — every key present, no extra keys:
 
 {
-  "time_window": string,        // ONLY timing and duration, nothing else. Capture the MOST SPECIFIC time information given: if an exact time is stated (e.g. "7pm", "around 3:30"), include it verbatim alongside any duration, e.g. "7pm, 2 hours". Preserve day qualifiers verbatim too ("today", "tomorrow", "Saturday"): e.g. "coffee at 6am tomorrow" → "tomorrow, 6am". Only fall back to a general day-part (morning/afternoon/evening/night) when no specific time is stated. "unspecified" if no time information at all
+  "time_window": string,        // ONLY timing and duration, nothing else. Capture the MOST SPECIFIC time information given: if an exact time is stated (e.g. "7pm", "around 3:30"), include it verbatim alongside any duration, e.g. "7pm, 2 hours". Preserve day qualifiers verbatim too ("today", "tomorrow", "Saturday"): e.g. "coffee at 6am tomorrow" → "tomorrow, 6am". IMMEDIACY ("right now", "ASAP", "immediately", "at this moment", "as soon as possible", "open now") is time information — capture it as exactly "now", never a day-part and never "unspecified". Only fall back to a general day-part (morning/afternoon/evening/night) when no specific time is stated. "unspecified" if no time information at all
   "stop_count": number | null,  // ONLY if the user states a NUMBER of stops/places in words or digits (e.g. "3 stops", "exactly two places"); otherwise null. Never count listed activities yourself: "dinner then a bar" has no stated number, so stop_count is null (the activities still go in category_signals). Numbers that describe duration, clock times, people, or budget are NOT stop counts.
   "aesthetic": string,          // the vibe/mood the user wants, e.g. "cozy", "lively night out", "quiet and scenic"
   "category_signals": string[], // place/activity categories implied, e.g. ["coffee shop", "bookstore", "park"]. Capture EVERY distinct activity in the prompt, one entry each, including non-venue activities: "a walk" → "walk", "shopping" → "shopping", "a stroll in the park" → "park walk". Never merge or drop an activity because it isn't a business type. Preserve specific cuisine/food types as the category — "ramen" stays "ramen", "tacos" stays "tacos", never generalized to "restaurant". A VENUE FEATURE attached to an activity is NOT its own category: "dessert with a patio", "a bar with live music", "dinner with a view", "somewhere with outdoor seating" are each ONE activity — the feature ("patio", "live music", "a view", "outdoor seating", "rooftop") goes in "constraints", exactly like dietary words do. Only a genuinely distinct activity gets its own entry: "dinner then a bar" is two. PASSIVE OUTDOOR/NATURE ENJOYMENT normalizes to the category "park": sitting on a bench, quiet scenery, greenery, fresh air, people-watching outside, "somewhere calm outside", enjoying nature — all of these are "park", never a cafe/bar/restaurant with a view
@@ -50,6 +51,17 @@ function normalizeParse(raw: unknown): ParsedPrompt {
   };
 }
 
+// Deterministic immediate-time floor (same spirit as swap.ts's
+// parseTimeExpr): when the RAW prompt states immediacy, time_window is
+// "now" — the exact value the clarify UI's own "now" button produces and
+// resolveStartTime's immediate branch already handles — regardless of
+// what the model returned. Live repro showed the model mapping "right
+// now" to "unspecified", which rolled the plan to tomorrow.
+function withImmediateFloor(prompt: string, parsed: ParsedPrompt): ParsedPrompt {
+  if (!hasImmediateTimeSignal(prompt)) return parsed;
+  return { ...parsed, time_window: "now" };
+}
+
 export async function POST(request: NextRequest) {
   let prompt: string;
   try {
@@ -68,8 +80,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // e2e fixture seam — deterministic parse, no Groq call, no key needed
-  if (isMockMode()) return NextResponse.json(mockParse(prompt));
+  // e2e fixture seam — deterministic parse, no Groq call, no key needed.
+  // The immediate-time floor still applies: it is LOGIC, not data, so the
+  // mock seam must not fork around it.
+  if (isMockMode()) {
+    return NextResponse.json(withImmediateFloor(prompt, mockParse(prompt)));
+  }
 
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
@@ -114,7 +130,7 @@ export async function POST(request: NextRequest) {
     }
 
     raw = data?.choices?.[0]?.message?.content ?? "";
-    return NextResponse.json(normalizeParse(JSON.parse(raw)));
+    return NextResponse.json(withImmediateFloor(prompt, normalizeParse(JSON.parse(raw))));
   } catch (err) {
     return NextResponse.json(
       {

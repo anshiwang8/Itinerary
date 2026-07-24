@@ -346,6 +346,74 @@ const cases: Array<[string, () => void]> = [
 ];
 
 // ── runner ──
+const HONEST_EMPTY_CASES: Array<[string, () => void]> = [
+  [
+    "noVenuesReason: hours-dominant drops → 'closed at that hour', not the generic line",
+    () => {
+      const drops: DropEntry[] = [
+        { category: "restaurant", name: "A", id: "a", rule: "hours", detail: "closed" },
+        { category: "restaurant", name: "B", id: "b", rule: "hours", detail: "closed" },
+        { category: "restaurant", name: "C", id: "c", rule: "rating", detail: "3.1" },
+      ];
+      const msg = noVenuesReason(["restaurant"], "12:00 AM", drops);
+      assert.match(msg, /closed at that hour/i);
+      assert.match(msg, /different kind of place/i);
+      assert.ok(!/everything nearby got filtered out/i.test(msg), "generic line must not appear");
+    },
+  ],
+  [
+    "noVenuesReason: a DIFFERENT dominant reason keeps its own honest phrasing",
+    () => {
+      const price: DropEntry[] = [
+        { category: "dinner", name: "A", id: "a", rule: "price", detail: "$$$" },
+        { category: "dinner", name: "B", id: "b", rule: "price", detail: "$$$" },
+      ];
+      const msg = noVenuesReason(["dinner"], "7:00 PM", price);
+      assert.match(msg, /don't fit your budget/i);
+      assert.ok(!/closed at that hour/i.test(msg), "must not borrow the late-night line");
+      const rating: DropEntry[] = [
+        { category: "dinner", name: "A", id: "a", rule: "rating", detail: "2.9" },
+      ];
+      assert.match(noVenuesReason(["dinner"], null, rating), /too poorly rated/i);
+    },
+  ],
+  [
+    "noVenuesReason: NO drop data → the original generic message, byte-identical",
+    () => {
+      assert.strictEqual(
+        noVenuesReason(["beach"], "3:00 PM"),
+        "Couldn't find any beach spots open around 3:00 PM — everything nearby got filtered out. Try a different time?"
+      );
+      assert.strictEqual(
+        noVenuesReason(["beach"], "3:00 PM", []),
+        "Couldn't find any beach spots open around 3:00 PM — everything nearby got filtered out. Try a different time?"
+      );
+    },
+  ],
+  [
+    "the PARTIAL path (emptyCategoryReason) is unchanged by the refactor",
+    () => {
+      const drops: DropEntry[] = [
+        { category: "ramen", name: "A", id: "a", rule: "businessStatus", detail: "CLOSED_PERMANENTLY" },
+      ];
+      assert.strictEqual(
+        emptyCategoryReason("ramen", drops, "Ossington"),
+        "Couldn't find any ramen open near Ossington — the only one nearby is permanently closed."
+      );
+      const hoursDrops: DropEntry[] = [
+        { category: "bar", name: "A", id: "a", rule: "hours", detail: "closed" },
+        { category: "bar", name: "B", id: "b", rule: "hours", detail: "closed" },
+      ];
+      assert.strictEqual(
+        emptyCategoryReason("bar", hoursDrops, null),
+        "Couldn't find any bar open nearby — the ones nearby are closed at that hour."
+      );
+    },
+  ],
+];
+
+cases.push(...HONEST_EMPTY_CASES);
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

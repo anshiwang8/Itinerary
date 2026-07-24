@@ -510,6 +510,35 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "RIGHT-NOW REPRO: time_window 'now' resolves to TONIGHT's next full hour, never tomorrow",
+    () => {
+      // the reported bug's shape: late evening, immediate request. Pre-fix
+      // the parse LOST the immediacy ("unspecified"), the resolver fell to
+      // the restaurant default 19:00 — already passed — and rolled the plan
+      // to TOMORROW 7 PM. With time_window "now" the resolver books the
+      // immediate slot tonight instead.
+      const late = new Date(2026, 6, 3, 21, 15, 0); // Fri 21:15
+      assert.strictEqual(
+        resolveStartTime("now", late, ["restaurant"]).toISOString(),
+        new Date(2026, 6, 3, 22, 0, 0).toISOString() // TONIGHT 22:00
+      );
+      // the buggy path, pinned for contrast: "unspecified" still rolls the
+      // passed category default forward a day — which is exactly why losing
+      // "right now" in the parse produced "tomorrow at 8"
+      assert.strictEqual(
+        resolveStartTime("unspecified", late, ["restaurant"]).toISOString(),
+        new Date(2026, 6, 4, 19, 0, 0).toISOString() // tomorrow 19:00
+      );
+      // even past the category's band, "now" stays TONIGHT — the band check
+      // then refuses honestly, which beats silently booking tomorrow
+      const veryLate = new Date(2026, 6, 3, 23, 28, 0); // the reported 11:28 PM
+      assert.strictEqual(
+        resolveStartTime("now", veryLate, ["restaurant"]).toISOString(),
+        new Date(2026, 6, 4, 0, 0, 0).toISOString() // midnight, ~32 min away
+      );
+    },
+  ],
+  [
     "3-stop chain: sequential, non-overlapping, Toronto ISO, travel placeholder",
     () => {
       const { startISO, stops } = buildSchedule(

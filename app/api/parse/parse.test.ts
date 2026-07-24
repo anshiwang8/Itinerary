@@ -86,6 +86,34 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "IMMEDIATE FLOOR: 'right now' stamps time_window to 'now' even when the model lost it",
+    async () => {
+      // the live repro: the model returned "unspecified" for a prompt that
+      // said "right now" — the deterministic floor must not care what the
+      // model returned (here it answers a day-part, the worst case: that
+      // resolves to 20:00 and rolls a late-night plan to TOMORROW)
+      groqContent = JSON.stringify({
+        time_window: "tonight",
+        category_signals: ["restaurant"],
+        location: "",
+      });
+      const res = await POST(req("restaurants to eat at right now"));
+      const data = await res.json();
+      assert.strictEqual(data.time_window, "now");
+      // variants
+      for (const prompt of ["food asap im starving", "somewhere to eat immediately", "whats open now"]) {
+        groqContent = JSON.stringify({ time_window: "unspecified", category_signals: ["restaurant"], location: "" });
+        const r = await POST(req(prompt));
+        assert.strictEqual((await r.json()).time_window, "now", `floor missed: "${prompt}"`);
+      }
+      // and it NEVER fires without an immediacy phrase — a stated clock
+      // time passes through untouched
+      groqContent = JSON.stringify({ time_window: "7pm", category_signals: ["restaurant"], location: "" });
+      const r2 = await POST(req("dinner at 7pm"));
+      assert.strictEqual((await r2.json()).time_window, "7pm");
+    },
+  ],
+  [
     "a well-formed answer passes through unchanged",
     async () => {
       const good = {

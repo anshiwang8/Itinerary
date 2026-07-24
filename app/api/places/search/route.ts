@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { DropEntry, filterPools, ParsedPrompt, WeatherHour } from "./filter";
 import { searchPools } from "./searchPlaces";
 import { resolveStartTime } from "../../schedule/schedule";
+import { wallClockParts } from "../../../lib/zoneTime";
 import { isMockMode, mockPools } from "../../_mock/fixtures";
 
 // Places API (New) — Text Search, driven by the parsed prompt from
@@ -60,6 +61,7 @@ export async function POST(request: NextRequest) {
     // observability at the resolution point (like [swap-apply]): what the
     // parse handed us, what instant it resolved to, and under which TZ —
     // a schedule anchored at a nonsense hour is visible right here
+    let lateNight = false;
     {
       const cats = (categoriesOverride ?? parsed.category_signals ?? []).filter(
         (c): c is string => typeof c === "string" && c.trim() !== ""
@@ -68,6 +70,10 @@ export async function POST(request: NextRequest) {
         targetTime !== undefined
           ? new Date(targetTime)
           : resolveStartTime(parsed.time_window ?? "", new Date(), cats, timeZone);
+      // late-night broadening kicks in when the PLAN's local hour is late —
+      // judged in the plan's zone, like every other hour in the pipeline
+      const localHour = wallClockParts(resolved, timeZone).hour;
+      lateNight = localHour >= 21 || localHour < 5;
       console.log(
         `[schedule-resolve] time_window=${JSON.stringify(parsed.time_window)} ` +
           `categories=${JSON.stringify(cats)} zone=${timeZone ?? "(default Toronto)"} ` +
@@ -82,7 +88,7 @@ export async function POST(request: NextRequest) {
     const searchOut = { failures: [] as DropEntry[] };
     const rawPools = isMockMode()
       ? mockPools(categoriesOverride ?? parsed.category_signals ?? [], parsed)
-      : await searchPools(apiKey!, parsed, categoriesOverride, searchOut);
+      : await searchPools(apiKey!, parsed, categoriesOverride, searchOut, { lateNight });
     const { pools, dropLog, weatherBlocked } = filterPools(
       rawPools,
       parsed,

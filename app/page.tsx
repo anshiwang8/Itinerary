@@ -533,7 +533,7 @@ export default function Home() {
         return fail(
           wxBlocks.length >= poolEntries.length && wxBlocks.length > 0
             ? weatherBlockedReason(wxBlocks)
-            : noVenuesReason(Object.keys(categories), formatStopTime(startInstant, new Date(), planZone))
+            : noVenuesReason(Object.keys(categories), formatStopTime(startInstant, new Date(), planZone), drops)
         );
       }
 

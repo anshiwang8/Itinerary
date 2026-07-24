@@ -4,7 +4,7 @@
 // wrong error. Each guard returns a user-facing string, or null to let
 // the pipeline continue. Runs client-side before/around the API calls,
 // same pattern as resolveStartTimeChecked.
-import { ParsedPrompt, DropEntry } from "../api/places/search/filter";
+import { ParsedPrompt, DropEntry, DropRule } from "../api/places/search/filter";
 import type { Selection } from "../api/select/selectVenues";
 
 export const UNPARSEABLE_MESSAGE =
@@ -151,11 +151,36 @@ export function contradictionReason(
   return null;
 }
 
-/** Every pool came back empty (post-filter) — the honest "nothing survived". */
-export function noVenuesReason(categories: string[], whenLabel: string | null): string {
+/**
+ * Every pool came back empty (post-filter) — the honest "nothing survived".
+ * With the drop log, the message names the DOMINANT cause instead of the
+ * generic "everything got filtered out": the reported live case was
+ * "restaurants right now" late at night, where every venue was dropped on
+ * HOURS and the old message's "try a different time?" hid the actual
+ * situation (nothing is open this late — a different KIND of place, or the
+ * morning, are the real options). Reuses the same per-rule phrasing as
+ * emptyCategoryReason — one copy of those strings.
+ */
+export function noVenuesReason(
+  categories: string[],
+  whenLabel: string | null,
+  drops: DropEntry[] = []
+): string {
   const cats = categories.filter((c) => c && c !== "general");
   const what = cats.length > 0 ? `${cats.join(" or ")} spots` : "places";
   const when = whenLabel ? ` open around ${whenLabel}` : "";
+  const d = dominantRule(drops);
+  if (d?.rule === "hours") {
+    // hours-dominant: the venues exist, the HOUR is the problem — say so,
+    // and point at the two moves that actually help
+    return `Couldn't find any ${what} still open${whenLabel ? ` around ${whenLabel}` : ""} — everything nearby is closed at that hour. Try a different time, or a different kind of place?`;
+  }
+  if (d) {
+    const phrase = phraseForRule(d.rule, d.one);
+    if (phrase) {
+      return `Couldn't find any ${what}${when} — ${phrase}. Try a different kind of place?`;
+    }
+  }
   return `Couldn't find any ${what}${when} — everything nearby got filtered out. Try a different time?`;
 }
 
@@ -223,13 +248,18 @@ const meaningfulLocation = (label?: string | null): string | null =>
 
 // Friendly phrasing for the dominant objective drop rule that emptied a
 // category's pool. null when nothing was even returned nearby (no drops).
-function reasonFromDrops(category: string, drops: DropEntry[]): string | null {
-  const mine = drops.filter((d) => d.category === category);
-  if (mine.length === 0) return null;
-  const counts = new Map<DropEntry["rule"], number>();
-  for (const d of mine) counts.set(d.rule, (counts.get(d.rule) ?? 0) + 1);
+/** The dominant drop rule in a set of entries, or null when there are none. */
+function dominantRule(entries: DropEntry[]): { rule: DropRule; one: boolean } | null {
+  if (entries.length === 0) return null;
+  const counts = new Map<DropRule, number>();
+  for (const d of entries) counts.set(d.rule, (counts.get(d.rule) ?? 0) + 1);
   const [rule] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-  const one = mine.length === 1;
+  return { rule, one: entries.length === 1 };
+}
+
+/** Friendly phrasing for one drop rule — the ONE copy of these strings,
+ *  shared by the per-category reason and the all-empty net. */
+function phraseForRule(rule: DropRule, one: boolean): string | null {
   switch (rule) {
     case "businessStatus":
       return one ? "the only one nearby is permanently closed" : "the ones nearby are permanently closed";
@@ -247,6 +277,11 @@ function reasonFromDrops(category: string, drops: DropEntry[]): string | null {
     default:
       return null;
   }
+}
+
+function reasonFromDrops(category: string, drops: DropEntry[]): string | null {
+  const d = dominantRule(drops.filter((x) => x.category === category));
+  return d ? phraseForRule(d.rule, d.one) : null;
 }
 
 /**

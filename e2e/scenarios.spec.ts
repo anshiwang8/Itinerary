@@ -309,3 +309,43 @@ test.describe("@mock generic-category clarify", () => {
     await expect(page.locator(".lstrip__stop .eyebrow").first()).toHaveText(/sushi/i);
   });
 });
+
+// ── the "right now" repro (reported live at 11:28 PM) ───────────────────
+// The parse LOST immediacy phrasing entirely — "right now" came back
+// time_window "unspecified", the resolver fell to the category's default
+// start, which had already passed, and the whole plan silently rolled to
+// TOMORROW. The deterministic floor now stamps "now" from the raw prompt
+// (regardless of what the model returns), and "now" resolves to TONIGHT's
+// next full hour. The client clock is frozen at 21:15 so the resolved slot
+// (22:00) is deterministic; "drinks" keeps the pool server-hour-proof via
+// the hours-less Night Owl fixture (keep-on-missing survivor).
+test("'right away' plans TONIGHT's next full hour, never tomorrow @mock", async ({ page }) => {
+  await page.addInitScript(`{
+    const RealDate = Date;
+    const fixed = new RealDate('2026-07-16T21:15:00-04:00').getTime();
+    function FakeDate(...a) { return a.length ? new RealDate(...a) : new RealDate(fixed); }
+    FakeDate.now = () => fixed;
+    FakeDate.parse = RealDate.parse;
+    FakeDate.UTC = RealDate.UTC;
+    FakeDate.prototype = RealDate.prototype;
+    window.Date = FakeDate;
+  }`);
+  await page.goto("/");
+  await page.locator(".prompt__input").fill("drinks right away");
+  await page.locator(".prompt__go").click();
+  // "drinks" is generic → the (intended) narrowing question shows; the
+  // floor already stamped time_window "now", so When? must NOT be asked
+  const clarify = page.locator(".clarify");
+  await expect(clarify).toBeVisible({ timeout: 30_000 });
+  await expect(clarify).not.toContainText("When?");
+  await page.getByRole("button", { name: "Skip — just plan it" }).click();
+
+  await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+  const be = page.locator(".lstrip__stop .lstrip__be").first();
+  // TONIGHT: leave home at the 22:00 slot, arrive within the 10 PM hour
+  // (the exact minute is the home leg's travel, which depends on which bar
+  // the server-hour filter left standing). Pre-fix this read
+  // "tomorrow, 8:00 PM" — bar default 20:00, passed at 21:15, rolled a day.
+  await expect(be).toContainText(/be here 10:\d\d PM/);
+  await expect(be).not.toContainText("tomorrow");
+});

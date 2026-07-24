@@ -123,7 +123,17 @@ export async function searchPools(
   categoriesOverride?: string[],
   /** optional out-param: per-category search failures, as drop entries the
    *  caller can fold into its drop log (code-audit 2026-07-18 §6.1) */
-  out?: { failures: DropEntry[] }
+  out?: { failures: DropEntry[] },
+  opts: {
+    /** the plan resolves to a LATE hour — each named category also runs a
+     * "late night <category>" variant and unions the results. Same class
+     * of problem GENERAL_QUERIES already solved for the vague pool: one
+     * relevance-ranked text search skews to well-known (and by-then-
+     * closed) venues. Probe, Toronto 23:30: "restaurant" returned 6/20
+     * open; the "late night" variant surfaced 8/20 with partial overlap,
+     * so the union roughly doubles the genuinely-open pool. */
+    lateNight?: boolean;
+  } = {}
 ): Promise<Record<string, Place[]>> {
   // Pools are keyed by category, so a category requested twice ("a drink,
   // then another drink somewhere else") needs only ONE search — the second
@@ -173,10 +183,20 @@ export async function searchPools(
     return { general: dedupeById(ok.flatMap((r) => r.value)) };
   }
 
+  // at a late target hour, pair each category query with its "late night"
+  // variant; the primary query goes first so its results win the dedupe
+  const queriesFor = (category: string): string[] =>
+    opts.lateNight
+      ? [buildQuery(parsed, category), buildQuery(parsed, `late night ${category}`)]
+      : [buildQuery(parsed, category)];
+
   const settled = await Promise.allSettled(
-    categories.map((category) =>
-      searchText(apiKey, buildQuery(parsed, category), includedTypeFor(category))
-    )
+    categories.map(async (category) => {
+      const results = await Promise.all(
+        queriesFor(category).map((q) => searchText(apiKey, q, includedTypeFor(category)))
+      );
+      return dedupeById(results.flat());
+    })
   );
   if (settled.every((r) => r.status === "rejected")) {
     const first = settled[0] as PromiseRejectedResult;

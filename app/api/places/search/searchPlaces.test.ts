@@ -137,6 +137,57 @@ const searchCases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "LATE NIGHT: a named category unions its 'late night' variant; daytime stays one query",
+    async () => {
+      // probe evidence (Toronto, 23:30): plain "restaurant" returned 6/20
+      // open — dominated by well-known, by-then-closed venues, the same
+      // class of skew GENERAL_QUERIES fixed for the vague pool
+      const queries: string[] = [];
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          const q = JSON.parse(String(init?.body)).textQuery as string;
+          queries.push(q);
+          // overlap on lp1 proves the union dedupes; the primary query wins
+          const places = q.includes("late night")
+            ? [{ id: "lp1" }, { id: "late_only" }]
+            : [{ id: "lp1" }, { id: "day_only" }];
+          return new Response(JSON.stringify({ places }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const pools = await searchPools(
+          "k",
+          mkParsed({ category_signals: ["restaurant"] }),
+          undefined,
+          undefined,
+          { lateNight: true }
+        );
+        assert.deepStrictEqual(queries, [
+          "restaurant Ossington Toronto",
+          "late night restaurant Ossington Toronto",
+        ]);
+        assert.deepStrictEqual(
+          pools.restaurant.map((p) => p.id),
+          ["lp1", "day_only", "late_only"],
+          "union of both queries, deduped, primary first"
+        );
+
+        // daytime: exactly one query, byte-identical to the old behaviour
+        queries.length = 0;
+        const day = await searchPools("k", mkParsed({ category_signals: ["restaurant"] }));
+        assert.deepStrictEqual(queries, ["restaurant Ossington Toronto"]);
+        assert.deepStrictEqual(day.restaurant.map((p) => p.id), ["lp1", "day_only"]);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
     "DUPLICATE CATEGORY: one search per distinct category, pool keyed once",
     async () => {
       const queries: string[] = [];
