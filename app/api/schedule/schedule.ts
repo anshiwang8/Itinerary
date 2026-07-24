@@ -338,7 +338,23 @@ export function resolveStartTime(
     return instantAtWallClock(now, timeZone, inferred.hour, inferred.minute, dayOffset, true);
   }
 
-  // unspecified → next full hour
+  // Unspecified → next full hour… but a day qualifier must survive the
+  // fall-through. This line used to ignore dayOffset entirely, so
+  // "things to do as a soccer fan tomorrow" (no clock time, no day-part,
+  // "soccer" matches nothing in CATEGORY_START_DEFAULTS) silently
+  // discarded "tomorrow" and planned at the next full hour from now —
+  // at 11:38 PM, an overnight plan. NOT fixed by day-adding the
+  // next-full-hour instant: the hour the user happened to TYPE at is an
+  // artifact, and projecting it onto tomorrow gives "tomorrow 11 PM" for
+  // a night-typed prompt (the same overnight complaint, one day later) —
+  // and at 11-to-midnight the next full hour is already tomorrow's date,
+  // so a day-add overshoots to the day AFTER. "Tomorrow" with no other
+  // time info means "tomorrow, daytime": anchor at the morning day-part
+  // default, exactly where "tomorrow morning" already lands.
+  if (dayOffset > 0) {
+    const t = DAY_PART_DEFAULTS.morning;
+    return instantAtWallClock(now, timeZone, t.hour, t.minute, dayOffset, true);
+  }
   return nextFullHourInZone(now, timeZone);
 }
 

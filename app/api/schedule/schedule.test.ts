@@ -87,6 +87,47 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "TOMORROW-FALLBACK REPRO: 'tomorrow' + no-default category lands TOMORROW morning, never tonight",
+    () => {
+      // The reported bug: "plan a full schedule for things to do as a
+      // soccer fan tomorrow", typed at 11:38 PM. "soccer" matches nothing
+      // in CATEGORY_START_DEFAULTS, so resolution fell through to the
+      // final next-full-hour fallback — which dropped dayOffset and
+      // produced an overnight plan at midnight instead of tomorrow.
+      const lateEvening = new Date(2026, 6, 3, 23, 38, 0);
+      assert.strictEqual(
+        resolveStartTime("tomorrow", lateEvening, ["soccer"]).toISOString(),
+        new Date(2026, 6, 4, 10, 0, 0).toISOString() // tomorrow 10:00, the morning anchor
+      );
+      // afternoon-typed variant: still tomorrow morning, never "today next full hour"
+      assert.strictEqual(
+        resolveStartTime("tomorrow", NOW, ["axe throwing"]).toISOString(),
+        new Date(2026, 6, 4, 10, 0, 0).toISOString()
+      );
+    },
+  ],
+  [
+    "tomorrow + table-matched category still uses the category default (regression)",
+    () => {
+      // this path already threaded dayOffset correctly — keep it that way
+      assert.strictEqual(
+        resolveStartTime("tomorrow", NOW, ["dinner"]).toISOString(),
+        new Date(2026, 6, 4, 19, 0, 0).toISOString()
+      );
+    },
+  ],
+  [
+    "explicit 'now' keeps ignoring day qualifiers (correct on purpose)",
+    () => {
+      // the immediate branch wins before day math — a clarify-stamped
+      // "now" means NOW even if stray day words ride along
+      assert.strictEqual(
+        resolveStartTime("now, tomorrow", NOW, ["soccer"]).toISOString(),
+        new Date(2026, 6, 3, 14, 0, 0).toISOString() // next full hour from 13:20
+      );
+    },
+  ],
+  [
     "category-aware default: brunch-unspecified → 10:30 (same day at 3 AM, rolled when past)",
     () => {
       const threeAM = new Date(2026, 6, 3, 3, 0, 0);
