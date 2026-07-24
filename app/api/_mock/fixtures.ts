@@ -243,7 +243,13 @@ export function mockParse(prompt: string): ParsedPrompt {
   // fixtures); kept BEFORE the broad dinner rule so they aren't swallowed
   if (/dumpling/.test(p)) signals.push("dumplings");
   if (/\bbao\b/.test(p)) signals.push("bao");
-  if (/dinner|restaurant|ramen|sushi|food|eat/.test(p)) signals.push("dinner");
+  // specific dishes stay their OWN category — mirrors the real parse
+  // contract ("ramen stays ramen, never generalized to restaurant"), which
+  // the generic-category clarify axis depends on: "sushi tonight" must not
+  // be re-asked what cuisine it is
+  if (/\bsushi\b/.test(p)) signals.push("sushi");
+  else if (/\bramen\b/.test(p)) signals.push("ramen");
+  else if (/dinner|restaurant|food|eat/.test(p)) signals.push("dinner");
   if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
   // A SECOND stop of the same kind — "drinks then another bar" is two
   // stops, not one. The deterministic duplicate-category trigger (§7.1):

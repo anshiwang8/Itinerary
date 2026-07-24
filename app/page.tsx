@@ -26,6 +26,7 @@ import {
   widenOfferLabel,
 } from "./lib/planGuards";
 import {
+  applyNarrowAnswer,
   categoriesForKindAnswer,
   ClarifyQuestion,
   clarifyQuestions,
@@ -231,6 +232,10 @@ export default function Home() {
   const [clarifyTime, setClarifyTime] = useState("");
   const [clarifyVibe, setClarifyVibe] = useState("");
   const [clarifyKind, setClarifyKind] = useState("");
+  // narrowing answers for GENERIC categories ("restaurant" -> "Italian"),
+  // keyed by the category each narrow question targets — there can be
+  // several in one clarify round ("dinner and drinks" is two)
+  const [clarifyNarrow, setClarifyNarrow] = useState<Record<string, string>>({});
 
   // The interactive-recovery panel — one component, three triggers:
   //  - "empty": SOME (or, after an override, ALL) categories came back
@@ -327,6 +332,7 @@ export default function Home() {
         setClarifyTime("");
         setClarifyVibe("");
         setClarifyKind("");
+        setClarifyNarrow({});
         setLoadingText(null);
         return;
       }
@@ -351,6 +357,15 @@ export default function Home() {
       if (clarifyKind.trim()) {
         const cats = categoriesForKindAnswer(clarifyKind);
         if (cats.length > 0) updated.category_signals = cats;
+      }
+      // narrow answers fold back onto EXACTLY the generic signal each
+      // question targeted; untouched signals (and duplicate slots of the
+      // same category) pass through applyNarrowAnswer identically
+      if (Object.values(clarifyNarrow).some((v) => v.trim())) {
+        updated.category_signals = (updated.category_signals ?? []).map((c) => {
+          const a = clarifyNarrow[c]?.trim();
+          return a ? applyNarrowAnswer(c, a) : c;
+        });
       }
     }
     setClarify(null);
@@ -950,6 +965,7 @@ export default function Home() {
     setClarifyWhen(null);
     setClarifyTime("");
     setClarifyVibe("");
+    setClarifyNarrow({});
   }
 
   // ── weather-gate actions ──────────────────────────────────────────────
@@ -1361,7 +1377,7 @@ export default function Home() {
   const clarifyBlock = clarify && (
     <div className={"clarify" + (itinerary ? " clarify--stage" : "")}>
       {clarify.questions.map((qq) => (
-        <div key={qq.id} className="clarify__q">
+        <div key={qq.id === "narrow" ? `narrow:${qq.category}` : qq.id} className="clarify__q">
           <div className="clarify__label">{qq.question}</div>
           <div className="clarify__chips">
             {qq.options.map((o) => (
@@ -1373,6 +1389,8 @@ export default function Home() {
                     ? clarifyWhen === o
                     : qq.id === "kind"
                     ? clarifyKind === o
+                    : qq.id === "narrow"
+                    ? clarifyNarrow[qq.category ?? ""] === o
                     : clarifyVibe === o)
                     ? "chipbtn--on"
                     : "")
@@ -1382,6 +1400,8 @@ export default function Home() {
                     ? setClarifyWhen(o)
                     : qq.id === "kind"
                     ? setClarifyKind(o)
+                    : qq.id === "narrow"
+                    ? setClarifyNarrow((m) => ({ ...m, [qq.category ?? ""]: o }))
                     : setClarifyVibe(o)
                 }
               >
@@ -1396,6 +1416,17 @@ export default function Home() {
                 placeholder="7pm"
                 aria-label="Pick a time"
                 autoFocus
+              />
+            )}
+            {qq.id === "narrow" && (
+              <input
+                className="clarify__input"
+                value={clarifyNarrow[qq.category ?? ""] ?? ""}
+                onChange={(e) =>
+                  setClarifyNarrow((m) => ({ ...m, [qq.category ?? ""]: e.target.value }))
+                }
+                placeholder="or type one…"
+                aria-label={qq.question}
               />
             )}
             {qq.id === "kind" && (

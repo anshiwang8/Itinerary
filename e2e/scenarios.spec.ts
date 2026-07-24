@@ -266,3 +266,46 @@ test.describe("@mock arrival-time re-check", () => {
     }
   });
 });
+
+// ── generic-category clarify (category presence ≠ category specificity) ──
+// "restaurant tonight" used to skip clarification entirely: category
+// present, time present, done. But a bare "restaurant" isn't enough to
+// search well — it now draws its narrowing question even though a time is
+// present, while an already-specific dish ("sushi") still plans straight
+// through on the unchanged skip rule.
+test.describe("@mock generic-category clarify", () => {
+  test("'restaurant tonight' asks the cuisine question; the answer narrows the plan @mock", async ({ page }) => {
+    await page.goto("/");
+    await page.locator(".prompt__input").fill("restaurant tonight");
+    await page.locator(".prompt__go").click();
+
+    const clarify = page.locator(".clarify");
+    await expect(clarify).toBeVisible({ timeout: 30_000 });
+    await expect(clarify).toContainText("What are you craving?");
+    // time was given — the When? question must NOT be re-asked
+    await expect(clarify).not.toContainText("When?");
+
+    await clarify.getByRole("button", { name: "Italian", exact: true }).click();
+    await clarify.getByRole("button", { name: "Go", exact: true }).click();
+
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    // the answer folded onto the category: the stop's eyebrow carries it
+    // (cuisine is a PREFIX — "Italian dinner" is still a dinner, so the
+    // durations/bands/search plumbing all still match)
+    const eyebrow = page.locator(".lstrip__stop .eyebrow").first();
+    await expect(eyebrow).toHaveText(/italian dinner/i);
+    // and the pick comes from the dinner pool as usual
+    await expect(page.locator(".lstrip__stop .lstrip__name").first()).toHaveText("Velvet Fig");
+  });
+
+  test("'sushi tonight' is already specific — no questions, straight to a plan @mock", async ({ page }) => {
+    await page.goto("/");
+    await page.locator(".prompt__input").fill("sushi tonight");
+    await page.locator(".prompt__go").click();
+
+    // the plan lands without the clarify step ever appearing
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".clarify")).toHaveCount(0);
+    await expect(page.locator(".lstrip__stop .eyebrow").first()).toHaveText(/sushi/i);
+  });
+});

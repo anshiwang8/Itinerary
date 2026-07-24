@@ -7,7 +7,7 @@
 // pins the resolved time (deterministic filtering) and skips the clarify
 // step. See app/api/_mock/fixtures.ts (DUMPLING_CLOSED / DUMPLING_OPEN).
 import { test, expect, Page } from "@playwright/test";
-import { stripCard } from "./helpers";
+import { stripCard, dismissClarifyIfShown } from "./helpers";
 
 // plan the dumplings prompt and land on the recovery panel (no clarify,
 // since the prompt carries a time)
@@ -15,6 +15,7 @@ async function planToRecovery(page: Page): Promise<void> {
   await page.goto("/");
   await page.locator(".prompt__input").fill("dumplings then a bar at 7pm in Ossington");
   await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
   await expect(page.locator(".recover")).toBeVisible({ timeout: 90_000 });
 }
 
@@ -85,6 +86,7 @@ test.describe("@mock partial-failure recovery", () => {
     await page.goto("/");
     await page.locator(".prompt__input").fill("dumplings and bao then a bar at 7pm in Ossington");
     await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
     await expect(page.locator(".recover")).toBeVisible({ timeout: 90_000 });
     await expect(page.locator(".recover__reason")).toHaveCount(2);
     await expect(page.locator(".lstrip")).toHaveCount(0);
@@ -125,6 +127,7 @@ test.describe("@mock partial-failure recovery", () => {
     // dumplings alone in a neighbourhood → the ONLY pool is empty → all-empty
     await page.locator(".prompt__input").fill("dumplings at 7pm in Ossington");
     await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
     const err = page.locator(".empty__err, .stage__err").first();
     await expect(err).toBeVisible({ timeout: 90_000 });
     await expect(err).toContainText(/Couldn't find any/i);
@@ -146,6 +149,7 @@ test.describe("@mock weather-gate", () => {
     await page.goto("/");
     await page.locator(".prompt__input").fill(prompt);
     await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
   }
 
   test("weather-blocked category → gate with the REAL weather reason, no widen offer @mock", async ({ page }) => {
@@ -238,6 +242,7 @@ test.describe("@mock inferred-time gate", () => {
     await page.goto("/");
     await page.locator(".prompt__input").fill(prompt);
     await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
     // "sit in a park" has a category but no time → the WHEN clarify shows
     // first; skipping keeps the time unspecified, which is what arms the gate
     const skip = page.locator(".clarify__skip");
