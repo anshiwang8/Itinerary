@@ -1,6 +1,17 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { loadItinerary, saveItinerary } from "../../store";
 import { swapStop } from "../../swap";
+import {
+  ApiError,
+  apiError,
+  apiJson,
+  enforceRateLimit,
+  finiteNumber,
+  isRecord,
+  readJsonBody,
+  requestContext,
+} from "../../../_shared/http";
+import { parseOptionalInstant, parseRefinement } from "../../../_shared/schemas";
 
 // POST /api/itinerary/[id]/swap
 // body: { stopIndex: number, refinement: string, now?: ISO }
@@ -8,66 +19,48 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const ctx = requestContext(request, "itinerary_swap");
   const { id } = await params;
-  let itinerary;
   try {
-    itinerary = await loadItinerary(id);
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
-  }
-  if (!itinerary) {
-    return NextResponse.json(
-      { error: `No itinerary with id "${id}".` },
-      { status: 404 }
-    );
-  }
+    enforceRateLimit(ctx, 30);
+    if (!/^[A-Za-z0-9-]{1,128}$/.test(id)) {
+      throw new ApiError(400, "invalid_itinerary_id", "Invalid itinerary id.");
+    }
 
-  let stopIndex: number;
-  let refinement: string;
-  let nowISO: string | undefined;
-  try {
-    const body = await request.json();
-    stopIndex = body?.stopIndex;
-    refinement = body?.refinement;
-    nowISO = body?.now;
-  } catch {
-    return NextResponse.json({ error: "Request body must be JSON." }, { status: 400 });
-  }
-  if (typeof stopIndex !== "number" || !Number.isInteger(stopIndex) || stopIndex < 0) {
-    return NextResponse.json(
-      { error: "`stopIndex` must be a non-negative integer." },
-      { status: 400 }
-    );
-  }
-  if (typeof refinement !== "string" || refinement.trim() === "") {
-    return NextResponse.json(
-      { error: "`refinement` must be a non-empty string." },
-      { status: 400 }
-    );
-  }
-  let now = new Date();
-  if (nowISO !== undefined) {
-    now = new Date(nowISO);
-    if (isNaN(now.getTime())) {
-      return NextResponse.json(
-        { error: "`now` must be a valid ISO timestamp." },
-        { status: 400 }
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      throw new ApiError(400, "invalid_request", "Request body must be a JSON object.");
+    }
+    if (
+      !finiteNumber(body.stopIndex) ||
+      !Number.isInteger(body.stopIndex) ||
+      body.stopIndex < 0 ||
+      body.stopIndex > 7
+    ) {
+      throw new ApiError(
+        400,
+        "invalid_stop_index",
+        "`stopIndex` must be an integer from 0 to 7."
       );
     }
-  }
+    const stopIndex = body.stopIndex;
+    const refinement = parseRefinement(body.refinement);
+    const nowISO = parseOptionalInstant(body.now, "now");
+    const now = nowISO ? new Date(nowISO) : new Date();
 
-  try {
-    const result = await swapStop(itinerary, stopIndex, refinement.trim(), now);
+    const itinerary = await loadItinerary(id);
+    if (!itinerary) {
+      throw new ApiError(404, "itinerary_not_found", "That itinerary was not found.");
+    }
+    if (stopIndex >= itinerary.stops.length) {
+      throw new ApiError(400, "invalid_stop_index", "`stopIndex` is outside this itinerary.");
+    }
+
+    const result = await swapStop(itinerary, stopIndex, refinement, now);
     // statuses/lock ratchet mutate even on a refusal — always write back
     await saveItinerary(itinerary);
-    return NextResponse.json(result);
+    return apiJson(ctx, result);
   } catch (err) {
-    return NextResponse.json(
-      { error: "Swap failed.", details: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return apiError(ctx, err);
   }
 }

@@ -1,9 +1,21 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { isMockMode, mockParse } from "../_mock/fixtures";
 import type { ParsedPrompt } from "../places/search/filter";
 import { UNPARSEABLE_MESSAGE } from "../../lib/planGuards";
 import { hasImmediateTimeSignal } from "../../lib/immediateTime";
 import { hasAllDaySignal } from "../../lib/allDayTime";
+import {
+  ApiError,
+  apiError,
+  apiJson,
+  enforceRateLimit,
+  isRecord,
+  readJsonBody,
+  requestContext,
+  requireServiceKey,
+} from "../_shared/http";
+import { fetchProvider, readProviderJson, requireProviderRecord } from "../_shared/provider";
+import { parsePromptBody } from "../_shared/schemas";
 
 // Standalone LLM parse step: natural-language prompt → structured plan
 // parameters. Not connected to Places yet — this route only proves Groq
@@ -26,30 +38,53 @@ Respond with ONLY a single JSON object. No prose, no explanations, no markdown f
   "location": string            // a neighbourhood/area WITHIN the city, only if the prompt states one ("west end", "downtown", "near the harbour"); "" if none. NEVER a city name — the city is supplied separately by the app, never inferred from the prompt
 }`;
 
-// The model returns JSON, but not necessarily the RIGHT JSON. A missing
-// `location` used to sail through here and get rejected two routes later
-// by a body-shape check, whose developer-facing message ("`parsed` (the
-// /api/parse output object) is required in the body.") went straight to
-// the user — precisely what planGuards exists to prevent. Coercing every
-// field to its documented empty value turns a shape miss into a
-// vague-but-plannable prompt instead (code-audit 2026-07-18 §6.3).
-function normalizeParse(raw: unknown): ParsedPrompt {
-  const o = (raw ?? {}) as Record<string, unknown>;
-  const str = (v: unknown, fallback: string) =>
-    typeof v === "string" && v.trim() !== "" ? v : fallback;
-  const strArray = (v: unknown) =>
-    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "") : [];
-  return {
-    time_window: str(o.time_window, "unspecified"),
-    stop_count: typeof o.stop_count === "number" ? o.stop_count : null,
-    aesthetic: str(o.aesthetic, "unspecified"),
-    category_signals: strArray(o.category_signals),
-    group_context: str(o.group_context, "unspecified"),
-    budget: typeof o.budget === "string" && o.budget.trim() !== "" ? o.budget : null,
-    constraints: strArray(o.constraints),
-    // "" is the documented "no neighbourhood stated" value
-    location: typeof o.location === "string" ? o.location : "",
-  };
+const PARSE_KEYS = [
+  "time_window",
+  "stop_count",
+  "aesthetic",
+  "category_signals",
+  "group_context",
+  "budget",
+  "constraints",
+  "location",
+] as const;
+
+function parseModelOutput(raw: unknown): ParsedPrompt {
+  if (!isRecord(raw)) {
+    throw new ApiError(502, "groq_invalid_schema", UNPARSEABLE_MESSAGE);
+  }
+  const keys = Object.keys(raw).sort();
+  if (
+    keys.length !== PARSE_KEYS.length ||
+    PARSE_KEYS.some((key) => !Object.prototype.hasOwnProperty.call(raw, key))
+  ) {
+    throw new ApiError(502, "groq_invalid_schema", UNPARSEABLE_MESSAGE);
+  }
+  const validString = (value: unknown, allowEmpty = false) =>
+    typeof value === "string" &&
+    value.length <= 240 &&
+    (allowEmpty || value.trim() !== "");
+  const validList = (value: unknown) =>
+    Array.isArray(value) &&
+    value.length <= 8 &&
+    value.every((entry) => validString(entry));
+  if (
+    !validString(raw.time_window) ||
+    !validString(raw.aesthetic) ||
+    !validString(raw.group_context) ||
+    !validString(raw.location, true) ||
+    !validList(raw.category_signals) ||
+    !validList(raw.constraints) ||
+    (raw.budget !== null && !validString(raw.budget)) ||
+    (raw.stop_count !== null &&
+      (typeof raw.stop_count !== "number" ||
+        !Number.isInteger(raw.stop_count) ||
+        raw.stop_count < 1 ||
+        raw.stop_count > 8))
+  ) {
+    throw new ApiError(502, "groq_invalid_schema", UNPARSEABLE_MESSAGE);
+  }
+  return raw as unknown as ParsedPrompt;
 }
 
 // Deterministic immediate-time floor (same spirit as swap.ts's
@@ -78,41 +113,23 @@ function withAllDayFloor(prompt: string, parsed: ParsedPrompt): ParsedPrompt {
 }
 
 export async function POST(request: NextRequest) {
-  let prompt: string;
+  const ctx = requestContext(request, "parse");
   try {
-    const body = await request.json();
-    prompt = body?.prompt;
-  } catch {
-    return NextResponse.json(
-      { error: "Request body must be JSON." },
-      { status: 400 }
-    );
-  }
-  if (typeof prompt !== "string" || !prompt.trim()) {
-    return NextResponse.json(
-      { error: "`prompt` (non-empty string) is required in the body." },
-      { status: 400 }
-    );
-  }
+    enforceRateLimit(ctx, 60);
+    const prompt = parsePromptBody(await readJsonBody(request));
 
-  // e2e fixture seam — deterministic parse, no Groq call, no key needed.
-  // The immediate-time floor still applies: it is LOGIC, not data, so the
-  // mock seam must not fork around it.
-  if (isMockMode()) {
-    return NextResponse.json(withImmediateFloor(prompt, withAllDayFloor(prompt, mockParse(prompt))));
-  }
+    // e2e fixture seam — deterministic parse, no Groq call, no key needed.
+    // The immediate-time floor still applies: it is LOGIC, not data, so the
+    // mock seam must not fork around it.
+    if (isMockMode()) {
+      return apiJson(
+        ctx,
+        withImmediateFloor(prompt, withAllDayFloor(prompt, mockParse(prompt)))
+      );
+    }
 
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "GROQ_API_KEY is not set." },
-      { status: 500 }
-    );
-  }
-
-  let raw = "";
-  try {
-    const res = await fetch(GROQ_URL, {
+    const apiKey = requireServiceKey(process.env.GROQ_API_KEY);
+    const res = await fetchProvider("groq", GROQ_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -131,32 +148,29 @@ export async function POST(request: NextRequest) {
       }),
       cache: "no-store",
     });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      return NextResponse.json(
-        {
-          error: `Groq request failed (${res.status}).`,
-          details: data?.error?.message ?? data,
-        },
-        { status: 500 }
+    const data = requireProviderRecord("groq", await readProviderJson("groq", res));
+    const choices = data.choices;
+    const first = Array.isArray(choices) ? choices[0] : undefined;
+    const message = isRecord(first) ? first.message : undefined;
+    const raw = isRecord(message) ? message.content : undefined;
+    if (typeof raw !== "string" || raw.length > 50_000) {
+      throw new ApiError(
+        502,
+        "groq_invalid_response",
+        "The planner returned an invalid response. Please try again."
       );
     }
-
-    raw = data?.choices?.[0]?.message?.content ?? "";
-    return NextResponse.json(
-      withImmediateFloor(prompt, withAllDayFloor(prompt, normalizeParse(JSON.parse(raw))))
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new ApiError(502, "groq_invalid_json", UNPARSEABLE_MESSAGE);
+    }
+    return apiJson(
+      ctx,
+      withImmediateFloor(prompt, withAllDayFloor(prompt, parseModelOutput(parsed)))
     );
   } catch (err) {
-    return NextResponse.json(
-      {
-        error: UNPARSEABLE_MESSAGE,
-        detail: "Failed to parse Groq response as JSON.",
-        details: err instanceof Error ? err.message : String(err),
-        raw, // surfaced so prompt-formatting issues are debuggable
-      },
-      { status: 500 }
-    );
+    return apiError(ctx, err);
   }
 }

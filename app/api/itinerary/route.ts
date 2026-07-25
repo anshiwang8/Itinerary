@@ -1,52 +1,50 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { createItinerary, saveItinerary } from "./store";
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
 import { HomePoint } from "../schedule/home";
 import { ParsedPrompt } from "../places/search/filter";
+import {
+  ApiError,
+  apiError,
+  apiJson,
+  enforceRateLimit,
+  isRecord,
+  readJsonBody,
+  requestContext,
+} from "../_shared/http";
+import {
+  parseHomePoint,
+  parseOptionalTimeZone,
+  parseParsedPrompt,
+  parseScheduledStops,
+  parseTravelLegs,
+} from "../_shared/schemas";
 
 // POST /api/itinerary — store the full pipeline output, return { id }.
 export async function POST(request: NextRequest) {
-  let stops: ScheduledStop[];
-  let legs: TravelLeg[];
-  let parsed: ParsedPrompt | undefined;
-  let homeLeg: TravelLeg | undefined;
-  let home: HomePoint | undefined;
-  let timeZone: string | undefined;
+  const ctx = requestContext(request, "itinerary_create");
   try {
-    const body = await request.json();
-    stops = body?.stops;
-    legs = Array.isArray(body?.legs) ? body.legs : [];
-    parsed =
-      body?.parsed && typeof body.parsed === "object" ? body.parsed : undefined;
-    homeLeg =
-      body?.homeLeg && typeof body.homeLeg === "object" ? body.homeLeg : undefined;
-    home =
-      body?.home && typeof body.home === "object" && body.home.location
-        ? body.home
-        : undefined;
-    timeZone = typeof body?.timeZone === "string" ? body.timeZone : undefined;
-  } catch {
-    return NextResponse.json(
-      { error: "Request body must be JSON." },
-      { status: 400 }
-    );
-  }
-  if (!Array.isArray(stops) || stops.length === 0) {
-    return NextResponse.json(
-      { error: "`stops` (non-empty array of scheduled stops) is required." },
-      { status: 400 }
-    );
-  }
+    enforceRateLimit(ctx, 60);
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      throw new ApiError(400, "invalid_request", "Request body must be a JSON object.");
+    }
+    const stops: ScheduledStop[] = parseScheduledStops(body.stops);
+    const legs: TravelLeg[] = parseTravelLegs(body.legs);
+    const parsed: ParsedPrompt | undefined =
+      body.parsed === undefined ? undefined : parseParsedPrompt(body.parsed);
+    const homeLeg: TravelLeg | undefined =
+      body.homeLeg === undefined
+        ? undefined
+        : parseTravelLegs([body.homeLeg], "homeLeg")[0];
+    const home: HomePoint | undefined = parseHomePoint(body.home);
+    const timeZone = parseOptionalTimeZone(body.timeZone);
 
-  const itinerary = createItinerary(stops, legs, parsed, homeLeg, home, timeZone);
-  try {
+    const itinerary = createItinerary(stops, legs, parsed, homeLeg, home, timeZone);
     await saveItinerary(itinerary);
+    return apiJson(ctx, { id: itinerary.id });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return apiError(ctx, err);
   }
-  return NextResponse.json({ id: itinerary.id });
 }

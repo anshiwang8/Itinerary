@@ -1,6 +1,19 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { WeatherHour } from "../places/search/filter";
 import { isMockMode, mockWeather } from "../_mock/fixtures";
+import {
+  ApiError,
+  apiError,
+  apiJson,
+  enforceRateLimit,
+  finiteNumber,
+  isRecord,
+  requestContext,
+  requireServiceKey,
+  validLatitude,
+  validLongitude,
+} from "../_shared/http";
+import { fetchProvider, readProviderJson, requireProviderRecord } from "../_shared/provider";
 
 // Google Weather API hourly forecast, next 24h.
 // GET /api/weather?lat=..&lng=.. — forecast for the plan's geocoded
@@ -10,8 +23,6 @@ import { isMockMode, mockWeather } from "../_mock/fixtures";
 // ambient chip, which meant a Vancouver plan showed a Toronto forecast
 // until the pipeline ran (code-audit 2026-07-18 §3.2).
 const FORECAST_URL = "https://weather.googleapis.com/v1/forecast/hours:lookup";
-const DEFAULT_LOC = { latitude: 43.6479, longitude: -79.4197 }; // Ossington
-
 // The parts of Google's forecast payload we actually read — same "declare
 // the shape you consume" pattern travel.ts uses for ComputeRoutesResponse,
 // replacing an `any` on the map callback (code-audit 2026-07-18 §4.1).
@@ -30,46 +41,47 @@ interface RawForecastHour {
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  // fixture seam: deterministic hours, no Weather call (coords ignored —
-  // the mock is a data source; location doesn't change the fixture)
-  if (isMockMode()) return NextResponse.json(mockWeather());
-
-  const apiKey = process.env.GOOGLE_WEATHER_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "GOOGLE_WEATHER_API_KEY is not set." },
-      { status: 500 }
-    );
-  }
-
-  const lat = parseFloat(request.nextUrl.searchParams.get("lat") ?? "");
-  const lng = parseFloat(request.nextUrl.searchParams.get("lng") ?? "");
-  const loc =
-    Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
-      ? { latitude: lat, longitude: lng }
-      : DEFAULT_LOC;
-
-  const url = new URL(FORECAST_URL);
-  url.searchParams.set("key", apiKey);
-  url.searchParams.set("location.latitude", String(loc.latitude));
-  url.searchParams.set("location.longitude", String(loc.longitude));
-  url.searchParams.set("hours", "24");
-  url.searchParams.set("pageSize", "24");
-  url.searchParams.set("unitsSystem", "METRIC");
-
+  const ctx = requestContext(request, "weather");
   try {
-    const res = await fetch(url.toString(), {
+    enforceRateLimit(ctx, 90);
+    const latParam = request.nextUrl.searchParams.get("lat");
+    const lngParam = request.nextUrl.searchParams.get("lng");
+    const lat = latParam === null ? Number.NaN : Number(latParam);
+    const lng = lngParam === null ? Number.NaN : Number(lngParam);
+    if (!validLatitude(lat) || !validLongitude(lng)) {
+      throw new ApiError(
+        400,
+        "invalid_coordinates",
+        "`lat` and `lng` must be valid coordinates."
+      );
+    }
+    const loc = { latitude: lat, longitude: lng };
+
+    // fixture seam: deterministic hours, no Weather call (location does
+    // not change the fixture, but the public coordinate contract still
+    // validates before reaching the seam).
+    if (isMockMode()) return apiJson(ctx, mockWeather());
+
+    const apiKey = requireServiceKey(process.env.GOOGLE_WEATHER_API_KEY);
+
+    const url = new URL(FORECAST_URL);
+    url.searchParams.set("key", apiKey);
+    url.searchParams.set("location.latitude", String(loc.latitude));
+    url.searchParams.set("location.longitude", String(loc.longitude));
+    url.searchParams.set("hours", "24");
+    url.searchParams.set("pageSize", "24");
+    url.searchParams.set("unitsSystem", "METRIC");
+
+    const res = await fetchProvider("weather", url, {
       // hourly forecast doesn't move fast; cache for 10 minutes
       next: { revalidate: 600 },
     });
-    const data = await res.json();
-    if (!res.ok) {
-      return NextResponse.json(
-        {
-          error: `Weather API request failed (${res.status}).`,
-          details: data?.error?.message ?? data,
-        },
-        { status: 502 }
+    const data = requireProviderRecord("weather", await readProviderJson("weather", res));
+    if (!Array.isArray(data.forecastHours)) {
+      throw new ApiError(
+        502,
+        "weather_invalid_response",
+        "The weather provider returned an invalid response. Please try again."
       );
     }
 
@@ -77,11 +89,14 @@ export async function GET(request: NextRequest) {
     // is dropped — the filter is a type GUARD, which is what makes the
     // nullable hourISO safe. (Under the old `any` this mismatch with
     // WeatherHour.hourISO: string was simply invisible.)
-    const hours: WeatherHour[] = ((data?.forecastHours ?? []) as RawForecastHour[])
+    const hours: WeatherHour[] = (data.forecastHours as RawForecastHour[])
+      .filter((h): h is RawForecastHour => isRecord(h))
       .map((h) => ({
         hourISO: h?.interval?.startTime ?? null,
-        tempC: h?.temperature?.degrees ?? null,
-        precipProbability: h?.precipitation?.probability?.percent ?? null,
+        tempC: finiteNumber(h?.temperature?.degrees) ? h.temperature.degrees : null,
+        precipProbability: finiteNumber(h?.precipitation?.probability?.percent)
+          ? h.precipitation.probability.percent
+          : null,
         condition:
           h?.weatherCondition?.description?.text ??
           h?.weatherCondition?.type ??
@@ -90,14 +105,8 @@ export async function GET(request: NextRequest) {
       .filter((h): h is WeatherHour => typeof h.hourISO === "string")
       .slice(0, 24);
 
-    return NextResponse.json(hours);
+    return apiJson(ctx, hours);
   } catch (err) {
-    return NextResponse.json(
-      {
-        error: "Failed to reach the Weather API.",
-        details: err instanceof Error ? err.message : String(err),
-      },
-      { status: 502 }
-    );
+    return apiError(ctx, err);
   }
 }

@@ -5,6 +5,12 @@ import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
 import { HomePoint } from "../schedule/home";
 import { ParsedPrompt } from "../places/search/filter";
+import {
+  ProviderError,
+  fetchProvider,
+  readProviderJson,
+  requireProviderRecord,
+} from "../_shared/provider";
 
 export type StopStatus = "upcoming" | "active" | "completed" | "skipped";
 export type ItineraryStatus = "planning" | "active" | "completed";
@@ -84,7 +90,7 @@ function requirePersistenceOnServerless() {
 // One Upstash/Vercel-KV REST command, e.g. ["SET", key, value, "EX", ttl].
 async function redis(cmd: (string | number)[]): Promise<unknown> {
   const kv = kvEnv()!;
-  const res = await fetch(kv.url, {
+  const res = await fetchProvider("redis", kv.url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${kv.token}`,
@@ -93,11 +99,11 @@ async function redis(cmd: (string | number)[]): Promise<unknown> {
     body: JSON.stringify(cmd),
     cache: "no-store",
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(`KV request failed (${res.status}): ${data?.error ?? "unknown"}`);
+  const data = requireProviderRecord("redis", await readProviderJson("redis", res));
+  if (!Object.prototype.hasOwnProperty.call(data, "result")) {
+    throw new ProviderError("redis", 502, "redis_invalid_response");
   }
-  return data?.result;
+  return data.result;
 }
 
 const kvKey = (id: string) => `itin:${id}`;

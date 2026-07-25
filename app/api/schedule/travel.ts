@@ -1,3 +1,6 @@
+import { finiteNumber, isRecord, logEvent } from "../_shared/http";
+import { fetchProvider, readProviderJson, requireProviderRecord } from "../_shared/provider";
+
 // Real travel legs between consecutive stops via Routes API
 // computeRoutes — real geometry (encoded polylines) and transit details
 // per leg. Mode selection, short-leg relabel, and margin logic are
@@ -288,7 +291,7 @@ async function computeRoute(
     body.departureTime = departureTime;
   }
   try {
-    const res = await fetch(COMPUTE_ROUTES_URL, {
+    const res = await fetchProvider("routes", COMPUTE_ROUTES_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -298,20 +301,30 @@ async function computeRoute(
       body: JSON.stringify(body),
       cache: "no-store",
     });
-    const data = await res.json();
-    if (!res.ok) {
-      // Per-leg failure shouldn't sink the whole plan; the other mode
-      // (or "unknown") absorbs it. Log so real key/config errors are
-      // visible server-side.
-      console.error(
-        `[travel] computeRoutes ${travelMode} failed (${res.status}):`,
-        data?.error?.message ?? data
-      );
-      return null;
+    const data = requireProviderRecord("routes", await readProviderJson("routes", res));
+    if (!Array.isArray(data.routes)) {
+      throw new Error("Routes provider returned an invalid response.");
+    }
+    for (const route of data.routes) {
+      if (!isRecord(route)) throw new Error("Routes provider returned an invalid route.");
+      if (route.duration !== undefined && typeof route.duration !== "string") {
+        throw new Error("Routes provider returned an invalid duration.");
+      }
+      if (
+        route.distanceMeters !== undefined &&
+        (!finiteNumber(route.distanceMeters) || route.distanceMeters < 0)
+      ) {
+        throw new Error("Routes provider returned an invalid distance.");
+      }
+      if (route.legs !== undefined && !Array.isArray(route.legs)) {
+        throw new Error("Routes provider returned invalid legs.");
+      }
     }
     return data as ComputeRoutesResponse;
-  } catch (err) {
-    console.error(`[travel] computeRoutes ${travelMode} unreachable:`, err);
+  } catch {
+    // Per-mode failure is absorbed by the other mode or the explicit
+    // unknown fallback. Never log the upstream body or thrown message.
+    logEvent("error", "routes_mode_unavailable", { travelMode });
     return null;
   }
 }

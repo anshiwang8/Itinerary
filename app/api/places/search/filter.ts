@@ -5,6 +5,7 @@ import { CurrentOpeningHours, isOpenAt, TargetTime, targetTimeAt } from "./hours
 import { resolveStartTime } from "../../schedule/schedule";
 import { DEFAULT_ZONE, wallClockParts } from "../../../lib/zoneTime";
 import { isOutdoorCategory } from "../../../lib/categoryTraits";
+import { logEvent } from "../../_shared/http";
 
 export interface Place {
   id: string;
@@ -174,9 +175,11 @@ export function filterPools(
     if (isOutdoorCategory(category)) {
       if (!forecast) {
         // observability only — logic unchanged (missing data never blocks)
-        console.log(
-          `[weather-gate] category="${category}" target=${startInstant.toISOString()} forecast=NONE (no data or outside horizon) verdict=SKIPPED`
-        );
+        logEvent("info", "weather_gate", {
+          target: startInstant.toISOString(),
+          hasForecast: false,
+          verdict: "skipped",
+        });
       } else {
         let reason: string | null = null;
         if (
@@ -190,9 +193,13 @@ export function filterPools(
         ) {
           reason = `too cold at ${hourLabel(startInstant, timeZone)} (${forecast.tempC}°C)`;
         }
-        console.log(
-          `[weather-gate] category="${category}" target=${startInstant.toISOString()} precip=${forecast.precipProbability}% (block >${PRECIP_BLOCK_THRESHOLD}%) tempC=${forecast.tempC} (block <${COLD_BLOCK_THRESHOLD_C}) verdict=${reason ? `BLOCK — ${reason}` : "ALLOW"}`
-        );
+        logEvent("info", "weather_gate", {
+          target: startInstant.toISOString(),
+          hasForecast: true,
+          precipProbability: forecast.precipProbability,
+          tempC: forecast.tempC,
+          verdict: reason ? "blocked" : "allowed",
+        });
         if (reason) {
           out[category] = [];
           weatherBlocked.push({ category, weatherBlocked: true, reason });

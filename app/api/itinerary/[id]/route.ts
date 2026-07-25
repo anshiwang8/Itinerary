@@ -1,5 +1,13 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { loadItinerary, saveItinerary, withStatuses } from "../store";
+import {
+  ApiError,
+  apiError,
+  apiJson,
+  enforceRateLimit,
+  requestContext,
+  validIsoInstant,
+} from "../../_shared/http";
 
 // GET /api/itinerary/[id]?now=ISO — itinerary with statuses computed
 // against `now`. The ?now param is the dev time control and the
@@ -8,27 +16,25 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const ctx = requestContext(request, "itinerary_read");
   const { id } = await params;
-  const nowParam = request.nextUrl.searchParams.get("now");
-  let t = new Date();
-  if (nowParam !== null) {
-    const parsed = new Date(nowParam);
-    if (isNaN(parsed.getTime())) {
-      return NextResponse.json(
-        { error: "`now` must be a valid ISO timestamp." },
-        { status: 400 }
-      );
-    }
-    t = parsed;
-  }
-
   try {
+    enforceRateLimit(ctx, 180);
+    if (!/^[A-Za-z0-9-]{1,128}$/.test(id)) {
+      throw new ApiError(400, "invalid_itinerary_id", "Invalid itinerary id.");
+    }
+    const nowParam = request.nextUrl.searchParams.get("now");
+    let t = new Date();
+    if (nowParam !== null) {
+      if (!validIsoInstant(nowParam)) {
+        throw new ApiError(400, "invalid_now", "`now` must be a valid ISO timestamp.");
+      }
+      t = new Date(nowParam);
+    }
+
     const itinerary = await loadItinerary(id);
     if (!itinerary) {
-      return NextResponse.json(
-        { error: `No itinerary with id "${id}".` },
-        { status: 404 }
-      );
+      throw new ApiError(404, "itinerary_not_found", "That itinerary was not found.");
     }
     // the locked ratchet mutates — persist it, or backwards time travel on
     // another instance could unlock a stop. But ONLY when something
@@ -39,11 +45,8 @@ export async function GET(
     const touched = { changed: false };
     const result = withStatuses(itinerary, t, touched);
     if (touched.changed) await saveItinerary(result);
-    return NextResponse.json(result);
+    return apiJson(ctx, result);
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return apiError(ctx, err);
   }
 }

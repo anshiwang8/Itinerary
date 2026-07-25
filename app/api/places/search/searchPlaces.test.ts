@@ -107,7 +107,10 @@ const searchCases: Array<[string, () => Promise<void>]> = [
         assert.strictEqual(out.failures.length, 1);
         assert.strictEqual(out.failures[0].category, "bar");
         assert.strictEqual(out.failures[0].rule, "searchFailed");
-        assert.match(out.failures[0].detail, /RESOURCE_EXHAUSTED/);
+        assert.strictEqual(
+          out.failures[0].detail,
+          "The venue search provider was unavailable for this category."
+        );
       } finally {
         globalThis.fetch = realFetch;
       }
@@ -129,7 +132,7 @@ const searchCases: Array<[string, () => Promise<void>]> = [
       try {
         await assert.rejects(
           () => searchPools("k", mkParsed({ category_signals: ["dinner", "bar"] })),
-          /boom/
+          /places_rejected_request/
         );
       } finally {
         globalThis.fetch = realFetch;
@@ -182,6 +185,43 @@ const searchCases: Array<[string, () => Promise<void>]> = [
         const day = await searchPools("k", mkParsed({ category_signals: ["restaurant"] }));
         assert.deepStrictEqual(queries, ["restaurant Ossington Toronto"]);
         assert.deepStrictEqual(day.restaurant.map((p) => p.id), ["lp1", "day_only"]);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
+    "LATE NIGHT: one failed sibling query preserves the successful candidates",
+    async () => {
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          const query = JSON.parse(String(init?.body)).textQuery as string;
+          if (query.includes("late night")) {
+            return new Response(JSON.stringify({ error: { message: "temporary" } }), {
+              status: 503,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response(JSON.stringify({ places: [{ id: "primary_survives" }] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const pools = await searchPools(
+          "k",
+          mkParsed({ category_signals: ["restaurant"] }),
+          undefined,
+          undefined,
+          { lateNight: true }
+        );
+        assert.deepStrictEqual(
+          pools.restaurant.map((place) => place.id),
+          ["primary_survives"]
+        );
       } finally {
         globalThis.fetch = realFetch;
       }

@@ -2,6 +2,18 @@
 // the reroute engine (which re-searches only the affected categories).
 import { DropEntry, ParsedPrompt, Place } from "./filter";
 import { isParkLike } from "../../../lib/categoryTraits";
+import {
+  finiteNumber,
+  isRecord,
+  validLatitude,
+  validLongitude,
+} from "../../_shared/http";
+import {
+  ProviderError,
+  fetchProvider,
+  readProviderJson,
+  requireProviderRecord,
+} from "../../_shared/provider";
 
 const SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText";
 
@@ -62,7 +74,7 @@ async function searchText(
   textQuery: string,
   includedType?: string
 ): Promise<Place[]> {
-  const res = await fetch(SEARCH_TEXT_URL, {
+  const res = await fetchProvider("places", SEARCH_TEXT_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -72,13 +84,33 @@ async function searchText(
     body: JSON.stringify({ textQuery, ...(includedType ? { includedType } : {}) }),
     cache: "no-store",
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(
-      data?.error?.message ?? `Places API request failed (${res.status}).`
-    );
+  const data = requireProviderRecord("places", await readProviderJson("places", res));
+  if (!Array.isArray(data.places)) {
+    // Google may omit `places` for a valid empty result.
+    if (data.places === undefined) return [];
+    throw new ProviderError("places", 502, "places_invalid_response");
   }
-  return data.places ?? [];
+  return data.places.map((candidate, index) => {
+    if (!isRecord(candidate) || typeof candidate.id !== "string" || candidate.id === "") {
+      throw new ProviderError("places", 502, "places_invalid_response");
+    }
+    if (candidate.location !== undefined) {
+      if (
+        !isRecord(candidate.location) ||
+        !validLatitude(candidate.location.latitude) ||
+        !validLongitude(candidate.location.longitude)
+      ) {
+        throw new ProviderError("places", 502, "places_invalid_response");
+      }
+    }
+    if (
+      candidate.rating !== undefined &&
+      (!finiteNumber(candidate.rating) || candidate.rating < 0 || candidate.rating > 5)
+    ) {
+      throw new ProviderError("places", 502, "places_invalid_response");
+    }
+    return candidate as unknown as Place;
+  });
 }
 
 // A vague prompt ("not sure what to do") has no category, so the general
@@ -155,13 +187,13 @@ export async function searchPools(
   // an EMPTY pool plus a drop entry saying why, which routes it into the
   // existing recovery panel — the flow built for exactly this shape.
   // Only a total wipeout still throws (§6.1).
-  const note = (category: string, err: unknown) => {
+  const note = (category: string) => {
     out?.failures.push({
       category,
       name: "(search unavailable)",
       id: "",
       rule: "searchFailed",
-      detail: err instanceof Error ? err.message : String(err),
+      detail: "The venue search provider was unavailable for this category.",
     });
   };
 
@@ -173,13 +205,10 @@ export async function searchPools(
       (r): r is PromiseFulfilledResult<Place[]> => r.status === "fulfilled"
     );
     if (ok.length === 0) {
-      throw new Error(
-        settled[0] && settled[0].status === "rejected"
-          ? String(settled[0].reason?.message ?? settled[0].reason)
-          : "Places search failed."
-      );
+      const first = settled[0] as PromiseRejectedResult | undefined;
+      throw first?.reason ?? new ProviderError("places", 502, "places_unavailable");
     }
-    for (const r of settled) if (r.status === "rejected") note("general", r.reason);
+    for (const r of settled) if (r.status === "rejected") note("general");
     return { general: dedupeById(ok.flatMap((r) => r.value)) };
   }
 
@@ -192,15 +221,23 @@ export async function searchPools(
 
   const settled = await Promise.allSettled(
     categories.map(async (category) => {
-      const results = await Promise.all(
+      const variants = await Promise.allSettled(
         queriesFor(category).map((q) => searchText(apiKey, q, includedTypeFor(category)))
       );
-      return dedupeById(results.flat());
+      const successful = variants.filter(
+        (result): result is PromiseFulfilledResult<Place[]> =>
+          result.status === "fulfilled"
+      );
+      if (successful.length === 0) {
+        const first = variants[0] as PromiseRejectedResult | undefined;
+        throw first?.reason ?? new Error("Places search failed.");
+      }
+      return dedupeById(successful.flatMap((result) => result.value));
     })
   );
   if (settled.every((r) => r.status === "rejected")) {
     const first = settled[0] as PromiseRejectedResult;
-    throw new Error(String(first.reason?.message ?? first.reason));
+    throw first.reason;
   }
   const pools: Record<string, Place[]> = {};
   categories.forEach((category, i) => {
@@ -209,7 +246,7 @@ export async function searchPools(
       pools[category] = r.value;
     } else {
       pools[category] = [];
-      note(category, r.reason);
+      note(category);
     }
   });
   return pools;

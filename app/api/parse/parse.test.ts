@@ -29,29 +29,35 @@ const req = (prompt: string) =>
     body: JSON.stringify({ prompt }),
   }) as never;
 
+const model = (overrides: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    time_window: "unspecified",
+    stop_count: null,
+    aesthetic: "unspecified",
+    category_signals: [],
+    group_context: "unspecified",
+    budget: null,
+    constraints: [],
+    location: "",
+    ...overrides,
+  });
+
 const cases: Array<[string, () => Promise<void>]> = [
   [
-    "§6.3: a model answer missing `location` still yields a usable parse",
+    "missing required parse fields are rejected as an invalid provider schema",
     async () => {
       // valid JSON, wrong shape — the exact case that reached the UI as
       // "`parsed` (the /api/parse output object) is required in the body."
       groqContent = JSON.stringify({ time_window: "7pm", category_signals: ["dinner"] });
       const res = await POST(req("dinner at 7pm"));
       const data = await res.json();
-      assert.strictEqual(res.status, 200);
-      assert.strictEqual(data.location, "", "missing location becomes the documented empty value");
-      assert.deepStrictEqual(data.category_signals, ["dinner"]);
-      assert.strictEqual(data.time_window, "7pm");
-      // every other documented field is present with its empty default
-      assert.strictEqual(data.aesthetic, "unspecified");
-      assert.strictEqual(data.group_context, "unspecified");
-      assert.strictEqual(data.budget, null);
-      assert.strictEqual(data.stop_count, null);
-      assert.deepStrictEqual(data.constraints, []);
+      assert.strictEqual(res.status, 502);
+      assert.strictEqual(data.code, "groq_invalid_schema");
+      assert.ok(!("raw" in data));
     },
   ],
   [
-    "§6.3: junk field types are coerced, never passed through",
+    "junk field types are rejected rather than normalized into trusted facts",
     async () => {
       groqContent = JSON.stringify({
         time_window: 7, // wrong type
@@ -63,26 +69,23 @@ const cases: Array<[string, () => Promise<void>]> = [
       });
       const res = await POST(req("whatever"));
       const data = await res.json();
-      assert.strictEqual(data.time_window, "unspecified");
-      assert.strictEqual(data.stop_count, null);
-      assert.deepStrictEqual(data.category_signals, ["bar", "park"]);
-      assert.deepStrictEqual(data.constraints, []);
-      assert.strictEqual(data.location, "");
-      assert.strictEqual(data.budget, null);
+      assert.strictEqual(res.status, 502);
+      assert.strictEqual(data.code, "groq_invalid_schema");
+      assert.ok(!("raw" in data));
     },
   ],
   [
-    "§6.3: unparseable model output surfaces the fail-loud message, not a stack",
+    "unparseable model output is actionable but never exposes raw model text",
     async () => {
       groqContent = "sorry, I can't do that";
       const res = await POST(req("dinner"));
       const data = await res.json();
-      assert.strictEqual(res.status, 500);
-      // what the user sees is the planGuards message; the technical
-      // detail rides alongside for debugging
+      assert.strictEqual(res.status, 502);
       assert.strictEqual(data.error, UNPARSEABLE_MESSAGE);
-      assert.match(data.detail, /Failed to parse Groq response/);
-      assert.strictEqual(data.raw, "sorry, I can't do that");
+      assert.strictEqual(data.code, "groq_invalid_json");
+      assert.strictEqual(typeof data.requestId, "string");
+      assert.ok(!("detail" in data));
+      assert.ok(!("raw" in data));
     },
   ],
   [
@@ -92,23 +95,22 @@ const cases: Array<[string, () => Promise<void>]> = [
       // said "right now" — the deterministic floor must not care what the
       // model returned (here it answers a day-part, the worst case: that
       // resolves to 20:00 and rolls a late-night plan to TOMORROW)
-      groqContent = JSON.stringify({
+      groqContent = model({
         time_window: "tonight",
         category_signals: ["restaurant"],
-        location: "",
       });
       const res = await POST(req("restaurants to eat at right now"));
       const data = await res.json();
       assert.strictEqual(data.time_window, "now");
       // variants
       for (const prompt of ["food asap im starving", "somewhere to eat immediately", "whats open now"]) {
-        groqContent = JSON.stringify({ time_window: "unspecified", category_signals: ["restaurant"], location: "" });
+        groqContent = model({ time_window: "unspecified", category_signals: ["restaurant"] });
         const r = await POST(req(prompt));
         assert.strictEqual((await r.json()).time_window, "now", `floor missed: "${prompt}"`);
       }
       // and it NEVER fires without an immediacy phrase — a stated clock
       // time passes through untouched
-      groqContent = JSON.stringify({ time_window: "7pm", category_signals: ["restaurant"], location: "" });
+      groqContent = model({ time_window: "7pm", category_signals: ["restaurant"] });
       const r2 = await POST(req("dinner at 7pm"));
       assert.strictEqual((await r2.json()).time_window, "7pm");
     },
@@ -118,24 +120,24 @@ const cases: Array<[string, () => Promise<void>]> = [
     async () => {
       // the live probe: "…japanese culture for a day" came back
       // "unspecified" — the floor must stamp "all day" regardless
-      groqContent = JSON.stringify({ time_window: "unspecified", category_signals: ["sushi"], location: "" });
+      groqContent = model({ time_window: "unspecified", category_signals: ["sushi"] });
       const res = await POST(req("immerse myself in japanese culture for a day"));
       assert.strictEqual((await res.json()).time_window, "all day");
       // a captured day qualifier SURVIVES: append, never replace
-      groqContent = JSON.stringify({ time_window: "tomorrow", category_signals: ["soccer"], location: "" });
+      groqContent = model({ time_window: "tomorrow", category_signals: ["soccer"] });
       const r2 = await POST(req("plan a full schedule for things to do as a soccer fan tomorrow"));
       assert.strictEqual((await r2.json()).time_window, "tomorrow, all day");
       // already captured by the model → untouched, no double-append
-      groqContent = JSON.stringify({ time_window: "tomorrow, all day", category_signals: ["soccer"], location: "" });
+      groqContent = model({ time_window: "tomorrow, all day", category_signals: ["soccer"] });
       const r3 = await POST(req("a full day as a soccer fan tomorrow"));
       assert.strictEqual((await r3.json()).time_window, "tomorrow, all day");
       // immediacy outranks all-day when both appear: "now" replaces wholesale
-      groqContent = JSON.stringify({ time_window: "unspecified", category_signals: ["restaurant"], location: "" });
+      groqContent = model({ time_window: "unspecified", category_signals: ["restaurant"] });
       const r4 = await POST(req("everything open right now for a full day out"));
       assert.strictEqual((await r4.json()).time_window, "now");
       // and it NEVER fires without all-day language — "day trip ideas
       // some other day" has bare "day"s only
-      groqContent = JSON.stringify({ time_window: "unspecified", category_signals: ["hike"], location: "" });
+      groqContent = model({ time_window: "unspecified", category_signals: ["hike"] });
       const r5 = await POST(req("day trip ideas some other day"));
       assert.strictEqual((await r5.json()).time_window, "unspecified");
     },

@@ -26,7 +26,7 @@ hashes are reconciled after the commit exists.
 
 | Finding ID | Verified status | Root cause | Files changed | Tests added | Revert-run performed | Commit hash | Remaining manual work | Notes or deviations |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| H1 | Pending verification | — | — | — | — | — | — | — |
+| H1 | Confirmed — source mitigated; external global limit required | Every public route accepted unbounded request bodies and unlimited bursts before doing provider or persistence work. | `app/api/_shared/http.ts`; all public route handlers; `DEPLOY.md` | 4 boundary cases cover declared/actual oversize rejection and rate-limit ordering ahead of parse-provider work. | No | SELF | Configure the documented shared edge or Redis-backed limiter in production; the in-process limiter is defense in depth, not a global serverless quota. | Limits are applied before body parsing, provider calls, and itinerary loads; 429 responses include `Retry-After`. |
 | H2 | Confirmed — fixed | Next 14.2.35 and its bundled PostCSS/Sharp versions were covered by current high-severity advisories. | `package.json`; `package-lock.json`; `next.config.mjs`; `tsconfig.json`; `next-env.d.ts`; three dynamic itinerary routes | Existing 251 unit and 41 mock E2E tests exercised after the migration. | No | SELF | Full audit still reports dev-only transitive `brace-expansion`/`minimatch` advisories under ESLint; production audit is clean. | Upgraded to Next 16.2.11/React 19.2.8, migrated async route params, and pinned patched PostCSS/Sharp through Next-scoped overrides. |
 | H3 | Pending verification | — | — | — | — | — | — | — |
 | H4 | Pending verification | — | — | — | — | — | — | — |
@@ -40,15 +40,15 @@ hashes are reconciled after the commit exists.
 | M3 | Pending verification | — | — | — | — | — | — | — |
 | M4 | Pending verification | — | — | — | — | — | — | — |
 | M5 | Pending verification | — | — | — | — | — | — | — |
-| M6 | Pending verification | — | — | — | — | — | — | — |
+| M6 | Confirmed — fixed | Provider requests had no deadline, and the late-night Places expansion used all-or-nothing `Promise.all`. | `app/api/_shared/provider.ts`; Groq, Places, Routes, Weather, and Redis callers; `searchPlaces.ts`; provider/search tests | Timeout and non-JSON provider cases plus a late-night partial-sibling search case. | Yes — restoring all-or-nothing late-night expansion fails the new sibling-survival case (14/15); restored result is 15/15. | SELF | — | Provider failures map to stable 502/504 responses; Places category isolation and keep-on-missing behavior remain intact. |
 | M7 | Pending verification | — | — | — | — | — | — | — |
 | M8 | Confirmed — partially fixed | The module-level Maps promise permanently cached its first rejection, both map effects awaited it without a catch, and no non-Maps projection existed. | `app/ItineraryMap.tsx`; `app/lib/retryableLoader.ts`; `app/globals.css`; mock Playwright harness/docs | 3 loader unit cases; existing offline smoke now pins the accessible fallback and strip↔pin agreement | Yes — removing rejection eviction makes the recovery case fail (2/3); restored result is 3/3. | SELF | Batch G still needs invalid-key, retry-success, and remount browser scenarios alongside the shared client-fetch work. | The production component now catches failures, evicts rejected loads, offers two bounded retries, and keeps pins usable on a deterministic fallback projection. Mock E2E blocks all non-local browser requests. |
-| M9 | Pending verification | — | — | — | — | — | — | — |
+| M9 | Confirmed — fixed | Routes trusted loosely typed JSON, unbounded arrays/text, invalid coordinates/times/zones, and incomplete model envelopes. | `app/api/_shared/schemas.ts`; all public route handlers; parse/select/swap provider validation; boundary and route tests | Invalid coordinate, dwell, timezone, oversized prompt, malformed model output, and exact parse-schema cases. | No | SELF | Persisted-itinerary version/CAS validation is completed with Batch C. | Strict schemas bound collection sizes and text, require finite/ranged values and valid ISO/IANA data, and reject unknown parse-model keys. |
 | M10 | Pending verification | — | — | — | — | — | — | — |
 | M11 | Pending verification | — | — | — | — | — | — | — |
 | M12 | Pending verification | — | — | — | — | — | — | — |
 | M13 | Pending product-contract investigation | — | — | — | — | — | Define ownership/sharing semantics before user-visible enforcement. | Does not block unrelated batches. |
-| M14 | Pending verification | — | — | — | — | — | — | — |
+| M14 | Confirmed — fixed | Routes and engines logged or returned raw exception/provider/model detail without a correlation-safe error contract. | `app/api/_shared/http.ts`; provider callers; parse, search, schedule, weather, swap, and reroute logging sites | Unexpected-error coverage asserts a request ID while excluding supplied secret text from both logs and responses. | No | SELF | Apply the documented production retention/redaction policy and monitor by request ID. | Public failures are sparse and stable; structured logs carry correlation IDs and omit prompts, refinements, upstream bodies, keys, and environment values. |
 | M15 | Pending verification | — | — | — | — | — | — | — |
 | M16 | Pending verification | — | — | — | — | — | — | — |
 | M17 | Pending verification | — | — | — | — | — | — | — |

@@ -23,6 +23,12 @@ import { selectVenues as realSelectVenues, Selection } from "../select/selectVen
 import { getDuration } from "../schedule/durations";
 import { toZonedISO, isPlausibleAt, bandForCategories, hourInBand } from "../schedule/schedule";
 import { DEFAULT_ZONE, instantAtWallClock, wallClockParts } from "../../lib/zoneTime";
+import { isRecord, logEvent } from "../_shared/http";
+import {
+  fetchProvider,
+  readProviderJson,
+  requireProviderRecord,
+} from "../_shared/provider";
 import { isOpenAtInstant } from "../places/search/hours";
 import {
   getSingleLeg as realGetSingleLeg,
@@ -154,6 +160,71 @@ Rules:
 
 Respond with ONLY this JSON, no prose:
 { "intent": "venue"|"time"|"constraint"|"duration", "path": "refilter"|"research", "category": string, "aesthetic": string, "budget": string|null, "constraints": string[], "time": { "mode": "relative"|"absolute", "deltaMinutes": number, "targetTime": string } | null, "duration": { "mode": "relative"|"absolute", "deltaMinutes": number, "targetMinutes": number } | null }`;
+
+const INTERPRET_KEYS = [
+  "intent",
+  "path",
+  "category",
+  "aesthetic",
+  "budget",
+  "constraints",
+  "time",
+  "duration",
+] as const;
+
+interface ValidInterpretOutput {
+  intent: SwapIntent;
+  path: "refilter" | "research";
+  category: string;
+  aesthetic: string;
+  budget: string | null;
+  constraints: string[];
+  time:
+    | { mode: "relative"; deltaMinutes: number }
+    | { mode: "absolute"; targetTime: string }
+    | null;
+  duration:
+    | { mode: "relative"; deltaMinutes: number }
+    | { mode: "absolute"; targetMinutes: number }
+    | null;
+}
+
+function validInterpretOutput(value: unknown): value is ValidInterpretOutput {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== INTERPRET_KEYS.length ||
+    INTERPRET_KEYS.some((key) => !Object.prototype.hasOwnProperty.call(value, key)) ||
+    !["venue", "time", "constraint", "duration"].includes(String(value.intent)) ||
+    !["refilter", "research"].includes(String(value.path)) ||
+    typeof value.category !== "string" ||
+    value.category.trim() === "" ||
+    value.category.length > 240 ||
+    typeof value.aesthetic !== "string" ||
+    value.aesthetic.length > 240 ||
+    (value.budget !== null &&
+      (typeof value.budget !== "string" || value.budget.length > 240)) ||
+    !Array.isArray(value.constraints) ||
+    value.constraints.length > 8 ||
+    !value.constraints.every(
+      (constraint) => typeof constraint === "string" && constraint.length <= 240
+    )
+  ) {
+    return false;
+  }
+  const validShift = (shift: unknown, duration: boolean) => {
+    if (shift === null) return true;
+    if (!isRecord(shift) || !["relative", "absolute"].includes(String(shift.mode))) {
+      return false;
+    }
+    if (shift.mode === "relative") {
+      return typeof shift.deltaMinutes === "number" && Number.isFinite(shift.deltaMinutes);
+    }
+    return duration
+      ? typeof shift.targetMinutes === "number" && Number.isFinite(shift.targetMinutes)
+      : typeof shift.targetTime === "string" && /^\d{2}:\d{2}$/.test(shift.targetTime);
+  };
+  return validShift(value.time, false) && validShift(value.duration, true);
+}
 
 // Deterministic fallback for time expressions, so common relative phrases
 // resolve even if the model whiffs. Earlier is negative, later positive.
@@ -316,7 +387,7 @@ export async function interpretRefinement(
       ? { ...fallback, intent: "time", time: localTime }
       : fallback;
   try {
-    const res = await fetch(GROQ_URL, {
+    const res = await fetchProvider("groq", GROQ_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -342,9 +413,15 @@ export async function interpretRefinement(
       }),
       cache: "no-store",
     });
-    const data = await res.json();
-    if (!res.ok) return localFallback();
-    const out = JSON.parse(data?.choices?.[0]?.message?.content ?? "{}");
+    const data = requireProviderRecord("groq", await readProviderJson("groq", res));
+    const choices = data.choices;
+    const first = Array.isArray(choices) ? choices[0] : undefined;
+    const message = isRecord(first) ? first.message : undefined;
+    const content = isRecord(message) ? message.content : undefined;
+    if (typeof content !== "string" || content.length > 50_000) return localFallback();
+    const parsedOutput: unknown = JSON.parse(content);
+    if (!validInterpretOutput(parsedOutput)) return localFallback();
+    const out = parsedOutput;
     let intent: SwapIntent = ["time", "constraint", "duration"].includes(out.intent)
       ? out.intent
       : "venue";
@@ -538,14 +615,14 @@ export async function swapStop(
   }
 
   const after = result.swapped ? itinerary.stops[result.stopIndex] : null;
-  console.log(
-    `[swap-apply] refinement="${refinement}" intent=${interp.intent} ` +
-      `time=${JSON.stringify(interp.time)} duration=${JSON.stringify(interp.duration)} | ` +
-      `before start=${beforeStart} total=${beforeTotal} | ` +
-      (after
-        ? `after start=${after.start_time} total=${after.durationMinutes?.total ?? null}`
-        : `REFUSED: ${(result as { reason: string }).reason}`)
-  );
+  logEvent("info", "swap_applied", {
+    intent: interp.intent,
+    outcome: result.swapped ? "swapped" : "refused",
+    beforeStart,
+    beforeTotal,
+    afterStart: after?.start_time ?? null,
+    afterTotal: after?.durationMinutes?.total ?? null,
+  });
   return result;
 }
 

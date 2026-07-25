@@ -1,62 +1,46 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { getTravelLegs, LatLng } from "../travel";
 import { isMockMode, mockTravelLegs } from "../../_mock/fixtures";
+import {
+  ApiError,
+  apiError,
+  apiJson,
+  enforceRateLimit,
+  isRecord,
+  readJsonBody,
+  requestContext,
+  requireServiceKey,
+} from "../../_shared/http";
+import {
+  parseDwellMinutes,
+  parseOptionalInstant,
+  parsePoints,
+} from "../../_shared/schemas";
 
 // POST { points: LatLng[], departureTime?: string, dwellMinutes?: number[] }
 //   → { legs: TravelLeg[] }
 // dwellMinutes[i] = how long the traveller stays at points[i] (index 0 is
 // home, no dwell) so each leg can be routed at its own departure instant.
 export async function POST(request: NextRequest) {
-  const apiKey = process.env.GOOGLE_ROUTES_API_KEY;
-  if (!apiKey && !isMockMode()) {
-    return NextResponse.json(
-      { error: "GOOGLE_ROUTES_API_KEY is not set." },
-      { status: 500 }
-    );
-  }
-
-  let points: LatLng[];
-  let departureTime: string | undefined;
-  let dwellMinutes: number[] | undefined;
+  const ctx = requestContext(request, "travel");
   try {
-    const body = await request.json();
-    points = body?.points;
-    departureTime = body?.departureTime;
-    dwellMinutes = Array.isArray(body?.dwellMinutes)
-      ? body.dwellMinutes.filter((n: unknown): n is number => typeof n === "number")
-      : undefined;
-  } catch {
-    return NextResponse.json(
-      { error: "Request body must be JSON." },
-      { status: 400 }
-    );
-  }
-  if (
-    !Array.isArray(points) ||
-    points.some(
-      (p) => typeof p?.latitude !== "number" || typeof p?.longitude !== "number"
-    )
-  ) {
-    return NextResponse.json(
-      { error: "`points` must be an array of { latitude, longitude }." },
-      { status: 400 }
-    );
-  }
+    enforceRateLimit(ctx, 90);
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      throw new ApiError(400, "invalid_request", "Request body must be a JSON object.");
+    }
+    const points: LatLng[] = parsePoints(body.points);
+    const departureTime = parseOptionalInstant(body.departureTime, "departureTime");
+    const dwellMinutes = parseDwellMinutes(body.dwellMinutes, points.length);
 
-  try {
     // fixture seam: deterministic distance-derived legs, no Routes call
     if (isMockMode()) {
-      return NextResponse.json({ legs: mockTravelLegs(points) });
+      return apiJson(ctx, { legs: mockTravelLegs(points) });
     }
-    const legs = await getTravelLegs(apiKey!, points, departureTime, dwellMinutes);
-    return NextResponse.json({ legs });
+    const apiKey = requireServiceKey(process.env.GOOGLE_ROUTES_API_KEY);
+    const legs = await getTravelLegs(apiKey, points, departureTime, dwellMinutes);
+    return apiJson(ctx, { legs });
   } catch (err) {
-    return NextResponse.json(
-      {
-        error: "Travel time lookup failed.",
-        details: err instanceof Error ? err.message : String(err),
-      },
-      { status: 500 }
-    );
+    return apiError(ctx, err);
   }
 }

@@ -748,7 +748,18 @@ const cases: Array<[string, () => Promise<void>]> = [
         category_signals: ["dinner"], group_context: "date",
         budget: null, constraints: [], location: "Ossington",
       };
-      const model = (o: object) => (modelOut = JSON.stringify(o));
+      const model = (o: object) =>
+        (modelOut = JSON.stringify({
+          intent: "venue",
+          path: "refilter",
+          category: "dinner",
+          aesthetic: "lively",
+          budget: null,
+          constraints: [],
+          time: null,
+          duration: null,
+          ...o,
+        }));
       const run = (refinement: string) =>
         interpretRefinement("test-key", parsed, "dinner", T(19, 0), refinement);
       try {
@@ -778,6 +789,13 @@ const cases: Array<[string, () => Promise<void>]> = [
         model({ intent: "time", path: "refilter", category: "dinner", time: { mode: "relative", deltaMinutes: -45 }, duration: null });
         const e = await run("a bit earlier");
         assert.deepStrictEqual(e.time, { mode: "relative", deltaMinutes: -45 });
+
+        // an incomplete/malformed semantic payload is never trusted; the
+        // deterministic local interpretation remains the safe result
+        modelOut = JSON.stringify({ intent: "constraint", path: "research" });
+        const f = await run("somewhere with a patio");
+        assert.strictEqual(f.intent, "venue");
+        assert.deepStrictEqual(f.constraints, ["somewhere with a patio"]);
       } finally {
         globalThis.fetch = realFetch;
       }

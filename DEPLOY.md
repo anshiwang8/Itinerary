@@ -99,3 +99,44 @@ Notes: the dev strip (time sim + disruption trigger) ships in the UI on
 purpose — it's the demo control. Your mentor's usage spends your Groq /
 Google quota; both have free tiers, but set Google Cloud quota caps if
 you're worried.
+
+## Security and quota go-live checklist
+
+The source tree now rejects oversized/invalid requests and applies a
+per-instance burst limit before provider or Redis work. Serverless instances
+do not share memory, so that layer is defense in depth, not the production
+global quota. Complete every external item below before treating a public
+deployment as abuse-resistant:
+
+- [ ] Keep the browser key restricted by HTTP referrer to the exact
+  production and intended preview origins; restrict it to Maps JavaScript
+  API only.
+- [ ] Use separate server-side keys for Places, Routes, Weather, and
+  Geocoding when that endpoint is enabled; API-restrict each key to its one
+  service and never expose it through `NEXT_PUBLIC_`.
+- [ ] Set Groq request/token quotas and alerts appropriate to the public
+  plan/selection/refinement endpoints.
+- [ ] Set Google per-API quotas, daily budget alerts, and hard caps where
+  supported.
+- [ ] Put a shared edge or Redis-backed limiter in front of the API routes.
+  Give it a dedicated Redis namespace and least-privilege token; do not mix
+  rate-limit keys with `itin:*` records.
+- [ ] Restrict the itinerary-store Upstash token to the intended database,
+  require its HTTPS/REST endpoint, and rotate it independently from any
+  rate-limit token.
+- [ ] Keep Production, Preview, and Development environment values separate
+  in Vercel; do not copy production secrets into preview deployments unless
+  preview access is intentionally trusted.
+- [ ] Configure production log retention and access controls. Alerts may use
+  correlation IDs and structured error codes only; do not ingest prompts,
+  refinements, model output, upstream bodies, keys, tokens, home labels, or
+  environment values.
+- [ ] Roll out a Content-Security-Policy in report-only mode first, including
+  only the Maps origins actually required, then enforce after reviewing
+  violations. Keep the existing framework security headers in the same
+  review.
+- [ ] Configure a bot challenge or managed WAF rule for sustained automated
+  traffic. Exempt ordinary short bursts from shared networks and verify the
+  `429`/`Retry-After` path remains reachable.
+- [ ] After deployment, send controlled oversized and over-limit requests
+  and confirm provider dashboards show zero corresponding Groq/Google calls.

@@ -18,6 +18,7 @@ import {
   TravelLeg,
 } from "../schedule/travel";
 import { isMockMode, mockRerouteDeps } from "../_mock/fixtures";
+import { logEvent } from "../_shared/http";
 import { fallbackParsedFor, UNKNOWN_LOCATION_MESSAGE } from "./fallbackParsed";
 
 export interface Disruption {
@@ -141,11 +142,13 @@ export async function rerouteItinerary(
   // observability at the apply step: where is the plan anchored, what
   // does the engine think is affected — a reroute that re-derives times
   // from `now` instead of the committed schedule is visible right here
-  console.log(
-    `[reroute-apply] leg=${disruption.legIndex} now=${now.toISOString()} floor=${floor.toISOString()} | ` +
-      `committed: ${itinerary.stops.map((s) => `${s.category}@${s.start_time ?? "-"}`).join(" ")} | ` +
-      `affected=[${affectedIdx.join(",")}]`
-  );
+  logEvent("info", "reroute_started", {
+    legIndex: disruption.legIndex,
+    now: now.toISOString(),
+    floor: floor.toISOString(),
+    committedStarts: itinerary.stops.map((stop) => stop.start_time),
+    affectedIndexes: affectedIdx,
+  });
 
   if (affectedIdx.length === 0) {
     return {
@@ -304,9 +307,9 @@ export async function rerouteItinerary(
 
   withStatuses(itinerary, now);
 
-  console.log(
-    `[reroute-apply] after: ${itinerary.stops.map((s) => `${s.category}@${s.start_time ?? "-"}`).join(" ")}`
-  );
+  logEvent("info", "reroute_applied", {
+    starts: itinerary.stops.map((stop) => stop.start_time),
+  });
 
   const changed: ChangedStop[] = affectedIdx.map((stopIdx, j) => ({
     stopIndex: stopIdx,

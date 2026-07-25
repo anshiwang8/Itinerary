@@ -1,63 +1,52 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { ParsedPrompt, Place } from "../places/search/filter";
 import { SelectParseError, selectVenues } from "./selectVenues";
 import { isMockMode, mockSelect } from "../_mock/fixtures";
+import {
+  ApiError,
+  apiError,
+  apiJson,
+  enforceRateLimit,
+  isRecord,
+  readJsonBody,
+  requestContext,
+  requireServiceKey,
+} from "../_shared/http";
+import { parseParsedPrompt, parsePools, parseSlots } from "../_shared/schemas";
 
 // Thin wrapper over selectVenues (shared with the reroute engine).
 export async function POST(request: NextRequest) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey && !isMockMode()) {
-    return NextResponse.json({ error: "GROQ_API_KEY is not set." }, { status: 500 });
-  }
-
-  let parsed: ParsedPrompt;
-  let poolsIn: Record<string, Place[]>;
-  let slots: string[] | undefined;
+  const ctx = requestContext(request, "select");
   try {
-    const body = await request.json();
-    parsed = body?.parsed;
-    poolsIn = body?.pools;
+    enforceRateLimit(ctx, 60);
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      throw new ApiError(400, "invalid_request", "Request body must be a JSON object.");
+    }
+    const parsed: ParsedPrompt = parseParsedPrompt(body.parsed);
+    const poolsIn: Record<string, Place[]> = parsePools(body.pools);
     // the requested stops in order, duplicates intact — a repeated category
     // is two stops sharing one pool, not one stop (code-audit §7.1)
-    slots = Array.isArray(body?.slots)
-      ? body.slots.filter((c: unknown): c is string => typeof c === "string" && c.trim() !== "")
-      : undefined;
-  } catch {
-    return NextResponse.json({ error: "Request body must be JSON." }, { status: 400 });
-  }
-  if (!parsed || typeof parsed !== "object" || !poolsIn || typeof poolsIn !== "object") {
-    return NextResponse.json(
-      { error: "`parsed` and `pools` are required in the body." },
-      { status: 400 }
-    );
-  }
+    const slots = parseSlots(body.slots);
 
-  try {
     // fixture seam: deterministic highest-rated pick, no Groq call
     if (isMockMode()) {
-      return NextResponse.json({ selections: mockSelect(parsed, poolsIn, slots) });
+      return apiJson(ctx, { selections: mockSelect(parsed, poolsIn, slots) });
     }
-    const selections = await selectVenues(apiKey!, parsed, poolsIn, slots);
-    return NextResponse.json({ selections });
+    const apiKey = requireServiceKey(process.env.GROQ_API_KEY);
+    const selections = await selectVenues(apiKey, parsed, poolsIn, slots);
+    return apiJson(ctx, { selections });
   } catch (err) {
     if (err instanceof SelectParseError) {
-      // the model's answer wasn't usable — say something a person can act
-      // on, keep the technical detail for the server log/response (§6.3)
-      return NextResponse.json(
-        {
-          error: "Couldn't pick venues for that just now — try again?",
-          detail: err.message,
-          raw: err.raw,
-        },
-        { status: 500 }
+      return apiError(
+        ctx,
+        new ApiError(
+          502,
+          "selection_invalid_response",
+          "Couldn't pick venues for that just now — try again?"
+        )
       );
     }
-    return NextResponse.json(
-      {
-        error: "Selection failed.",
-        details: err instanceof Error ? err.message : String(err),
-      },
-      { status: 500 }
-    );
+    return apiError(ctx, err);
   }
 }

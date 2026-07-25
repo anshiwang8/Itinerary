@@ -4,6 +4,12 @@
 // plan ever consulted the forecast, and a swap or reroute could move an
 // outdoor stop into the rain undetected (code-audit 2026-07-18 §7.6).
 import { WeatherHour } from "../places/search/filter";
+import { finiteNumber, isRecord, logEvent } from "../_shared/http";
+import {
+  fetchProvider,
+  readProviderJson,
+  requireProviderRecord,
+} from "../_shared/provider";
 
 const FORECAST_URL = "https://weather.googleapis.com/v1/forecast/hours:lookup";
 
@@ -37,27 +43,24 @@ export async function fetchWeatherHours(
   url.searchParams.set("unitsSystem", "METRIC");
 
   try {
-    const res = await fetch(url.toString(), { next: { revalidate: 600 } });
-    const data = await res.json();
-    if (!res.ok) {
-      console.error(
-        `[weather] forecast failed (${res.status}):`,
-        data?.error?.message ?? data
-      );
-      return null;
-    }
-    return ((data?.forecastHours ?? []) as RawForecastHour[])
+    const res = await fetchProvider("weather", url, { next: { revalidate: 600 } });
+    const data = requireProviderRecord("weather", await readProviderJson("weather", res));
+    if (!Array.isArray(data.forecastHours)) return null;
+    return (data.forecastHours as RawForecastHour[])
+      .filter((hour): hour is RawForecastHour => isRecord(hour))
       .map((h) => ({
         hourISO: h?.interval?.startTime ?? null,
-        tempC: h?.temperature?.degrees ?? null,
-        precipProbability: h?.precipitation?.probability?.percent ?? null,
+        tempC: finiteNumber(h?.temperature?.degrees) ? h.temperature.degrees : null,
+        precipProbability: finiteNumber(h?.precipitation?.probability?.percent)
+          ? h.precipitation.probability.percent
+          : null,
         condition:
           h?.weatherCondition?.description?.text ?? h?.weatherCondition?.type ?? null,
       }))
       .filter((h): h is WeatherHour => typeof h.hourISO === "string")
       .slice(0, 24);
-  } catch (err) {
-    console.error("[weather] forecast unreachable:", err);
+  } catch {
+    logEvent("error", "weather_forecast_unavailable");
     return null;
   }
 }

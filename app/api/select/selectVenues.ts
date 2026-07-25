@@ -6,6 +6,13 @@ import { ParsedPrompt, Place } from "../places/search/filter";
 // doesn't re-export it) — take it from the canonical source.
 import type { CurrentOpeningHours } from "../places/search/hours";
 import { haversineMeters } from "../schedule/travel";
+import { isRecord } from "../_shared/http";
+import {
+  ProviderError,
+  fetchProvider,
+  readProviderJson,
+  requireProviderRecord,
+} from "../_shared/provider";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "llama-3.3-70b-versatile";
@@ -59,14 +66,11 @@ export interface Selection {
   unmetConstraint?: string;
 }
 
-/** Groq output unparseable as JSON — carries the raw text for debugging. */
+/** Groq output was not JSON. Raw model text is deliberately not retained. */
 export class SelectParseError extends Error {
-  raw: string;
-  constructor(message: string, raw: string, cause?: unknown) {
+  constructor(message: string) {
     super(message);
-    this.raw = raw;
     this.name = "SelectParseError";
-    if (cause instanceof Error) this.message += ` (${cause.message})`;
   }
 }
 
@@ -91,7 +95,7 @@ function candidateView(p: Place, home?: { latitude: number; longitude: number })
 }
 
 async function callGroq(apiKey: string, messages: unknown[]) {
-  const res = await fetch(GROQ_URL, {
+  const res = await fetchProvider("groq", GROQ_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -105,11 +109,15 @@ async function callGroq(apiKey: string, messages: unknown[]) {
     }),
     cache: "no-store",
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data?.error?.message ?? `Groq request failed (${res.status}).`);
+  const data = requireProviderRecord("groq", await readProviderJson("groq", res));
+  const choices = data.choices;
+  const first = Array.isArray(choices) ? choices[0] : undefined;
+  const message = isRecord(first) ? first.message : undefined;
+  const content = isRecord(message) ? message.content : undefined;
+  if (typeof content !== "string" || content.length > 50_000) {
+    throw new ProviderError("groq", 502, "groq_invalid_response");
   }
-  return data?.choices?.[0]?.message?.content ?? "";
+  return content;
 }
 
 // Raw selection shape as the model returns it (unmet_constraint is the
@@ -285,12 +293,8 @@ export async function selectVenues(
   let parsedOut: { selections?: Selection[] };
   try {
     parsedOut = JSON.parse(raw);
-  } catch (err) {
-    throw new SelectParseError(
-      "Failed to parse Groq selection response as JSON.",
-      raw,
-      err
-    );
+  } catch {
+    throw new SelectParseError("Failed to parse Groq selection response as JSON.");
   }
 
   const liveSlotCategories = liveSlots.map((s) => s.category);
@@ -305,12 +309,8 @@ export async function selectVenues(
     raw = await callGroq(apiKey, messages);
     try {
       parsedOut = JSON.parse(raw);
-    } catch (err) {
-      throw new SelectParseError(
-        "Failed to parse Groq retry response as JSON.",
-        raw,
-        err
-      );
+    } catch {
+      throw new SelectParseError("Failed to parse Groq retry response as JSON.");
     }
   }
 
