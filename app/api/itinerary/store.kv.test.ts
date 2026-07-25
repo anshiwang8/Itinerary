@@ -4,11 +4,18 @@
 // Redis is stubbed via globalThis.fetch (same pattern as the Groq stubs).
 // Run with: npx tsx app/api/itinerary/store.kv.test.ts
 import assert from "node:assert";
-import { createItinerary, kvConfigured, loadItinerary, saveItinerary } from "./store";
+import {
+  compareAndSetItinerary,
+  createItinerary,
+  kvConfigured,
+  loadItinerary,
+  saveItinerary,
+} from "./store";
 import { ScheduledStop } from "../schedule/schedule";
 
 // ── Redis REST stub: records commands, serves a tiny key-value map ──
 const kvData = new Map<string, string>();
+const kvTtl = new Map<string, number>();
 let commands: unknown[][] = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
@@ -17,11 +24,42 @@ globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     commands.push(cmd as unknown[][number][]);
     const [op, key, value] = cmd as [string, string, string?];
     if (op === "SET") {
+      const options = cmd.slice(3);
+      if (options.includes("NX") && kvData.has(key)) {
+        return new Response(JSON.stringify({ result: null }), { status: 200 });
+      }
       kvData.set(key, value!);
+      const ex = options.indexOf("EX");
+      if (ex >= 0 && typeof options[ex + 1] === "number") {
+        kvTtl.set(key, options[ex + 1] as number);
+      }
       return new Response(JSON.stringify({ result: "OK" }), { status: 200 });
     }
     if (op === "GET") {
       return new Response(JSON.stringify({ result: kvData.get(key) ?? null }), { status: 200 });
+    }
+    if (op === "EVAL") {
+      const redisKey = String(cmd[3]);
+      const expectedVersion = Number(cmd[4]);
+      const nextRaw = String(cmd[5]);
+      const currentRaw = kvData.get(redisKey);
+      if (!currentRaw) {
+        return new Response(JSON.stringify({ result: [-1, 0] }), { status: 200 });
+      }
+      const current = JSON.parse(currentRaw) as { version?: number };
+      const currentVersion = current.version ?? 1;
+      if (currentVersion !== expectedVersion) {
+        return new Response(
+          JSON.stringify({ result: [0, currentVersion] }),
+          { status: 200 }
+        );
+      }
+      const next = JSON.parse(nextRaw) as { version: number };
+      kvData.set(redisKey, nextRaw);
+      return new Response(
+        JSON.stringify({ result: [1, next.version] }),
+        { status: 200 }
+      );
     }
     return new Response(JSON.stringify({ error: `unhandled ${op}` }), { status: 400 });
   }
@@ -65,7 +103,8 @@ const cases: Array<[string, () => Promise<void>]> = [
       const it = createItinerary(mkStops(), []);
       await saveItinerary(it);
       const back = await loadItinerary(it.id);
-      assert.strictEqual(back, it); // same object — the Map, not a copy
+      assert.notStrictEqual(back, it, "memory loads are isolated proposals");
+      assert.deepStrictEqual(back, it);
       assert.strictEqual(commands.length, 0, "no Redis traffic in memory mode");
     },
   ],
@@ -77,10 +116,18 @@ const cases: Array<[string, () => Promise<void>]> = [
       const it = createItinerary(mkStops(), []);
       await saveItinerary(it);
       assert.strictEqual(commands.length, 1);
-      const [op, key, value, ex, ttl] = commands[0] as [string, string, string, string, number];
+      const [op, key, value, nx, ex, ttl] = commands[0] as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        number,
+      ];
       assert.strictEqual(op, "SET");
       assert.strictEqual(key, `itin:${it.id}`);
       assert.deepStrictEqual(JSON.parse(value).stops[0].name, "Venue One");
+      assert.strictEqual(nx, "NX");
       assert.strictEqual(ex, "EX");
       assert.ok(typeof ttl === "number" && ttl > 0, "TTL set — demo data expires");
     },
@@ -100,6 +147,26 @@ const cases: Array<[string, () => Promise<void>]> = [
       // the fields the strip depends on survive serialization
       assert.strictEqual(back!.stops[0].priceLevel, "PRICE_LEVEL_MODERATE");
       assert.strictEqual(back!.stops[0].description, "A test venue.");
+    },
+  ],
+  [
+    "KV CAS is one EVAL and preserves the original TTL",
+    async () => {
+      setKvEnv(true);
+      const it = createItinerary(mkStops(), []);
+      await saveItinerary(it);
+      const key = `itin:${it.id}`;
+      const beforeTtl = kvTtl.get(key);
+      const proposal = (await loadItinerary(it.id))!;
+      proposal.stops[0].name = "CAS Venue";
+      commands = [];
+      const committed = await compareAndSetItinerary(proposal, proposal.version);
+      assert.strictEqual(committed.version, 2);
+      assert.strictEqual(committed.stops[0].name, "CAS Venue");
+      assert.strictEqual(commands.length, 1, "CAS is one Redis command");
+      assert.strictEqual(commands[0][0], "EVAL");
+      assert.match(String(commands[0][1]), /KEEPTTL/);
+      assert.strictEqual(kvTtl.get(key), beforeTtl, "mutation must not refresh TTL");
     },
   ],
   [

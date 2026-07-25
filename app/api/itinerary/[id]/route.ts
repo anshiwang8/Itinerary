@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { loadItinerary, saveItinerary, withStatuses } from "../store";
+import { updateItinerary, withStatuses } from "../store";
 import {
   ApiError,
   apiError,
@@ -32,20 +32,23 @@ export async function GET(
       t = new Date(nowParam);
     }
 
-    const itinerary = await loadItinerary(id);
-    if (!itinerary) {
+    const updated = await updateItinerary(
+      id,
+      (proposal) => {
+        const touched = { changed: false };
+        withStatuses(proposal, t, touched);
+        return { value: null, changed: touched.changed };
+      },
+      { maxAttempts: 3 }
+    );
+    if (!updated) {
       throw new ApiError(404, "itinerary_not_found", "That itinerary was not found.");
     }
-    // the locked ratchet mutates — persist it, or backwards time travel on
-    // another instance could unlock a stop. But ONLY when something
-    // actually moved: this route is polled (the dev time picker fires a GET
-    // per change), and an unconditional write was a Redis round trip per
-    // read that also refreshed the TTL, so an actively-viewed plan never
-    // expired (code-audit 2026-07-18 §2.4).
-    const touched = { changed: false };
-    const result = withStatuses(itinerary, t, touched);
-    if (touched.changed) await saveItinerary(result);
-    return apiJson(ctx, result);
+    // No-op polls do not write. A lock/status change commits through CAS and
+    // safely retries, so it cannot overwrite a simultaneous swap/reroute.
+    return apiJson(ctx, updated.itinerary, {
+      headers: { ETag: `"${updated.itinerary.version}"` },
+    });
   } catch (err) {
     return apiError(ctx, err);
   }

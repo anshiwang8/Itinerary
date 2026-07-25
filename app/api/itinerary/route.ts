@@ -42,8 +42,12 @@ export async function POST(request: NextRequest) {
     const timeZone = parseOptionalTimeZone(body.timeZone);
 
     const itinerary = createItinerary(stops, legs, parsed, homeLeg, home, timeZone);
-    await saveItinerary(itinerary);
-    return apiJson(ctx, { id: itinerary.id });
+    const stored = await saveItinerary(itinerary);
+    return apiJson(
+      ctx,
+      { id: stored.id, version: stored.version },
+      { headers: { ETag: `"${stored.version}"` } }
+    );
   } catch (err) {
     return apiError(ctx, err);
   }

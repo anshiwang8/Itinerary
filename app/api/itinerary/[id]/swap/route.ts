@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { loadItinerary, saveItinerary } from "../../store";
+import { updateItinerary } from "../../store";
 import { swapStop } from "../../swap";
 import {
   ApiError,
@@ -11,10 +11,14 @@ import {
   readJsonBody,
   requestContext,
 } from "../../../_shared/http";
-import { parseOptionalInstant, parseRefinement } from "../../../_shared/schemas";
+import {
+  parseOptionalInstant,
+  parseOptionalVersion,
+  parseRefinement,
+} from "../../../_shared/schemas";
 
 // POST /api/itinerary/[id]/swap
-// body: { stopIndex: number, refinement: string, now?: ISO }
+// body: { stopIndex: number, refinement: string, version?: number, now?: ISO }
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -46,20 +50,33 @@ export async function POST(
     const stopIndex = body.stopIndex;
     const refinement = parseRefinement(body.refinement);
     const nowISO = parseOptionalInstant(body.now, "now");
+    const expectedVersion = parseOptionalVersion(body.version);
     const now = nowISO ? new Date(nowISO) : new Date();
 
-    const itinerary = await loadItinerary(id);
-    if (!itinerary) {
+    const updated = await updateItinerary(
+      id,
+      async (proposal) => {
+        if (stopIndex >= proposal.stops.length) {
+          throw new ApiError(
+            400,
+            "invalid_stop_index",
+            "`stopIndex` is outside this itinerary."
+          );
+        }
+        const result = await swapStop(proposal, stopIndex, refinement, now);
+        return { value: result };
+      },
+      { expectedVersion, maxAttempts: 2 }
+    );
+    if (!updated) {
       throw new ApiError(404, "itinerary_not_found", "That itinerary was not found.");
     }
-    if (stopIndex >= itinerary.stops.length) {
-      throw new ApiError(400, "invalid_stop_index", "`stopIndex` is outside this itinerary.");
-    }
-
-    const result = await swapStop(itinerary, stopIndex, refinement, now);
-    // statuses/lock ratchet mutate even on a refusal — always write back
-    await saveItinerary(itinerary);
-    return apiJson(ctx, result);
+    // Even refusals can ratchet statuses; the proposal commits as one CAS.
+    return apiJson(
+      ctx,
+      { ...updated.value, version: updated.itinerary.version },
+      { headers: { ETag: `"${updated.itinerary.version}"` } }
+    );
   } catch (err) {
     return apiError(ctx, err);
   }

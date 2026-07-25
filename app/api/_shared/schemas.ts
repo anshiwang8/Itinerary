@@ -214,6 +214,18 @@ export function parseOptionalTimeZone(value: unknown): string | undefined {
   return value;
 }
 
+export function parseOptionalVersion(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !finiteNumber(value) ||
+    !Number.isSafeInteger(value) ||
+    value < 1
+  ) {
+    badRequest("`version` must be a positive safe integer.");
+  }
+  return value;
+}
+
 export function parseScheduledStops(value: unknown): ScheduledStop[] {
   if (
     !Array.isArray(value) ||

@@ -1152,6 +1152,7 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         disruption: { type: "transit_cancelled", legIndex: disruptLeg },
+        version: itinerary.version,
         ...(nowISO ? { now: nowISO } : {}),
       }),
     });
@@ -1222,7 +1223,12 @@ export default function Home() {
     const res = await fetch(`/api/itinerary/${itinerary.id}/swap`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stopIndex, refinement, ...(nowISO ? { now: nowISO } : {}) }),
+      body: JSON.stringify({
+        stopIndex,
+        refinement,
+        version: itinerary.version,
+        ...(nowISO ? { now: nowISO } : {}),
+      }),
     });
     const data = await res.json();
     setSwapping(false);

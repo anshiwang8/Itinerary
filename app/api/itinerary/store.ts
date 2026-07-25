@@ -1,10 +1,10 @@
-// In-memory itinerary store — the foundation for the reroute engine.
-// No persistence (comes later), no rerouting logic, no disruption
-// handling. Keyed by itinerary id.
+// Versioned itinerary persistence. Redis is authoritative when configured;
+// memory mode implements the same clone/CAS contract for dev and tests.
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
 import { HomePoint } from "../schedule/home";
 import { ParsedPrompt } from "../places/search/filter";
+import { ApiError, isRecord } from "../_shared/http";
 import {
   ProviderError,
   fetchProvider,
@@ -27,6 +27,8 @@ export interface ItineraryStop extends ScheduledStop {
 
 export interface Itinerary {
   id: string;
+  /** Monotonic optimistic-concurrency token. Version 1 is the initial write. */
+  version: number;
   createdAt: string;
   status: ItineraryStatus;
   stops: ItineraryStop[];
@@ -60,10 +62,22 @@ const store: Map<string, Itinerary> = (g.__itineraryStore ??= new Map());
 // each route invocation can land on a different instance, so globalThis
 // does NOT survive between the POST that stores an itinerary and the
 // GET/swap/reroute that read it. When a Redis REST endpoint is configured
-// (Vercel KV or Upstash env vars), loadItinerary/saveItinerary go through
-// it and Redis is the single source of truth; otherwise they collapse to
-// the Map. Routes use ONLY these two; the engines never touch the store. ──
+// (Vercel KV or Upstash env vars), all persistence operations go through it
+// and Redis is the single source of truth. Routes use the load/create/CAS
+// seam; engines never touch the store. ──
 const KV_TTL_SECONDS = 7 * 24 * 60 * 60; // itineraries are ephemeral demos
+const DEFAULT_UPDATE_ATTEMPTS = 2;
+
+export class ItineraryConflictError extends ApiError {
+  constructor() {
+    super(
+      409,
+      "itinerary_conflict",
+      "This itinerary changed while your request was running. Refresh it and try again."
+    );
+    this.name = "ItineraryConflictError";
+  }
+}
 
 function kvEnv(): { url: string; token: string } | null {
   const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
@@ -108,30 +122,188 @@ async function redis(cmd: (string | number)[]): Promise<unknown> {
 
 const kvKey = (id: string) => `itin:${id}`;
 
+// Redis compares the stored version and writes the complete proposal in one
+// server-side operation. KEEPTTL is load-bearing: a mutation must not refresh
+// a seven-day plan or turn it into a permanent key.
+const CAS_LUA = `
+local current = redis.call("GET", KEYS[1])
+if not current then
+  return {-1, 0}
+end
+local ok, decoded = pcall(cjson.decode, current)
+if not ok then
+  return {-2, 0}
+end
+local currentVersion = tonumber(decoded.version) or 1
+if currentVersion ~= tonumber(ARGV[1]) then
+  return {0, currentVersion}
+end
+redis.call("SET", KEYS[1], ARGV[2], "KEEPTTL")
+return {1, tonumber(ARGV[1]) + 1}
+`.trim();
+
+function cloneItinerary(itinerary: Itinerary): Itinerary {
+  return JSON.parse(JSON.stringify(itinerary)) as Itinerary;
+}
+
+function storedItinerary(raw: string, expectedId: string): Itinerary {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ProviderError("redis", 502, "redis_invalid_response");
+  }
+  if (
+    !isRecord(parsed) ||
+    parsed.id !== expectedId ||
+    typeof parsed.createdAt !== "string" ||
+    !Array.isArray(parsed.stops) ||
+    !Array.isArray(parsed.legs)
+  ) {
+    throw new ProviderError("redis", 502, "redis_invalid_response");
+  }
+  // Plans created before the CAS rollout are treated as version 1. The Lua
+  // script uses the same fallback, so their first mutation migrates them.
+  const version =
+    typeof parsed.version === "number" &&
+    Number.isSafeInteger(parsed.version) &&
+    parsed.version >= 1
+      ? parsed.version
+      : 1;
+  return { ...(parsed as unknown as Itinerary), version };
+}
+
 /**
  * Fetch an itinerary for a route handler. KV mode always reads Redis (a
  * per-instance memory copy could be stale the moment another instance
- * writes); memory mode reads the Map. Mutating routes MUST follow up with
- * saveItinerary — object identity alone persists nothing under KV.
+ * writes); memory mode returns an isolated clone so object identity can
+ * never bypass compare-and-set.
  */
 export async function loadItinerary(id: string): Promise<Itinerary | undefined> {
   requirePersistenceOnServerless();
   if (kvConfigured()) {
     const raw = await redis(["GET", kvKey(id)]);
-    return typeof raw === "string" ? (JSON.parse(raw) as Itinerary) : undefined;
+    return typeof raw === "string" ? storedItinerary(raw, id) : undefined;
   }
-  return store.get(id);
+  const current = store.get(id);
+  return current ? cloneItinerary(current) : undefined;
 }
 
-/** Write an itinerary back after creation or any mutation (statuses/lock
- * ratchet included — withStatuses mutates). Memory mode: Map upsert. */
-export async function saveItinerary(itinerary: Itinerary): Promise<void> {
+/** Create a new version-1 itinerary. Existing ids are never overwritten. */
+export async function saveItinerary(itinerary: Itinerary): Promise<Itinerary> {
   requirePersistenceOnServerless();
+  const initial = cloneItinerary({ ...itinerary, version: 1 });
   if (kvConfigured()) {
-    await redis(["SET", kvKey(itinerary.id), JSON.stringify(itinerary), "EX", KV_TTL_SECONDS]);
-    return;
+    const result = await redis([
+      "SET",
+      kvKey(initial.id),
+      JSON.stringify(initial),
+      "NX",
+      "EX",
+      KV_TTL_SECONDS,
+    ]);
+    if (result !== "OK") throw new ItineraryConflictError();
+    return cloneItinerary(initial);
   }
-  store.set(itinerary.id, itinerary);
+  if (store.has(initial.id)) throw new ItineraryConflictError();
+  store.set(initial.id, cloneItinerary(initial));
+  return cloneItinerary(initial);
+}
+
+/** Atomically replace exactly one known version and preserve its TTL. */
+export async function compareAndSetItinerary(
+  proposal: Itinerary,
+  expectedVersion: number
+): Promise<Itinerary> {
+  requirePersistenceOnServerless();
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+    throw new ItineraryConflictError();
+  }
+  const next = cloneItinerary({ ...proposal, version: expectedVersion + 1 });
+
+  if (kvConfigured()) {
+    const result = await redis([
+      "EVAL",
+      CAS_LUA,
+      1,
+      kvKey(next.id),
+      expectedVersion,
+      JSON.stringify(next),
+    ]);
+    if (
+      !Array.isArray(result) ||
+      typeof result[0] !== "number" ||
+      result[0] !== 1 ||
+      result[1] !== next.version
+    ) {
+      throw new ItineraryConflictError();
+    }
+    return cloneItinerary(next);
+  }
+
+  // No await between compare and set: atomic within one Node process, and
+  // the same observable contract as the Redis script in dev/e2e.
+  const current = store.get(next.id);
+  if (!current || current.version !== expectedVersion) {
+    throw new ItineraryConflictError();
+  }
+  store.set(next.id, cloneItinerary(next));
+  return cloneItinerary(next);
+}
+
+export interface ItineraryUpdate<T> {
+  value: T;
+  /** Pure/no-op reads can opt out of a version bump and persistence write. */
+  changed?: boolean;
+}
+
+export interface UpdatedItinerary<T> {
+  itinerary: Itinerary;
+  value: T;
+}
+
+/**
+ * Load → clone → propose → CAS. A conflict retries only when no client
+ * version was supplied; an explicitly stale client receives a deterministic
+ * 409 rather than silently applying its intent to a different plan.
+ */
+export async function updateItinerary<T>(
+  id: string,
+  mutate: (proposal: Itinerary) => Promise<ItineraryUpdate<T>> | ItineraryUpdate<T>,
+  options: { expectedVersion?: number; maxAttempts?: number } = {}
+): Promise<UpdatedItinerary<T> | undefined> {
+  const requestedAttempts =
+    options.expectedVersion === undefined
+      ? options.maxAttempts ?? DEFAULT_UPDATE_ATTEMPTS
+      : 1;
+  const maxAttempts = Math.max(1, Math.min(3, requestedAttempts));
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const base = await loadItinerary(id);
+    if (!base) return undefined;
+    if (
+      options.expectedVersion !== undefined &&
+      base.version !== options.expectedVersion
+    ) {
+      throw new ItineraryConflictError();
+    }
+
+    const proposal = cloneItinerary(base);
+    const outcome = await mutate(proposal);
+    if (outcome.changed === false) {
+      return { itinerary: base, value: outcome.value };
+    }
+
+    try {
+      const committed = await compareAndSetItinerary(proposal, base.version);
+      return { itinerary: committed, value: outcome.value };
+    } catch (error) {
+      if (!(error instanceof ItineraryConflictError) || attempt + 1 >= maxAttempts) {
+        throw error;
+      }
+    }
+  }
+  throw new ItineraryConflictError();
 }
 
 /**
@@ -174,6 +346,7 @@ export function createItinerary(
 ): Itinerary {
   const itinerary: Itinerary = {
     id: crypto.randomUUID(),
+    version: 1,
     createdAt: new Date().toISOString(),
     status: "planning",
     stops: stops.map((s) => ({
