@@ -107,6 +107,30 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "ALL-DAY: 'tomorrow, all day' anchors tomorrow 11:00 — the food facet can't hijack the start",
+    () => {
+      // themed full-day expansion: the parse hands over several facets,
+      // some with table defaults (restaurant 19:00). Before "all day"
+      // was a day-part, the earliest-category anchor put a FULL DAY at
+      // 7 PM — with the museum stop arriving after close.
+      const themed = ["soccer stadium tour", "sports museum", "sports bar", "restaurant"];
+      assert.strictEqual(
+        resolveStartTime("tomorrow, all day", NOW, themed).toISOString(),
+        new Date(2026, 6, 4, 11, 0, 0).toISOString()
+      );
+      // and the checked resolver PASSES at 11:00 — this pins the hour
+      // choice: 10:00 would sit outside both matched food bands
+      // (bar 11→2, restaurant 11→23) and refuse the whole themed plan
+      const checked = resolveStartTimeChecked("tomorrow, all day", NOW, themed);
+      assert.strictEqual(checked.ok, true);
+      // a specific day-part beats "all day" when both appear
+      assert.strictEqual(
+        resolveStartTime("tonight, all day", NOW, themed).toISOString(),
+        new Date(2026, 6, 3, 20, 0, 0).toISOString()
+      );
+    },
+  ],
+  [
     "tomorrow + table-matched category still uses the category default (regression)",
     () => {
       // this path already threaded dayOffset correctly — keep it that way

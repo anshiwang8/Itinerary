@@ -114,6 +114,33 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "ALL-DAY FLOOR: full-day language survives the model, and APPENDS rather than replaces",
+    async () => {
+      // the live probe: "…japanese culture for a day" came back
+      // "unspecified" — the floor must stamp "all day" regardless
+      groqContent = JSON.stringify({ time_window: "unspecified", category_signals: ["sushi"], location: "" });
+      const res = await POST(req("immerse myself in japanese culture for a day"));
+      assert.strictEqual((await res.json()).time_window, "all day");
+      // a captured day qualifier SURVIVES: append, never replace
+      groqContent = JSON.stringify({ time_window: "tomorrow", category_signals: ["soccer"], location: "" });
+      const r2 = await POST(req("plan a full schedule for things to do as a soccer fan tomorrow"));
+      assert.strictEqual((await r2.json()).time_window, "tomorrow, all day");
+      // already captured by the model → untouched, no double-append
+      groqContent = JSON.stringify({ time_window: "tomorrow, all day", category_signals: ["soccer"], location: "" });
+      const r3 = await POST(req("a full day as a soccer fan tomorrow"));
+      assert.strictEqual((await r3.json()).time_window, "tomorrow, all day");
+      // immediacy outranks all-day when both appear: "now" replaces wholesale
+      groqContent = JSON.stringify({ time_window: "unspecified", category_signals: ["restaurant"], location: "" });
+      const r4 = await POST(req("everything open right now for a full day out"));
+      assert.strictEqual((await r4.json()).time_window, "now");
+      // and it NEVER fires without all-day language — "day trip ideas
+      // some other day" has bare "day"s only
+      groqContent = JSON.stringify({ time_window: "unspecified", category_signals: ["hike"], location: "" });
+      const r5 = await POST(req("day trip ideas some other day"));
+      assert.strictEqual((await r5.json()).time_window, "unspecified");
+    },
+  ],
+  [
     "a well-formed answer passes through unchanged",
     async () => {
       const good = {

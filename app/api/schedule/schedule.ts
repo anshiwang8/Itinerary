@@ -26,6 +26,18 @@ export const DAY_PART_DEFAULTS: Record<string, { hour: number; minute: number }>
   evening: { hour: 19, minute: 0 },
   tonight: { hour: 20, minute: 0 },
   night: { hour: 20, minute: 0 },
+  // An all-day ask ("a full schedule", "the whole day" — the parse
+  // captures these as exactly "all day") kicks off late morning. 11:00,
+  // not 10:00, deliberately: a themed full day usually carries a food
+  // facet ("sports bar", "restaurant"), and those bands open at 11 —
+  // a 10:00 start would fail the plausibility check for exactly the
+  // multi-facet plans this anchor exists for, while 11:00 sits on the
+  // food bands' opening edge and still leaves a full day ahead. Without
+  // this entry, "a full day as a soccer fan" anchored on the FOOD
+  // facet's 19:00 category default — an evening start for a day plan,
+  // with the museum stop arriving after close. Listed last: specific
+  // day-parts win when both appear ("tomorrow night, all day out").
+  "all day": { hour: 11, minute: 0 },
 };
 
 // Category → sensible default start when NEITHER a clock time NOR a
