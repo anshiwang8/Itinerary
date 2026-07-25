@@ -295,11 +295,23 @@ button { font-family: var(--grot); cursor: pointer; }
 /* leg label pinned to the route midpoint */
 .leglab {
   position: absolute; transform: translate(-50%, -50%); pointer-events: none;
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
   font-family: var(--grot); font-size: 11px; color: var(--ink-soft);
   background: rgba(255,255,255,0.88); padding: 2px 7px; border-radius: 6px;
   transition: opacity 0.5s ease;
 }
 .leglab--dim { opacity: 0.3; }
+/* the strip's transfer bubbles at map scale — small circles in a pair
+   are colour-only dots; singles keep the short line name */
+.leglab__bubbles { display: inline-flex; align-items: center; gap: 3px; }
+.leglab__bunit { display: inline-flex; flex-direction: column; gap: 1.5px; justify-content: center; }
+.leglab__bubble {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%;
+  font-size: 8.5px; font-weight: 700; color: #fff;
+  border: 1px solid rgba(255,255,255,0.85);
+}
+.leglab__bubble--sm { width: 9px; height: 9px; }
 
 /* ─────────────────────────  Chrome  ───────────────────────── */
 .topbar {
@@ -514,6 +526,16 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__leg { width: 118px; display: flex; flex-direction: column; justify-content: center; }
 .lstrip__legicon { width: 22px; height: 22px; margin-bottom: 5px; }
 .lstrip__legicon svg { width: 22px; height: 22px; fill: var(--accent); }
+/* ─── transfer bubbles: one circle per ride, pairs stacked ─── */
+.lstrip__bubbles { display: flex; align-items: center; gap: 4px; margin-bottom: 5px; min-height: 26px; }
+.lstrip__bunit { display: flex; flex-direction: column; gap: 2px; justify-content: center; }
+.lstrip__bubble {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 50%;
+  font-family: var(--grot); font-size: 11px; font-weight: 700; letter-spacing: -0.02em;
+  border: 1.5px solid rgba(255,255,255,0.85); box-shadow: 0 1px 2px rgba(30,58,76,0.25);
+}
+.lstrip__bubble--sm { width: 15px; height: 15px; font-size: 7.5px; border-width: 1px; }
 .lstrip__legline { font-family: var(--grot); font-size: 12px; font-weight: 500; color: var(--ink); line-height: 1.25; }
 .lstrip__legmeta { font-family: var(--grot); font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
 .lstrip__legtimes { font-family: var(--grot); font-size: 10.5px; color: var(--ink-faint); margin-top: 3px; }

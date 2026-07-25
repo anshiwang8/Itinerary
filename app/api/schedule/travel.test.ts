@@ -187,11 +187,98 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(leg.mode, "transit");
       assert.deepStrictEqual(leg.transit, {
         lineName: "506 Carlton",
+        shortName: "506",
+        color: null, // unpublished in this fixture — keep-on-missing
+        textColor: null,
+        vehicle: null,
         headsign: "East - Main Street Station",
         stopCount: 4,
         departStop: "Ossington Ave",
         arriveStop: "Yonge St",
       });
+      // the singular field IS the first segment — same object shape, so
+      // old readers and the new array can't disagree
+      assert.deepStrictEqual(leg.transitSegments, [leg.transit]);
+    },
+  ],
+  [
+    "MULTI-RIDE extraction: every transit step survives, in riding order, colors carried",
+    () => {
+      // the shape extractTransitSummary used to throw away: a two-transfer
+      // journey (bus → subway → streetcar) with walk steps interleaved.
+      // Line data mirrors a real probe: TTC colors on the first two, the
+      // third publishes no color (keep-on-missing → nulls).
+      const res: ComputeRoutesResponse = {
+        routes: [
+          {
+            duration: "4272s",
+            distanceMeters: 14200,
+            polyline: { encodedPolyline: "enc_multi" },
+            legs: [
+              {
+                steps: [
+                  { transitDetails: undefined }, // walk to the stop
+                  {
+                    transitDetails: {
+                      headsign: "Eglinton Station",
+                      stopCount: 15,
+                      transitLine: {
+                        name: "Ossington",
+                        nameShort: "63",
+                        color: "#ed1c24",
+                        textColor: "#ffffff",
+                        vehicle: { type: "BUS" },
+                      },
+                    },
+                  },
+                  { transitDetails: undefined }, // transfer walk
+                  {
+                    transitDetails: {
+                      headsign: "Kennedy",
+                      stopCount: 20,
+                      transitLine: {
+                        name: "Line 2 Bloor–Danforth",
+                        nameShort: "2",
+                        color: "#009247",
+                        textColor: "#ffffff",
+                        vehicle: { type: "SUBWAY" },
+                      },
+                    },
+                  },
+                  {
+                    transitDetails: {
+                      headsign: "Neville Park",
+                      stopCount: 6,
+                      transitLine: { name: "501 Queen", nameShort: "501" },
+                    },
+                  },
+                  { transitDetails: undefined }, // walk to the venue
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      const leg = buildLeg(0, res, null);
+      assert.strictEqual(leg.mode, "transit");
+      assert.strictEqual(leg.transitSegments?.length, 3, "all three rides must survive");
+      assert.deepStrictEqual(
+        leg.transitSegments!.map((s) => s.lineName),
+        // middle line keeps its bare name: the "avoid 501 501 Queen"
+        // dedup sees "2" already inside "Line 2 Bloor–Danforth"
+        ["63 Ossington", "Line 2 Bloor–Danforth", "501 Queen"],
+        "riding order preserved"
+      );
+      assert.deepStrictEqual(
+        leg.transitSegments!.map((s) => [s.shortName, s.color, s.vehicle]),
+        [
+          ["63", "#ed1c24", "BUS"],
+          ["2", "#009247", "SUBWAY"],
+          ["501", null, null], // no published color/vehicle → nulls, never dropped
+        ]
+      );
+      // compat: the singular field is still exactly the FIRST ride
+      assert.deepStrictEqual(leg.transit, leg.transitSegments![0]);
     },
   ],
   [

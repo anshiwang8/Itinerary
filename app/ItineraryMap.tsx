@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 import { formatStopTime } from "./lib/timeLabels";
+import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
 
 // Printed-cartography map: warm-paper Google styling (inline JSON, so no
 // Cloud map id), ink-navy route lines, and an HTML overlay layer for the
@@ -22,6 +23,8 @@ export interface MapStop {
   polylineToNext?: string | null;
   /** transit line detail for the leg leaving this stop */
   legLabel?: string | null;
+  /** every ride of that leg, in order (transfer bubbles) */
+  legSegments?: BubbleSegment[] | null;
   status?: "upcoming" | "active" | "completed" | "skipped";
   /** replanned in this session → acid green */
   changed?: boolean;
@@ -37,6 +40,7 @@ export interface MapHome {
   legModeToNext?: "transit" | "walk" | "unknown";
   polylineToNext?: string | null;
   legLabel?: string | null;
+  legSegments?: BubbleSegment[] | null;
   leaveBy?: string | null;
 }
 
@@ -243,15 +247,15 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     px((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
 
   // transit leg labels pinned to each leg's midpoint (home leg + inter-stop)
-  const legLabels: { key: string; x: number; y: number; text: string }[] = [];
+  const legLabels: { key: string; x: number; y: number; text: string; segs: BubbleSegment[] }[] = [];
   if (home && stops[0] && home.legLabel) {
     const p = midPx(home, stops[0]);
-    if (p) legLabels.push({ key: "home", x: p.x, y: p.y, text: home.legLabel });
+    if (p) legLabels.push({ key: "home", x: p.x, y: p.y, text: home.legLabel, segs: home.legSegments ?? [] });
   }
   for (let i = 0; i < stops.length - 1; i++) {
     if (stops[i].legLabel) {
       const p = midPx(stops[i], stops[i + 1]);
-      if (p) legLabels.push({ key: stops[i].id, x: p.x, y: p.y, text: stops[i].legLabel! });
+      if (p) legLabels.push({ key: stops[i].id, x: p.x, y: p.y, text: stops[i].legLabel!, segs: stops[i].legSegments ?? [] });
     }
   }
 
@@ -261,6 +265,28 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
       <div className="ov-layer">
         {legLabels.map((l) => (
           <div key={l.key} className="leglab" style={{ left: l.x, top: l.y }}>
+            {l.segs.length > 0 && (
+              // the strip's stacked-bubble treatment at map scale: pairs
+              // of small circles, odd leftover full-size. Small circles
+              // are colour-only dots (a 10px circle can't carry text) —
+              // the full line names stay in the title tooltip.
+              <span className="leglab__bubbles" aria-hidden="true">
+                {groupBubbleUnits(l.segs).map((unit, i) => (
+                  <span key={i} className="leglab__bunit">
+                    {unit.map((seg, j) => (
+                      <span
+                        key={j}
+                        className={unit.length === 2 ? "leglab__bubble leglab__bubble--sm" : "leglab__bubble"}
+                        style={{ background: seg.color || "var(--ink)", color: seg.textColor || "#FFFFFF" }}
+                        title={seg.lineName}
+                      >
+                        {unit.length === 2 ? "" : bubbleLabel(seg)}
+                      </span>
+                    ))}
+                  </span>
+                ))}
+              </span>
+            )}
             {l.text}
           </div>
         ))}

@@ -130,11 +130,23 @@ function WeatherIcon({ condition, precip }: { condition: string | null; precip: 
   );
 }
 
-// transit-leg detail line, e.g. "505 Dundas · 11 stops · 22 min"
+// transit-leg detail line, e.g. "505 Dundas · 11 stops · 22 min" — or,
+// on a multi-ride leg, "1 transfer · 47 min": the first ride's line name
+// and stop count would misread as the whole journey's (the bubbles carry
+// the line identities)
 function legDetail(leg?: TravelLeg | null): string | null {
   if (!leg || leg.mode !== "transit" || !leg.transit) return null;
+  const n = leg.transitSegments?.length ?? 1;
+  if (n > 1) return `${n - 1} transfer${n > 2 ? "s" : ""} · ${leg.totalMinutes} min`;
   const t = leg.transit;
   return `${t.lineName}${t.stopCount ? ` · ${t.stopCount} stops` : ""} · ${leg.totalMinutes} min`;
+}
+
+// the map label's bubble row — pre-segments stored plans fall back to
+// the single ride, exactly like the strip
+function legSegments(leg?: TravelLeg | null) {
+  if (!leg || leg.mode !== "transit") return null;
+  return leg.transitSegments ?? (leg.transit ? [leg.transit] : null);
 }
 
 function stopsFromSchedule(sched: ScheduledStop[], pools: Pools): MapStop[] {
@@ -155,6 +167,7 @@ function stopsFromSchedule(sched: ScheduledStop[], pools: Pools): MapStop[] {
       legModeToNext: st.travelToNext?.mode,
       polylineToNext: st.travelToNext?.encodedPolyline ?? null,
       legLabel: legDetail(st.travelToNext),
+      legSegments: legSegments(st.travelToNext),
     });
   }
   return out;
@@ -175,6 +188,7 @@ function stopsFromItinerary(it: Itinerary): MapStop[] {
       legModeToNext: s.travelToNext?.mode,
       polylineToNext: s.travelToNext?.encodedPolyline ?? null,
       legLabel: legDetail(s.travelToNext),
+      legSegments: legSegments(s.travelToNext),
     }));
 }
 
@@ -1291,6 +1305,7 @@ export default function Home() {
       legModeToNext: homeLeg.mode,
       polylineToNext: homeLeg.encodedPolyline,
       legLabel: legDetail(homeLeg),
+      legSegments: legSegments(homeLeg),
       leaveBy,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1340,6 +1355,8 @@ export default function Home() {
               departStop: leg.transit?.departStop ?? null,
               boardISO: s.end_time,
               arriveISO: next?.start_time ?? null,
+              // pre-segments stored plans fall back to the single ride
+              segments: leg.transitSegments ?? (leg.transit ? [leg.transit] : null),
             }
           : null,
       };
@@ -1366,6 +1383,7 @@ export default function Home() {
         departStop: homeLeg.transit?.departStop ?? null,
         boardISO: leaveISO,
         arriveISO: first?.start_time ?? null,
+        segments: homeLeg.transitSegments ?? (homeLeg.transit ? [homeLeg.transit] : null),
       },
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

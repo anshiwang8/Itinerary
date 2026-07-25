@@ -297,7 +297,8 @@ const cases: Array<[string, () => Promise<void>]> = [
         distanceMeters: 5200,
         encodedPolyline: "enc_home",
         transit: {
-          lineName: "501 Queen", headsign: "West", stopCount: 9,
+          lineName: "501 Queen", shortName: "501", color: null, textColor: null,
+          vehicle: null, headsign: "West", stopCount: 9,
           departStop: "Queen St West at University Ave",
           arriveStop: "Queen St West at Ossington Ave",
         },

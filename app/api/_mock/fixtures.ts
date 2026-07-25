@@ -424,6 +424,20 @@ export function mockLeg(
     };
   }
   const raw = Math.max(8, Math.round(km * 4));
+  // one ride, mirrored into transitSegments exactly as the real
+  // extraction does (transit === transitSegments[0]) — the fixture layer
+  // supplies DATA, the bubble grouping is LOGIC and runs for real
+  const ride = {
+    lineName: "505 Fixture",
+    shortName: "505",
+    color: "#DA291C",
+    textColor: "#FFFFFF",
+    vehicle: "TRAM",
+    headsign: "Mockbound",
+    stopCount: Math.max(2, Math.round(km * 3)),
+    departStop: "Fixture St at Mock Ave",
+    arriveStop: "Ossington Stand-In",
+  };
   return {
     fromIndex,
     mode: "transit",
@@ -432,13 +446,8 @@ export function mockLeg(
     totalMinutes: raw + 5,
     distanceMeters,
     encodedPolyline: null,
-    transit: {
-      lineName: "505 Fixture",
-      headsign: "Mockbound",
-      stopCount: Math.max(2, Math.round(km * 3)),
-      departStop: "Fixture St at Mock Ave",
-      arriveStop: "Ossington Stand-In",
-    },
+    transit: ride,
+    transitSegments: [ride],
   };
 }
 

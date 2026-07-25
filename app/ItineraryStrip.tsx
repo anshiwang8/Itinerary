@@ -2,6 +2,7 @@
 
 import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 import { resolveCategory } from "./api/schedule/durations";
+import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
 
 // Horizontal itinerary strip — the primary surface, sitting just under
 // the search bar. Reads left to right like a transit-app trip view:
@@ -19,6 +20,9 @@ export interface StripLeg {
   departStop?: string | null;
   boardISO?: string | null;
   arriveISO?: string | null;
+  /** every ride of the leg in order (transfer bubbles); absent/empty on
+   * walk legs and on plans stored before segments existed */
+  segments?: BubbleSegment[] | null;
 }
 
 export interface StripStop {
@@ -92,18 +96,53 @@ function TransitIcon({ mode }: { mode: StripLeg["mode"] }) {
   );
 }
 
+/** The stacked-mini-circle treatment: pairs of small circles, an odd
+ *  leftover as one full-size circle — grouping shared with the map via
+ *  transitBubbles. Line colour comes from the agency when published. */
+function BubbleStack({ segments }: { segments: BubbleSegment[] }) {
+  return (
+    <div className="lstrip__bubbles" aria-hidden="true">
+      {groupBubbleUnits(segments).map((unit, i) => (
+        <div key={i} className={unit.length === 2 ? "lstrip__bunit" : "lstrip__bunit lstrip__bunit--single"}>
+          {unit.map((seg, j) => (
+            <span
+              key={j}
+              className={unit.length === 2 ? "lstrip__bubble lstrip__bubble--sm" : "lstrip__bubble"}
+              style={{
+                background: seg.color || "var(--ink)",
+                color: seg.textColor || "#FFFFFF",
+              }}
+              title={seg.lineName}
+            >
+              {bubbleLabel(seg)}
+            </span>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
   const isTransit = leg.mode === "transit";
+  const segments = isTransit ? leg.segments ?? [] : [];
   return (
     <div className="lstrip__leg" aria-label={isTransit ? "transit leg" : "walking leg"}>
-      <div className="lstrip__legicon">
-        <TransitIcon mode={leg.mode} />
-      </div>
+      {segments.length > 0 ? (
+        <BubbleStack segments={segments} />
+      ) : (
+        <div className="lstrip__legicon">
+          <TransitIcon mode={leg.mode} />
+        </div>
+      )}
       {isTransit ? (
         <>
           <div className="lstrip__legline">
-            {leg.lineName ?? "transit"}
-            {leg.stopCount ? ` · ${leg.stopCount} stops` : ""}
+            {segments.length > 1
+              ? // stopCount is the FIRST ride's — printing it next to a
+                // transfer count would misread as the whole journey's
+                `${segments.length - 1} transfer${segments.length > 2 ? "s" : ""}`
+              : `${leg.lineName ?? "transit"}${leg.stopCount ? ` · ${leg.stopCount} stops` : ""}`}
           </div>
           <div className="lstrip__legmeta">
             {leg.totalMinutes} min{leg.marginMinutes ? ` · incl ${leg.marginMinutes} buffer` : ""}

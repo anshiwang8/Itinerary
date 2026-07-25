@@ -59,7 +59,18 @@ export interface ComputeRoutesResponse {
         transitDetails?: {
           headsign?: string;
           stopCount?: number;
-          transitLine?: { name?: string; nameShort?: string };
+          // color/textColor/vehicle arrive under the SAME field mask —
+          // routes.legs.steps.transitDetails is a parent path, and Google
+          // returns the full nested object for it (verified live: TTC
+          // Line 1 came back color #f2c10b, vehicle SUBWAY). No mask
+          // change was needed to surface them.
+          transitLine?: {
+            name?: string;
+            nameShort?: string;
+            color?: string;
+            textColor?: string;
+            vehicle?: { type?: string };
+          };
           stopDetails?: {
             departureStop?: { name?: string };
             arrivalStop?: { name?: string };
@@ -72,6 +83,15 @@ export interface ComputeRoutesResponse {
 
 export interface TransitSummary {
   lineName: string;
+  /** the line's own short designation ("1", "63", "501") — the bubble
+   * label; null when the agency publishes no short name */
+  shortName: string | null;
+  /** the agency's line colour ("#f2c10b") / label text colour; null when
+   * unpublished — the UI falls back to its own palette */
+  color: string | null;
+  textColor: string | null;
+  /** vehicle kind ("SUBWAY", "BUS", "TRAM"…); null when unpublished */
+  vehicle: string | null;
   headsign: string;
   stopCount: number | null;
   departStop: string;
@@ -88,8 +108,16 @@ export interface TravelLeg {
   distanceMeters: number | null;
   /** real route geometry for the map; null when no route data */
   encodedPolyline: string | null;
-  /** first transit ride of the leg — only on transit-labeled legs */
+  /** FIRST transit ride of the leg — kept as the first element of
+   * transitSegments on purpose: persisted itineraries and existing
+   * callers (the disruption banner's line-name lookup, the leg detail
+   * label) read it, and changing its type would force a store migration
+   * for zero gain. New readers should prefer transitSegments. */
   transit?: TransitSummary;
+  /** EVERY transit ride of the leg, in riding order — a two-transfer
+   * journey is three segments. Absent on walk legs, on pre-existing
+   * stored plans, and when the route carried no transit detail. */
+  transitSegments?: TransitSummary[];
 }
 
 function parseDurationMinutes(duration?: string): number | null {
@@ -99,9 +127,14 @@ function parseDurationMinutes(duration?: string): number | null {
   return Math.ceil(parseFloat(m[1]) / 60);
 }
 
-function extractTransitSummary(
+// EVERY transit ride of the route, in riding order. This used to return
+// on the FIRST step with transitDetails — any transfer after it was
+// discarded before the data ever reached the UI, which is why the strip
+// could only ever name one line per leg.
+function extractTransitSegments(
   route: NonNullable<ComputeRoutesResponse["routes"]>[number]
-): TransitSummary | null {
+): TransitSummary[] {
+  const segments: TransitSummary[] = [];
   for (const leg of route.legs ?? []) {
     for (const step of leg.steps ?? []) {
       const td = step.transitDetails;
@@ -113,16 +146,20 @@ function extractTransitSummary(
         line.nameShort && line.name?.includes(line.nameShort)
           ? line.name
           : [line.nameShort, line.name].filter(Boolean).join(" ").trim();
-      return {
+      segments.push({
         lineName: lineName || "transit",
+        shortName: line.nameShort ?? null,
+        color: line.color ?? null,
+        textColor: line.textColor ?? null,
+        vehicle: line.vehicle?.type ?? null,
         headsign: td.headsign ?? "",
         stopCount: td.stopCount ?? null,
         departStop: td.stopDetails?.departureStop?.name ?? "",
         arriveStop: td.stopDetails?.arrivalStop?.name ?? "",
-      };
+      });
     }
   }
-  return null;
+  return segments;
 }
 
 interface ParsedRoute {
@@ -131,6 +168,7 @@ interface ParsedRoute {
   distanceMeters: number | null;
   encodedPolyline: string | null;
   transit: TransitSummary | null;
+  transitSegments: TransitSummary[];
 }
 
 function parseRoute(
@@ -145,14 +183,17 @@ function parseRoute(
       distanceMeters: null,
       encodedPolyline: null,
       transit: null,
+      transitSegments: [],
     };
   }
+  const segments = extractTransitSegments(route);
   return {
     ok: true,
     rawMinutes,
     distanceMeters: route.distanceMeters ?? null,
     encodedPolyline: route.polyline?.encodedPolyline ?? null,
-    transit: extractTransitSummary(route),
+    transit: segments[0] ?? null,
+    transitSegments: segments,
   };
 }
 
@@ -212,6 +253,7 @@ export function buildLeg(
       distanceMeters: t.distanceMeters,
       encodedPolyline: t.encodedPolyline,
       ...(t.transit ? { transit: t.transit } : {}),
+      ...(t.transitSegments.length > 0 ? { transitSegments: t.transitSegments } : {}),
     };
   }
 
