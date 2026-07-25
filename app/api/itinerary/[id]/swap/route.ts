@@ -6,11 +6,12 @@ import { swapStop } from "../../swap";
 // body: { stopIndex: number, refinement: string, now?: ISO }
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   let itinerary;
   try {
-    itinerary = await loadItinerary(params.id);
+    itinerary = await loadItinerary(id);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -19,7 +20,7 @@ export async function POST(
   }
   if (!itinerary) {
     return NextResponse.json(
-      { error: `No itinerary with id "${params.id}".` },
+      { error: `No itinerary with id "${id}".` },
       { status: 404 }
     );
   }

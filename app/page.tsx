@@ -711,7 +711,7 @@ export default function Home() {
 
       let sels = orderedSels;
       let { stops, legs, hl } = await planOnce(sels);
-      let adaptedNames: string[] = [];
+      const adaptedNames: string[] = [];
 
       if (!opts.skipArrivalCheck) {
         let closed = closedOnArrival(stops);

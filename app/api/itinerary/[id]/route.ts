@@ -6,8 +6,9 @@ import { loadItinerary, saveItinerary, withStatuses } from "../store";
 // backbone of reroute testing: any instant can be simulated.
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   const nowParam = request.nextUrl.searchParams.get("now");
   let t = new Date();
   if (nowParam !== null) {
@@ -22,10 +23,10 @@ export async function GET(
   }
 
   try {
-    const itinerary = await loadItinerary(params.id);
+    const itinerary = await loadItinerary(id);
     if (!itinerary) {
       return NextResponse.json(
-        { error: `No itinerary with id "${params.id}".` },
+        { error: `No itinerary with id "${id}".` },
         { status: 404 }
       );
     }

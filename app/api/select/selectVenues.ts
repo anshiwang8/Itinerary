@@ -294,7 +294,7 @@ export async function selectVenues(
   }
 
   const liveSlotCategories = liveSlots.map((s) => s.category);
-  let problems = findProblems(parsedOut.selections, pools, liveSlotCategories);
+  const problems = findProblems(parsedOut.selections, pools, liveSlotCategories);
   if (problems.length > 0) {
     // One correction retry with the problems spelled out.
     messages.push({ role: "assistant", content: raw });
