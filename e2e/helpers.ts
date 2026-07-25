@@ -78,7 +78,18 @@ export async function swapOn(page: Page, venueName: string, refinement: string):
   const input = page.locator(".lstrip__swapinput");
   await expect(input, `swap input under "${venueName}"`).toBeVisible();
   await input.fill(refinement);
-  await page.locator(".lstrip__swapgo").click();
+  // The first swap in a fresh Next dev server cold-compiles the large engine
+  // route. Wait for the mutation response itself so a page assertion does not
+  // cancel that request halfway through compilation on slower CI machines.
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        /\/api\/itinerary\/[^/]+\/swap$/.test(response.url()),
+      { timeout: 45_000 }
+    ),
+    page.locator(".lstrip__swapgo").click(),
+  ]);
 }
 
 /** The strip card whose venue name contains `venueName`. */

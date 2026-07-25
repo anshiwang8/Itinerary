@@ -64,14 +64,14 @@ export async function POST(
           );
         }
         const result = await swapStop(proposal, stopIndex, refinement, now);
-        return { value: result };
+        return { value: result, changed: result.swapped };
       },
       { expectedVersion, maxAttempts: 2 }
     );
     if (!updated) {
       throw new ApiError(404, "itinerary_not_found", "That itinerary was not found.");
     }
-    // Even refusals can ratchet statuses; the proposal commits as one CAS.
+    // Successful proposals commit as one CAS; refusals do not bump version.
     return apiJson(
       ctx,
       { ...updated.value, version: updated.itinerary.version },

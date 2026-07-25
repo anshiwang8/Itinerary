@@ -377,20 +377,19 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "TIME shift never moves a locked downstream stop",
+    "TIME shift refuses when it would collide with a locked downstream stop",
     async () => {
       const it = mkItinerary();
       const now = new Date(T(18, 0));
       it.stops[2].locked = true; // dessert locked (ratchet)
+      const before = JSON.stringify(it);
       const res = await swapStop(
         it, 1, "a bit later", now,
         mkDeps({ time: { mode: "relative", deltaMinutes: 30 }, legMin: 10 })
       );
-      assert.ok(res.swapped);
-      if (!res.swapped) return;
-      assert.strictEqual(ms(it.stops[1].start_time), ms(T(21, 30))); // bar moved
-      assert.strictEqual(it.stops[2].start_time, T(22, 20)); // locked dessert untouched
-      assert.ok(!res.downstreamShifted.includes(2));
+      assert.strictEqual(res.swapped, false);
+      if (!res.swapped) assert.match(res.reason, /locked stop/i);
+      assert.strictEqual(JSON.stringify(it), before);
     },
   ],
   [
@@ -521,20 +520,19 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "DURATION never moves a locked downstream stop",
+    "DURATION refuses when its new end would overlap a locked stop",
     async () => {
       const it = mkItinerary();
       const now = new Date(T(18, 0));
       it.stops[2].locked = true;
+      const before = JSON.stringify(it);
       const res = await swapStop(
         it, 1, "stay longer", now,
         mkDeps({ duration: { mode: "relative", deltaMinutes: 30 }, legMin: 10 })
       );
-      assert.ok(res.swapped);
-      if (!res.swapped) return;
-      assert.strictEqual(ms(it.stops[1].end_time), ms(T(22, 40))); // bar extended
-      assert.strictEqual(it.stops[2].start_time, T(22, 20)); // locked dessert untouched
-      assert.ok(!res.downstreamShifted.includes(2));
+      assert.strictEqual(res.swapped, false);
+      if (!res.swapped) assert.match(res.reason, /locked stop/i);
+      assert.strictEqual(JSON.stringify(it), before);
     },
   ],
   [
@@ -977,34 +975,23 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "§2.3: a venue swap stops reflowing AT a locked stop, never shifts past it",
+    "§2.3: a venue swap refuses an overlapping locked boundary atomically",
     async () => {
       // Contrived but reachable via dev time-travel + a prior time swap: a
-      // LOCKED stop sits between the swapped stop and a later one. finalize
-      // used `continue`, so it skipped the locked stop and kept shifting the
-      // ones beyond it — the ratchet held, but the chain stopped being
-      // consistent. resettleTail has always used `break` here.
+      // locked stop sits between the swapped stop and a later one.
       const it = mkItinerary();
       const now = new Date(T(18, 0));
       // hand-lock the MIDDLE stop while the first is still upcoming
       withStatuses(it, now);
       it.stops[1].locked = true;
-      const dessertStart = it.stops[2].start_time;
-      const dessertEnd = it.stops[2].end_time;
+      const before = JSON.stringify(it);
       // swap stop 0 for a LONGER kind of stop (museum = 120 vs dinner's
       // 105) so the tail genuinely overflows and the reflow loop runs
       const res = await swapStop(it, 0, "a museum instead", now,
         mkDeps({ path: "research", newCategory: "museum", legMin: 10 }));
-      assert.ok(res.swapped);
-      if (!res.swapped) return;
-      // the locked stop is untouched (the ratchet, as always)...
-      assert.strictEqual(it.stops[1].id, "b1");
-      assert.strictEqual(it.stops[1].start_time, T(21, 0));
-      // ...and so is everything BEYOND it — the reflow stopped at the lock
-      // rather than stepping over it
-      assert.strictEqual(it.stops[2].start_time, dessertStart);
-      assert.strictEqual(it.stops[2].end_time, dessertEnd);
-      assert.deepStrictEqual(res.downstreamShifted, []);
+      assert.strictEqual(res.swapped, false);
+      if (!res.swapped) assert.match(res.reason, /locked stop/i);
+      assert.strictEqual(JSON.stringify(it), before);
     },
   ],
   [

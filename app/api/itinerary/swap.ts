@@ -545,6 +545,10 @@ function placeOf(stop: ItineraryStop): Place {
     id: stop.id ?? "",
     displayName: stop.name ? { text: stop.name } : undefined,
     rating: stop.rating,
+    priceLevel: stop.priceLevel,
+    editorialSummary: stop.description
+      ? { text: stop.description }
+      : undefined,
     location: stop.location,
     currentOpeningHours: stop.currentOpeningHours,
   };
@@ -555,6 +559,134 @@ function placeOf(stop: ItineraryStop): Place {
 async function weatherFor(itinerary: Itinerary, deps: SwapDeps): Promise<WeatherHour[] | null> {
   const origin = itinerary.home?.location;
   return origin ? deps.getWeather(origin.latitude, origin.longitude) : null;
+}
+
+function cloneProposal(itinerary: Itinerary): Itinerary {
+  return JSON.parse(JSON.stringify(itinerary)) as Itinerary;
+}
+
+function validLocation(location: LatLng | null | undefined): location is LatLng {
+  return (
+    !!location &&
+    Number.isFinite(location.latitude) &&
+    Number.isFinite(location.longitude) &&
+    location.latitude >= -90 &&
+    location.latitude <= 90 &&
+    location.longitude >= -180 &&
+    location.longitude <= 180
+  );
+}
+
+function validLeg(leg: TravelLeg | null | undefined): leg is TravelLeg {
+  return !!leg && Number.isFinite(leg.totalMinutes) && leg.totalMinutes >= 0;
+}
+
+async function proposalLeg(
+  deps: SwapDeps,
+  origin: LatLng,
+  destination: LatLng,
+  fromIndex: number,
+  departureTime: string | undefined
+): Promise<TravelLeg | null> {
+  try {
+    const leg = await deps.getSingleLeg(
+      origin,
+      destination,
+      fromIndex,
+      departureTime,
+      false
+    );
+    return validLeg(leg) ? leg : null;
+  } catch {
+    return null;
+  }
+}
+
+function usableForProposal(
+  place: Place,
+  category: string,
+  base: ParsedPrompt,
+  weather: WeatherHour[] | null,
+  now: Date,
+  when: Date,
+  timeZone: string,
+  deps: SwapDeps
+): boolean {
+  if (!validLocation(place.location)) return false;
+  const parsed = scoped(base, {}, category);
+  const { pools } = filterPools(
+    { [category]: [place] },
+    parsed,
+    weather,
+    now,
+    when,
+    timeZone
+  );
+  return (
+    (pools[category] ?? []).some((candidate) => candidate.id === place.id) &&
+    deps.isUsableAt(place, when, category, timeZone)
+  );
+}
+
+interface AnchorInbound {
+  leg: TravelLeg;
+  prevStop: ItineraryStop | null;
+}
+
+async function planAnchorInbound(
+  itinerary: Itinerary,
+  timedIdx: number[],
+  stopIndex: number,
+  anchorLoc: LatLng | null | undefined,
+  anchorStart: Date,
+  deps: SwapDeps
+): Promise<AnchorInbound | null> {
+  if (!validLocation(anchorLoc) || !Number.isFinite(anchorStart.getTime())) {
+    return null;
+  }
+  const timedPosition = timedIdx.indexOf(stopIndex);
+  if (timedPosition < 0) return null;
+  const prevStop =
+    timedPosition > 0 ? itinerary.stops[timedIdx[timedPosition - 1]] : null;
+  const origin = prevStop?.location ?? itinerary.home?.location ?? HOME.location;
+  if (!validLocation(origin)) return null;
+  if (prevStop && (!prevStop.end_time || !validLocation(prevStop.location))) {
+    return null;
+  }
+  if (
+    prevStop?.end_time &&
+    !Number.isFinite(new Date(prevStop.end_time).getTime())
+  ) {
+    return null;
+  }
+  const leg = await proposalLeg(
+    deps,
+    origin,
+    anchorLoc,
+    prevStop ? timedPosition - 1 : HOME_LEG_INDEX,
+    prevStop?.end_time ?? undefined
+  );
+  if (!leg) return null;
+  if (
+    prevStop?.end_time &&
+    new Date(prevStop.end_time).getTime() + leg.totalMinutes * 60_000 >
+      anchorStart.getTime()
+  ) {
+    return null;
+  }
+  return { leg, prevStop };
+}
+
+function commitAnchorInbound(
+  itinerary: Itinerary,
+  inbound: AnchorInbound
+): void {
+  if (inbound.prevStop) {
+    inbound.prevStop.travelToNext = inbound.leg;
+    inbound.prevStop.travelMinutesToNext = inbound.leg.totalMinutes;
+  } else {
+    itinerary.homeLeg = { ...inbound.leg, fromIndex: HOME_LEG_INDEX };
+  }
 }
 
 function snap(s: ItineraryStop): Snap {
@@ -577,11 +709,11 @@ export async function swapStop(
   depsIn: Partial<SwapDeps> = {}
 ): Promise<SwapResult> {
   const deps = { ...realDeps(), ...depsIn };
+  const work = cloneProposal(itinerary);
+  withStatuses(work, now);
+  const floor = floorTime(work, now);
 
-  withStatuses(itinerary, now);
-  const floor = floorTime(itinerary, now);
-
-  const target = itinerary.stops[stopIndex];
+  const target = work.stops[stopIndex];
   if (!target) return { swapped: false, reason: "That stop doesn't exist." };
   if (!target.start_time || target.id === null) {
     return { swapped: false, reason: "That stop has no venue to swap." };
@@ -595,9 +727,10 @@ export async function swapStop(
 
   // no stored parse → a minimal fallback that invents no location, and an
   // honest refusal when we can't even know the city (§3.1)
-  const base = itinerary.parsed ?? fallbackParsedFor(itinerary);
+  const base = work.parsed ?? fallbackParsedFor(work);
   if (!base) return { swapped: false, reason: UNKNOWN_LOCATION_MESSAGE };
   const interp = await deps.interpret(base, target.category, target.start_time, refinement);
+  const weather = await weatherFor(work, deps);
 
   // observability at the apply step (like the weather-gate log): parsed
   // intent + the stop's start/duration before vs after, so a swap that
@@ -607,14 +740,46 @@ export async function swapStop(
 
   let result: SwapResult;
   if (interp.intent === "time") {
-    result = await timeChange(itinerary, stopIndex, target, interp, base, floor, now, deps);
+    result = await timeChange(
+      work,
+      stopIndex,
+      target,
+      interp,
+      base,
+      floor,
+      now,
+      deps,
+      weather
+    );
   } else if (interp.intent === "duration") {
-    result = await durationChange(itinerary, stopIndex, target, interp, base, floor, now, deps);
+    result = await durationChange(
+      work,
+      stopIndex,
+      target,
+      interp,
+      base,
+      floor,
+      now,
+      deps,
+      weather
+    );
   } else {
-    result = await venueSwap(itinerary, stopIndex, target, interp, base, floor, now, deps, refinement);
+    result = await venueSwap(
+      work,
+      stopIndex,
+      target,
+      interp,
+      base,
+      floor,
+      now,
+      deps,
+      refinement,
+      weather
+    );
   }
 
-  const after = result.swapped ? itinerary.stops[result.stopIndex] : null;
+  if (result.swapped) Object.assign(itinerary, work);
+  const after = result.swapped ? work.stops[result.stopIndex] : null;
   logEvent("info", "swap_applied", {
     intent: interp.intent,
     outcome: result.swapped ? "swapped" : "refused",
@@ -671,7 +836,8 @@ async function durationChange(
   base: ParsedPrompt,
   floor: Date,
   now: Date,
-  deps: SwapDeps
+  deps: SwapDeps,
+  weather: WeatherHour[] | null
 ): Promise<SwapResult> {
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const category = target.category;
@@ -685,20 +851,66 @@ async function durationChange(
   const { total: newTotal, currentTotal } = resolved;
 
   const startISO = target.start_time!;
+  const start = new Date(startISO);
+  if (
+    !usableForProposal(
+      placeOf(target),
+      category,
+      base,
+      weather,
+      now,
+      start,
+      tz,
+      deps
+    )
+  ) {
+    return {
+      swapped: false,
+      reason: `${target.name} is no longer usable at ${clockLabel(start, tz)}.`,
+    };
+  }
   const anchorEnd = new Date(new Date(startISO).getTime() + newTotal * 60_000);
 
   const timedIdx = timedIndexes(itinerary);
+  const anchorInbound = await planAnchorInbound(
+    itinerary,
+    timedIdx,
+    stopIndex,
+    target.location,
+    start,
+    deps
+  );
+  if (!anchorInbound) {
+    return {
+      swapped: false,
+      reason: `The route into ${target.name} no longer fits its committed start.`,
+    };
+  }
   const used = new Set<string>(itinerary.stops.map((s) => s.id).filter((id): id is string => !!id));
 
   // resettle downstream from the new end (start + venue unchanged, so the
   // inbound leg into this stop is untouched)
-  const settle = await resettleTail(itinerary, stopIndex, timedIdx, anchorEnd, target.location ?? null, floor, now, base, deps, used);
+  const settle = await resettleTail(
+    itinerary,
+    stopIndex,
+    timedIdx,
+    anchorEnd,
+    target.location ?? null,
+    floor,
+    now,
+    base,
+    deps,
+    used,
+    weather
+  );
   if (!settle.ok) return { swapped: false, reason: settle.reason };
 
   const before = snap(target);
-  const anchorOutbound = settle.changes[0]?.inbound ?? target.travelToNext ?? null;
+  const anchorOutbound =
+    settle.changes[0]?.inbound ?? settle.terminalInbound ?? null;
   itinerary.stops[stopIndex] = buildStop(category, startISO, { keep: target }, anchorOutbound, newTotal, tz);
-  commitTail(itinerary, settle.changes);
+  commitAnchorInbound(itinerary, anchorInbound);
+  commitTail(itinerary, settle.changes, settle.terminalInbound);
   rebuildLegs(itinerary);
   withStatuses(itinerary, now);
 
@@ -715,7 +927,9 @@ async function durationChange(
     before,
     after: snap(itinerary.stops[stopIndex]),
     reason,
-    downstreamShifted: settle.changes.map((c) => c.stopIndex),
+    downstreamShifted: settle.changes
+      .filter((change) => change.moved)
+      .map((change) => change.stopIndex),
   };
 }
 
@@ -734,7 +948,8 @@ async function venueSwap(
   floor: Date,
   now: Date,
   deps: SwapDeps,
-  refinement: string
+  refinement: string,
+  weather: WeatherHour[] | null
 ): Promise<SwapResult> {
   const poolKey = interp.path === "research" ? interp.category : target.category;
   const searchParsed =
@@ -746,8 +961,14 @@ async function venueSwap(
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const rawPools = await deps.searchPools(searchParsed, [poolKey]);
   // a swap must not move an outdoor stop into the rain either (§7.6)
-  const wx = await weatherFor(itinerary, deps);
-  const { pools: filtered } = filterPools(rawPools, judgeParsed, wx, now, new Date(target.start_time!), tz);
+  const { pools: filtered } = filterPools(
+    rawPools,
+    judgeParsed,
+    weather,
+    now,
+    new Date(target.start_time!),
+    tz
+  );
 
   // never re-pick the rejected venue, nor anything already used elsewhere
   const excluded = new Set<string>(
@@ -755,7 +976,9 @@ async function venueSwap(
       .map((s, i) => (i === stopIndex ? target.id : s.id))
       .filter((id): id is string => id !== null)
   );
-  let candidates = (filtered[poolKey] ?? []).filter((p) => !excluded.has(p.id));
+  let candidates = (filtered[poolKey] ?? []).filter(
+    (place) => !excluded.has(place.id) && validLocation(place.location)
+  );
   if (candidates.length === 0) {
     return { swapped: false, reason: `Couldn't find another ${target.category} that fits — keeping ${target.name}.` };
   }
@@ -804,7 +1027,22 @@ async function venueSwap(
     };
   }
 
-  return finalize(itinerary, stopIndex, target, pick, sel, poolKey, target.start_time!, now, deps, interp.path, sel.reason);
+  return finalize(
+    itinerary,
+    stopIndex,
+    target,
+    pick,
+    sel,
+    poolKey,
+    target.start_time!,
+    now,
+    deps,
+    interp.path,
+    sel.reason,
+    base,
+    floor,
+    weather
+  );
 }
 
 // ── TIME: move the anchor's slot, then resettle the tail. ──
@@ -816,7 +1054,8 @@ async function timeChange(
   base: ParsedPrompt,
   floor: Date,
   now: Date,
-  deps: SwapDeps
+  deps: SwapDeps,
+  weather: WeatherHour[] | null
 ): Promise<SwapResult> {
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const category = target.category;
@@ -857,8 +1096,28 @@ async function timeChange(
   // adapt, else notify.
   let anchorPick: Place | undefined;
   let anchorSel: Selection | undefined;
-  if (!deps.isUsableAt(placeOf(target), nd, category, tz)) {
-    const repl = await findReplacement(category, nd, used, base, now, deps, tz, await weatherFor(itinerary, deps));
+  if (
+    !usableForProposal(
+      placeOf(target),
+      category,
+      base,
+      weather,
+      now,
+      nd,
+      tz,
+      deps
+    )
+  ) {
+    const repl = await findReplacement(
+      category,
+      nd,
+      used,
+      base,
+      now,
+      deps,
+      tz,
+      weather
+    );
     if (!repl) {
       return { swapped: false, reason: `Nothing similar to ${target.name} is open around ${clockLabel(nd, tz)}.` };
     }
@@ -868,6 +1127,12 @@ async function timeChange(
     used.add(anchorPick.id);
   }
   const anchorLoc = anchorPick?.location ?? target.location ?? null;
+  if (!validLocation(anchorLoc)) {
+    return {
+      swapped: false,
+      reason: `The route into ${target.name} can't be verified because its location is missing.`,
+    };
+  }
   // A time-swap moves the slot — it never resizes it, UNLESS the request
   // carried a duration half too ("start at 6pm for 2 hours"). Otherwise the
   // stop's own (possibly customized) duration is the source of truth; only
@@ -885,25 +1150,44 @@ async function timeChange(
     ? defaultTotal
     : requestedTotal ?? target.durationMinutes?.total ?? defaultTotal;
   const anchorEnd = new Date(newStartMs + anchorTotal * 60_000);
+  const anchorInboundPlan = await planAnchorInbound(
+    itinerary,
+    timedIdx,
+    stopIndex,
+    anchorLoc,
+    nd,
+    deps
+  );
+  if (!anchorInboundPlan) {
+    return {
+      swapped: false,
+      reason: `The route into ${
+        anchorPick?.displayName?.text ?? target.name
+      } can't reach ${clockLabel(nd, tz)}.`,
+    };
+  }
 
   // (b) resettle the downstream tail from the anchor's new end (try →
   // adapt → notify). Reusable — duration-swaps will call this too.
-  const settle = await resettleTail(itinerary, stopIndex, timedIdx, anchorEnd, anchorLoc, floor, now, base, deps, used);
+  const settle = await resettleTail(
+    itinerary,
+    stopIndex,
+    timedIdx,
+    anchorEnd,
+    anchorLoc,
+    floor,
+    now,
+    base,
+    deps,
+    used,
+    weather
+  );
   if (!settle.ok) return { swapped: false, reason: settle.reason };
 
   // ── commit (only now that the whole tail fits) ──
   const before = snap(target);
-  let anchorInbound: TravelLeg | null = null;
-  if (anchorLoc) {
-    anchorInbound = await deps.getSingleLeg(
-      prevStop?.location ?? itinerary.home?.location ?? HOME.location,
-      anchorLoc,
-      prevStop ? tp - 1 : HOME_LEG_INDEX,
-      prevStop?.end_time ?? undefined,
-      false
-    );
-  }
-  const anchorOutbound = settle.changes[0]?.inbound ?? null;
+  const anchorOutbound =
+    settle.changes[0]?.inbound ?? settle.terminalInbound ?? null;
   itinerary.stops[stopIndex] = buildStop(
     category,
     toZonedISO(nd, tz),
@@ -912,13 +1196,8 @@ async function timeChange(
     anchorTotal,
     tz
   );
-  if (prevStop && anchorInbound) {
-    prevStop.travelToNext = anchorInbound;
-    prevStop.travelMinutesToNext = anchorInbound.totalMinutes;
-  } else if (!prevStop && anchorInbound && itinerary.homeLeg) {
-    itinerary.homeLeg = { ...anchorInbound, fromIndex: HOME_LEG_INDEX };
-  }
-  commitTail(itinerary, settle.changes);
+  commitAnchorInbound(itinerary, anchorInboundPlan);
+  commitTail(itinerary, settle.changes, settle.terminalInbound);
 
   rebuildLegs(itinerary);
   withStatuses(itinerary, now);
@@ -936,7 +1215,9 @@ async function timeChange(
     before,
     after: snap(itinerary.stops[stopIndex]),
     reason,
-    downstreamShifted: settle.changes.map((c) => c.stopIndex),
+    downstreamShifted: settle.changes
+      .filter((change) => change.moved)
+      .map((change) => change.stopIndex),
   };
 }
 
@@ -951,6 +1232,7 @@ interface TailChange {
   startISO: string;
   totalMinutes: number; // this stop's duration (preserved when kept)
   inbound: TravelLeg; // leg into this stop from its predecessor
+  moved: boolean;
   venue?: Place; // set only when the stop was adapted
   sel?: Selection;
 }
@@ -965,38 +1247,188 @@ async function resettleTail(
   now: Date,
   base: ParsedPrompt,
   deps: SwapDeps,
-  used: Set<string>
-): Promise<{ ok: true; changes: TailChange[] } | { ok: false; reason: string }> {
+  used: Set<string>,
+  weather: WeatherHour[] | null,
+  preserveCommittedStarts = false
+): Promise<
+  | {
+      ok: true;
+      changes: TailChange[];
+      terminalInbound: TravelLeg | null;
+    }
+  | { ok: false; reason: string }
+> {
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const anchorPos = timedIdx.indexOf(anchorIndex);
   const changes: TailChange[] = [];
   let prevEndMs = anchorEnd.getTime();
   let prevLoc = anchorLoc;
 
+  if (anchorPos < 0 || !validLocation(prevLoc) || !Number.isFinite(prevEndMs)) {
+    return {
+      ok: false,
+      reason: "The updated route is missing a location or time boundary.",
+    };
+  }
+
   for (let k = anchorPos + 1; k < timedIdx.length; k++) {
     const di = timedIdx[k];
     const stop = itinerary.stops[di];
-    // never move locked/past stops — stop reflowing at the first one
-    if (stop.locked || !stop.start_time || new Date(stop.start_time).getTime() <= floor.getTime()) break;
-    if (!prevLoc || !stop.location) break;
+    // Never move a locked/past stop. The proposal still has to prove the
+    // newly routed prefix can reach that committed boundary without overlap.
+    if (!stop.start_time || !validLocation(stop.location)) {
+      return {
+        ok: false,
+        reason: `The route into ${
+          stop.name ?? stop.category
+        } can't be verified because its location or time is missing.`,
+      };
+    }
 
-    const fromIndex = k - 1; // leg from the previous timed stop into this one
-    let inbound = await deps.getSingleLeg(prevLoc, stop.location, fromIndex, new Date(prevEndMs).toISOString(), false);
+    const committedStartMs = new Date(stop.start_time).getTime();
+    if (!Number.isFinite(committedStartMs)) {
+      return {
+        ok: false,
+        reason: `The route into ${stop.name ?? stop.category} has an invalid time boundary.`,
+      };
+    }
+    const fromIndex = k - 1;
+    const committedOrLocked =
+      stop.locked || committedStartMs <= floor.getTime();
+
+    if (committedOrLocked) {
+      const boundaryEndMs = stop.end_time
+        ? new Date(stop.end_time).getTime()
+        : Number.NaN;
+      const boundaryInbound = await proposalLeg(
+        deps,
+        prevLoc,
+        stop.location,
+        fromIndex,
+        new Date(prevEndMs).toISOString()
+      );
+      if (
+        !boundaryInbound ||
+        !Number.isFinite(committedStartMs) ||
+        !Number.isFinite(boundaryEndMs) ||
+        boundaryEndMs < committedStartMs ||
+        prevEndMs + boundaryInbound.totalMinutes * 60_000 >
+          committedStartMs
+      ) {
+        return {
+          ok: false,
+          reason: `The change would run into locked stop ${
+            stop.name ?? stop.category
+          }.`,
+        };
+      }
+      return {
+        ok: true,
+        changes,
+        terminalInbound: boundaryInbound,
+      };
+    }
+
+    let inbound = await proposalLeg(
+      deps,
+      prevLoc,
+      stop.location,
+      fromIndex,
+      new Date(prevEndMs).toISOString()
+    );
+    if (!inbound) {
+      return {
+        ok: false,
+        reason: `The route into ${
+          stop.name ?? stop.category
+        } couldn't be verified.`,
+      };
+    }
     let startMs = prevEndMs + inbound.totalMinutes * 60_000;
+    if (preserveCommittedStarts) {
+      startMs = Math.max(startMs, committedStartMs);
+    }
     let venue: Place | undefined;
     let sel: Selection | undefined;
 
     // try the existing venue; adapt if it isn't usable by the new arrival
-    if (!deps.isUsableAt(placeOf(stop), new Date(startMs), stop.category, tz)) {
-      const repl = await findReplacement(stop.category, new Date(startMs), used, base, now, deps, tz, await weatherFor(itinerary, deps));
-      if (!repl) {
-        return { ok: false, reason: `Nothing similar to ${stop.name} is open by ${clockLabel(new Date(startMs), tz)}.` };
+    if (
+      !usableForProposal(
+        placeOf(stop),
+        stop.category,
+        base,
+        weather,
+        now,
+        new Date(startMs),
+        tz,
+        deps
+      )
+    ) {
+      const attempted = new Set(used);
+      let replacementFound = false;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const repl = await findReplacement(
+          stop.category,
+          new Date(startMs),
+          attempted,
+          base,
+          now,
+          deps,
+          tz,
+          weather
+        );
+        if (!repl || !validLocation(repl.pick.location)) break;
+        const candidateInbound = await proposalLeg(
+          deps,
+          prevLoc,
+          repl.pick.location,
+          fromIndex,
+          new Date(prevEndMs).toISOString()
+        );
+        if (!candidateInbound) {
+          attempted.add(repl.pick.id);
+          continue;
+        }
+        let candidateStartMs =
+          prevEndMs + candidateInbound.totalMinutes * 60_000;
+        if (preserveCommittedStarts) {
+          candidateStartMs = Math.max(
+            candidateStartMs,
+            committedStartMs
+          );
+        }
+        if (
+          !usableForProposal(
+            repl.pick,
+            stop.category,
+            base,
+            weather,
+            now,
+            new Date(candidateStartMs),
+            tz,
+            deps
+          )
+        ) {
+          attempted.add(repl.pick.id);
+          continue;
+        }
+        venue = repl.pick;
+        sel = repl.sel;
+        inbound = candidateInbound;
+        startMs = candidateStartMs;
+        used.add(venue.id);
+        replacementFound = true;
+        break;
       }
-      venue = repl.pick;
-      sel = repl.sel;
-      used.add(venue.id);
-      inbound = await deps.getSingleLeg(prevLoc, venue.location!, fromIndex, new Date(prevEndMs).toISOString(), false);
-      startMs = prevEndMs + inbound.totalMinutes * 60_000;
+      if (!replacementFound) {
+        return {
+          ok: false,
+          reason: `Nothing similar to ${stop.name} is open by ${clockLabel(
+            new Date(startMs),
+            tz
+          )}.`,
+        };
+      }
     }
 
     // keep the stop's own duration when it's kept (a prior duration-swap
@@ -1005,18 +1437,33 @@ async function resettleTail(
     const defaultTotal = baseMinutes + bufferMinutes;
     const totalMinutes = venue ? defaultTotal : stop.durationMinutes?.total ?? defaultTotal;
     const endMs = startMs + totalMinutes * 60_000;
-    changes.push({ stopIndex: di, startISO: toZonedISO(new Date(startMs), tz), totalMinutes, inbound, venue, sel });
+    const startISO = toZonedISO(new Date(startMs), tz);
+    changes.push({
+      stopIndex: di,
+      startISO,
+      totalMinutes,
+      inbound,
+      moved: startISO !== stop.start_time || !!venue,
+      venue,
+      sel,
+    });
     prevEndMs = endMs;
     prevLoc = venue?.location ?? stop.location;
   }
-  return { ok: true, changes };
+  return { ok: true, changes, terminalInbound: null };
 }
 
-function commitTail(itinerary: Itinerary, changes: TailChange[]) {
+function commitTail(
+  itinerary: Itinerary,
+  changes: TailChange[],
+  terminalInbound: TravelLeg | null
+) {
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   changes.forEach((ch, k) => {
     const existing = itinerary.stops[ch.stopIndex];
-    const outbound = changes[k + 1]?.inbound ?? existing.travelToNext ?? null;
+    const outbound =
+      changes[k + 1]?.inbound ??
+      (k === changes.length - 1 ? terminalInbound : null);
     itinerary.stops[ch.stopIndex] = buildStop(
       existing.category,
       ch.startISO,
@@ -1043,7 +1490,10 @@ async function findReplacement(
   const rawPools = await deps.searchPools(parsed, [category]);
   const { pools } = filterPools(rawPools, parsed, weather, now, when, timeZone);
   const candidates = (pools[category] ?? []).filter(
-    (p) => !excluded.has(p.id) && deps.isUsableAt(p, when, category, timeZone)
+    (p) =>
+      !excluded.has(p.id) &&
+      validLocation(p.location) &&
+      deps.isUsableAt(p, when, category, timeZone)
   );
   if (candidates.length === 0) return null;
   const sels = await deps.selectVenues(parsed, { [category]: candidates });
@@ -1120,7 +1570,10 @@ async function finalize(
   now: Date,
   deps: SwapDeps,
   path: "refilter" | "research" | "time",
-  reason: string
+  reason: string,
+  base: ParsedPrompt,
+  floor: Date,
+  weather: WeatherHour[] | null
 ): Promise<SwapResult> {
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const before = snap(target);
@@ -1134,30 +1587,71 @@ async function finalize(
     category === target.category
       ? target.durationMinutes?.total ?? defaultTotal
       : defaultTotal;
-  const bufferMinutes = Math.min(def.bufferMinutes, total);
-  const baseMinutes = total - bufferMinutes;
-  const newLoc = pick.location ?? target.location;
-  const endISO = toZonedISO(new Date(new Date(startISO).getTime() + total * 60_000), tz);
+  const newLoc = pick.location;
+  const start = new Date(startISO);
+  if (
+    !validLocation(newLoc) ||
+    !Number.isFinite(start.getTime()) ||
+    !usableForProposal(
+      pick,
+      category,
+      base,
+      weather,
+      now,
+      start,
+      tz,
+      deps
+    )
+  ) {
+    return {
+      swapped: false,
+      reason: `The replacement for ${target.name} isn't usable in that slot.`,
+    };
+  }
 
   const timedIdx = timedIndexes(itinerary);
-  const tp = timedIdx.indexOf(stopIndex);
-  const prevStop = tp > 0 ? itinerary.stops[timedIdx[tp - 1]] : null;
-  const nextStop = tp < timedIdx.length - 1 ? itinerary.stops[timedIdx[tp + 1]] : null;
-
-  let inbound: TravelLeg | null = null;
-  if (newLoc) {
-    inbound = await deps.getSingleLeg(
-      prevStop?.location ?? itinerary.home?.location ?? HOME.location,
-      newLoc,
-      prevStop ? tp - 1 : HOME_LEG_INDEX,
-      prevStop?.end_time ?? undefined,
-      false
-    );
+  const inbound = await planAnchorInbound(
+    itinerary,
+    timedIdx,
+    stopIndex,
+    newLoc,
+    start,
+    deps
+  );
+  if (!inbound) {
+    return {
+      swapped: false,
+      reason: `The replacement can't be reached by ${clockLabel(
+        start,
+        tz
+      )} without moving the slot.`,
+    };
   }
-  let outbound: TravelLeg | null = null;
-  if (nextStop?.location && newLoc) {
-    outbound = await deps.getSingleLeg(newLoc, nextStop.location, tp, endISO, false);
-  }
+  const used = new Set<string>(
+    itinerary.stops
+      .map((stop) => stop.id)
+      .filter((id): id is string => !!id)
+  );
+  if (target.id) used.delete(target.id);
+  used.add(pick.id);
+  const anchorEnd = new Date(start.getTime() + total * 60_000);
+  const settle = await resettleTail(
+    itinerary,
+    stopIndex,
+    timedIdx,
+    anchorEnd,
+    newLoc,
+    floor,
+    now,
+    base,
+    deps,
+    used,
+    weather,
+    true
+  );
+  if (!settle.ok) return { swapped: false, reason: settle.reason };
+  const outbound =
+    settle.changes[0]?.inbound ?? settle.terminalInbound ?? null;
 
   // one stop-construction path: buildStop already owns the field set, the
   // buffer clamp, and the duration override, so finalize no longer keeps a
@@ -1171,34 +1665,11 @@ async function finalize(
     tz
   );
 
-  if (prevStop && inbound) {
-    prevStop.travelToNext = inbound;
-    prevStop.travelMinutesToNext = inbound.totalMinutes;
-  } else if (!prevStop && inbound && itinerary.homeLeg) {
-    itinerary.homeLeg = { ...inbound, fromIndex: HOME_LEG_INDEX };
-  }
-
-  const floor = floorTime(itinerary, now);
-  const downstreamShifted: number[] = [];
-  if (nextStop && outbound && nextStop.start_time) {
-    const requiredNextMs = new Date(endISO).getTime() + outbound.totalMinutes * 60_000;
-    const deltaMs = requiredNextMs - new Date(nextStop.start_time).getTime();
-    if (deltaMs > 0) {
-      for (let k = tp + 1; k < timedIdx.length; k++) {
-        const s = itinerary.stops[timedIdx[k]];
-        // STOP at the first locked/past stop, don't skip over it. `continue`
-        // kept shifting the stops BEYOND a locked one, so an earlier stop
-        // could be pushed into the locked stop's slot — the ratchet held,
-        // but the chain stopped being consistent. resettleTail has always
-        // used break for this same condition (code-audit §2.3).
-        if (s.locked || !s.start_time || new Date(s.start_time).getTime() <= floor.getTime()) break;
-        s.start_time = toZonedISO(new Date(new Date(s.start_time).getTime() + deltaMs), tz);
-        if (s.end_time) s.end_time = toZonedISO(new Date(new Date(s.end_time).getTime() + deltaMs), tz);
-        downstreamShifted.push(timedIdx[k]);
-      }
-    }
-  }
-
+  commitAnchorInbound(itinerary, inbound);
+  commitTail(itinerary, settle.changes, settle.terminalInbound);
+  const downstreamShifted = settle.changes
+    .filter((change) => change.moved)
+    .map((change) => change.stopIndex);
   rebuildLegs(itinerary);
 
   withStatuses(itinerary, now);
