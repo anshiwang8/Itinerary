@@ -2,11 +2,15 @@
 // to end and that the strip/map desync helper works. Feature scenarios
 // come later; this is deliberately the only spec for now.
 // Run: npm run test:e2e (headless) · npm run test:e2e:headed (headed)
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./test";
 import { planEvening, expectStripMatchesPin } from "./helpers";
 
 test("plans 'dinner and drinks' into two stops; strip and map pins agree", async ({ page }) => {
   await planEvening(page, "dinner and drinks");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "failed");
+  await expect(
+    page.getByRole("alert").filter({ hasText: "The live map is unavailable." })
+  ).toContainText("Your itinerary and venue pins are still usable.");
 
   // two venue cards in the strip…
   const cards = page.locator(".lstrip__stop");

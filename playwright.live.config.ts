@@ -1,6 +1,8 @@
 import { defineConfig } from "@playwright/test";
 import base from "./playwright.config";
 
+process.env.E2E_ALLOW_EXTERNAL_BROWSER = "1";
+
 // LIVE MODE — occasional real-world checks against the actual APIs on
 // :3000 (reuses a running dev server; starts one WITHOUT E2E_MOCK if
 // none). Burns real Groq/Places/Routes quota; results vary run to run.

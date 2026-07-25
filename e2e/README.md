@@ -20,9 +20,11 @@ npm run test:e2e:headed   # mock, headed
 npm run test:e2e:live     # live APIs on :3000, skips @mock tests
 ```
 
-Note: the browser-side Maps JS key (`NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`) is
-still used in mock mode — the map render layer is presentation, not a
-mocked pipeline source.
+Mock mode explicitly leaves `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` blank. The
+production map component renders the same venue chips on its deterministic
+fallback projection, so mock E2E burns no Maps quota and verifies that the
+itinerary remains usable without browser-side Maps JavaScript. Fonts are
+served from the application bundle; no Google Fonts request is required.
 
 ## Fixtures worth knowing (for scenario tests)
 

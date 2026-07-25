@@ -2,7 +2,7 @@
 // mock mode the pipeline must be deterministic, so the picks are known in
 // advance. If this fails, either E2E_MOCK isn't reaching the server or a
 // fixture drifted — fix that before trusting any scenario test.
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./test";
 import { planEvening } from "./helpers";
 
 test("mock pipeline is active and deterministic @mock", async ({ page }) => {

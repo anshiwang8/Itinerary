@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 import { formatStopTime } from "./lib/timeLabels";
 import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
+import { createRetryableLoader } from "./lib/retryableLoader";
 
 // Printed-cartography map: warm-paper Google styling (inline JSON, so no
 // Cloud map id), ink-navy route lines, and an HTML overlay layer for the
@@ -68,19 +69,18 @@ const PAPER_STYLE: google.maps.MapTypeStyle[] = [
 const INK = "#2E6F8A";
 const LIVE = "#C8F000";
 
-let libsPromise: Promise<
-  [google.maps.MapsLibrary, google.maps.GeometryLibrary]
-> | null = null;
-function loadMapLibs() {
-  if (!libsPromise) {
-    setOptions({ key: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "", v: "weekly" });
-    libsPromise = Promise.all([
+const loadMapLibs = createRetryableLoader(async () => {
+    const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY?.trim();
+    if (!key) throw new Error("The browser Maps key is unavailable.");
+    setOptions({ key, v: "weekly" });
+    return Promise.all([
       importLibrary("maps") as Promise<google.maps.MapsLibrary>,
       importLibrary("geometry") as Promise<google.maps.GeometryLibrary>,
     ]);
-  }
-  return libsPromise;
-}
+});
+
+type MapPoint = { x: number | string; y: number | string };
+const MAX_MAP_RETRIES = 2;
 
 interface Props {
   stops: MapStop[];
@@ -100,120 +100,136 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   const linesRef = useRef<google.maps.Polyline[]>([]);
   const rafRef = useRef<number | null>(null);
   const [, setTick] = useState(0);
-  const [ready, setReady] = useState(false);
+  const [mapState, setMapState] = useState<"loading" | "ready" | "failed">("loading");
+  const [retryCount, setRetryCount] = useState(0);
 
   // one-time map + projection probe
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [maps] = await loadMapLibs();
-      if (cancelled || !mapDivRef.current) return;
-      if (!mapRef.current) {
-        mapRef.current = new maps.Map(mapDivRef.current, {
-          center: { lat: 43.6497, lng: -79.4197 },
-          zoom: 14,
-          styles: PAPER_STYLE,
-          disableDefaultUI: true,
-          gestureHandling: "greedy",
-          backgroundColor: "#e9e6df",
-          clickableIcons: false,
-        });
-        // A projection probe: its draw() fires on every pan/zoom, giving
-        // us live container-pixel projection for the HTML overlay layer.
-        // The tick is scheduled on the next frame — never call setState
-        // synchronously inside draw(), which Google can invoke during a
-        // React commit (setState-in-render crash).
-        class Probe extends maps.OverlayView {
-          onAdd() {}
-          onRemove() {}
-          draw() {
-            projRef.current = this.getProjection();
-            if (rafRef.current == null) {
-              rafRef.current = requestAnimationFrame(() => {
-                rafRef.current = null;
-                setTick((t) => t + 1);
-              });
+      setMapState("loading");
+      try {
+        const [maps] = await loadMapLibs();
+        if (cancelled || !mapDivRef.current) return;
+        if (!mapRef.current) {
+          mapRef.current = new maps.Map(mapDivRef.current, {
+            center: { lat: 43.6497, lng: -79.4197 },
+            zoom: 14,
+            styles: PAPER_STYLE,
+            disableDefaultUI: true,
+            gestureHandling: "greedy",
+            backgroundColor: "#e9e6df",
+            clickableIcons: false,
+          });
+          // A projection probe: its draw() fires on every pan/zoom, giving
+          // us live container-pixel projection for the HTML overlay layer.
+          // The tick is scheduled on the next frame — never call setState
+          // synchronously inside draw(), which Google can invoke during a
+          // React commit (setState-in-render crash).
+          class Probe extends maps.OverlayView {
+            onAdd() {}
+            onRemove() {}
+            draw() {
+              projRef.current = this.getProjection();
+              if (rafRef.current == null) {
+                rafRef.current = requestAnimationFrame(() => {
+                  rafRef.current = null;
+                  setTick((t) => t + 1);
+                });
+              }
             }
           }
+          const probe = new Probe();
+          probe.setMap(mapRef.current);
         }
-        const probe = new Probe();
-        probe.setMap(mapRef.current);
-        setReady(true);
+        setMapState("ready");
+      } catch {
+        if (!cancelled) {
+          projRef.current = null;
+          setMapState("failed");
+        }
       }
     })();
     return () => {
       cancelled = true;
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, []);
+  }, [retryCount]);
 
   // route polylines + fit bounds when the stops change
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !ready) return;
+    if (!map || mapState !== "ready") return;
     let cancelled = false;
     (async () => {
-      const [maps, geometry] = await loadMapLibs();
-      if (cancelled) return;
-      linesRef.current.forEach((l) => l.setMap(null));
-      linesRef.current = [];
+      try {
+        const [maps, geometry] = await loadMapLibs();
+        if (cancelled) return;
+        linesRef.current.forEach((l) => l.setMap(null));
+        linesRef.current = [];
 
-      const segs: {
-        from: google.maps.LatLngLiteral;
-        to: google.maps.LatLngLiteral;
-        mode?: "transit" | "walk" | "unknown";
-        encoded?: string | null;
-        live: boolean;
-      }[] = [];
+        const segs: {
+          from: google.maps.LatLngLiteral;
+          to: google.maps.LatLngLiteral;
+          mode?: "transit" | "walk" | "unknown";
+          encoded?: string | null;
+          live: boolean;
+        }[] = [];
 
-      if (home && stops[0]) {
-        segs.push({
-          from: { lat: home.lat, lng: home.lng },
-          to: { lat: stops[0].lat, lng: stops[0].lng },
-          mode: home.legModeToNext,
-          encoded: home.polylineToNext,
-          live: false,
-        });
-      }
-      for (let i = 0; i < stops.length - 1; i++) {
-        segs.push({
-          from: { lat: stops[i].lat, lng: stops[i].lng },
-          to: { lat: stops[i + 1].lat, lng: stops[i + 1].lng },
-          mode: stops[i].legModeToNext,
-          encoded: stops[i].polylineToNext,
-          // the redrawn inbound leg of a changed stop reads live
-          live: !!stops[i + 1].changed,
-        });
-      }
+        if (home && stops[0]) {
+          segs.push({
+            from: { lat: home.lat, lng: home.lng },
+            to: { lat: stops[0].lat, lng: stops[0].lng },
+            mode: home.legModeToNext,
+            encoded: home.polylineToNext,
+            live: false,
+          });
+        }
+        for (let i = 0; i < stops.length - 1; i++) {
+          segs.push({
+            from: { lat: stops[i].lat, lng: stops[i].lng },
+            to: { lat: stops[i + 1].lat, lng: stops[i + 1].lng },
+            mode: stops[i].legModeToNext,
+            encoded: stops[i].polylineToNext,
+            // the redrawn inbound leg of a changed stop reads live
+            live: !!stops[i + 1].changed,
+          });
+        }
 
-      for (const seg of segs) {
-        const path = seg.encoded
-          ? geometry.encoding.decodePath(seg.encoded)
-          : [seg.from, seg.to];
-        const color = seg.live ? LIVE : INK;
-        const line =
-          seg.mode === "transit"
-            ? new maps.Polyline({
-                map,
-                path,
-                strokeOpacity: 0,
-                icons: [
-                  {
-                    icon: { path: "M 0,-1 0,1", strokeOpacity: 1, strokeColor: color, strokeWeight: 2.5, scale: 3 },
-                    offset: "0",
-                    repeat: "13px",
-                  },
-                ],
-              })
-            : new maps.Polyline({ map, path, strokeColor: color, strokeOpacity: 0.92, strokeWeight: seg.live ? 3.5 : 2.5 });
-        linesRef.current.push(line);
+        for (const seg of segs) {
+          const path = seg.encoded
+            ? geometry.encoding.decodePath(seg.encoded)
+            : [seg.from, seg.to];
+          const color = seg.live ? LIVE : INK;
+          const line =
+            seg.mode === "transit"
+              ? new maps.Polyline({
+                  map,
+                  path,
+                  strokeOpacity: 0,
+                  icons: [
+                    {
+                      icon: { path: "M 0,-1 0,1", strokeOpacity: 1, strokeColor: color, strokeWeight: 2.5, scale: 3 },
+                      offset: "0",
+                      repeat: "13px",
+                    },
+                  ],
+                })
+              : new maps.Polyline({ map, path, strokeColor: color, strokeOpacity: 0.92, strokeWeight: seg.live ? 3.5 : 2.5 });
+          linesRef.current.push(line);
+        }
+      } catch {
+        if (!cancelled) {
+          projRef.current = null;
+          setMapState("failed");
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stops, home, ready]);
+  }, [stops, home, mapState]);
 
   // Fit bounds only when the geography actually changes (initial plan or a
   // reroute swapping a venue) — NOT on every status tick, which would yank
@@ -223,7 +239,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     (home ? `#${home.lat.toFixed(5)},${home.lng.toFixed(5)}` : "");
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !ready) return;
+    if (!map || mapState !== "ready") return;
     const pts: google.maps.LatLngLiteral[] = stops.map((s) => ({ lat: s.lat, lng: s.lng }));
     if (home) pts.push({ lat: home.lat, lng: home.lng });
     if (pts.length === 1) {
@@ -235,11 +251,28 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
       map.fitBounds(bounds, { top: 130, bottom: 90, left: 80, right: 80 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fitKey, ready]);
+  }, [fitKey, mapState]);
 
-  const px = (lat: number, lng: number) => {
+  const fallbackPoints = [
+    ...(home ? [{ lat: home.lat, lng: home.lng }] : []),
+    ...stops.map(({ lat, lng }) => ({ lat, lng })),
+  ].filter(({ lat, lng }) => Number.isFinite(lat) && Number.isFinite(lng));
+  const lats = fallbackPoints.map(({ lat }) => lat);
+  const lngs = fallbackPoints.map(({ lng }) => lng);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const fallbackPx = (lat: number, lng: number): MapPoint | null => {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    const x = minLng === maxLng ? 50 : 15 + ((lng - minLng) / (maxLng - minLng)) * 70;
+    const y = minLat === maxLat ? 50 : 72 - ((lat - minLat) / (maxLat - minLat)) * 48;
+    return { x: `${x}%`, y: `${y}%` };
+  };
+
+  const px = (lat: number, lng: number): MapPoint | null => {
     const proj = projRef.current;
-    if (!proj) return null;
+    if (!proj) return fallbackPx(lat, lng);
     const p = proj.fromLatLngToContainerPixel(new google.maps.LatLng(lat, lng));
     return p ? { x: p.x, y: p.y } : null;
   };
@@ -247,7 +280,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     px((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
 
   // transit leg labels pinned to each leg's midpoint (home leg + inter-stop)
-  const legLabels: { key: string; x: number; y: number; text: string; segs: BubbleSegment[] }[] = [];
+  const legLabels: { key: string; x: number | string; y: number | string; text: string; segs: BubbleSegment[] }[] = [];
   if (home && stops[0] && home.legLabel) {
     const p = midPx(home, stops[0]);
     if (p) legLabels.push({ key: "home", x: p.x, y: p.y, text: home.legLabel, segs: home.legSegments ?? [] });
@@ -260,8 +293,27 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   }
 
   return (
-    <div className="mapwrap">
-      <div ref={mapDivRef} className="map" aria-label="Map of your evening in Ossington" />
+    <div className="mapwrap" data-map-state={mapState}>
+      <div
+        ref={mapDivRef}
+        className="map"
+        role="img"
+        aria-label={`Map of your outing${home?.label ? ` from ${home.label}` : ""}`}
+      />
+      {mapState === "failed" && (
+        <div className="mapfallback" role="alert">
+          <span>The live map is unavailable. Your itinerary and venue pins are still usable.</span>
+          {retryCount < MAX_MAP_RETRIES && (
+            <button
+              type="button"
+              className="mapfallback__retry"
+              onClick={() => setRetryCount((count) => count + 1)}
+            >
+              Retry map
+            </button>
+          )}
+        </div>
+      )}
       <div className="ov-layer">
         {legLabels.map((l) => (
           <div key={l.key} className="leglab" style={{ left: l.x, top: l.y }}>

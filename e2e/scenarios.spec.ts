@@ -5,7 +5,7 @@
 // respects a swapped-then-locked stop, and active stops can't be swapped.
 // expectStripMatchesPin runs after every mutation — the strip/map/store
 // desync check.
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./test";
 import { planEvening, stripCard, swapOn, expectStripMatchesPin } from "./helpers";
 
 // datetime-local value on the PLAN's day (dinner anchors 19:00 and rolls

@@ -6,7 +6,8 @@
 // filter); widened city-wide it returns a real open venue. A fixed "7pm"
 // pins the resolved time (deterministic filtering) and skips the clarify
 // step. See app/api/_mock/fixtures.ts (DUMPLING_CLOSED / DUMPLING_OPEN).
-import { test, expect, Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { test, expect } from "./test";
 import { stripCard, dismissClarifyIfShown } from "./helpers";
 
 // plan the dumplings prompt and land on the recovery panel (no clarify,

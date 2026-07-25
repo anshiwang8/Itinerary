@@ -42,7 +42,7 @@ hashes are reconciled after the commit exists.
 | M5 | Pending verification | — | — | — | — | — | — | — |
 | M6 | Pending verification | — | — | — | — | — | — | — |
 | M7 | Pending verification | — | — | — | — | — | — | — |
-| M8 | Pending verification | — | — | — | — | — | — | — |
+| M8 | Confirmed — partially fixed | The module-level Maps promise permanently cached its first rejection, both map effects awaited it without a catch, and no non-Maps projection existed. | `app/ItineraryMap.tsx`; `app/lib/retryableLoader.ts`; `app/globals.css`; mock Playwright harness/docs | 3 loader unit cases; existing offline smoke now pins the accessible fallback and strip↔pin agreement | Yes — removing rejection eviction makes the recovery case fail (2/3); restored result is 3/3. | SELF | Batch G still needs invalid-key, retry-success, and remount browser scenarios alongside the shared client-fetch work. | The production component now catches failures, evicts rejected loads, offers two bounded retries, and keeps pins usable on a deterministic fallback projection. Mock E2E blocks all non-local browser requests. |
 | M9 | Pending verification | — | — | — | — | — | — | — |
 | M10 | Pending verification | — | — | — | — | — | — | — |
 | M11 | Pending verification | — | — | — | — | — | — | — |
@@ -55,6 +55,6 @@ hashes are reconciled after the commit exists.
 | M18 | Confirmed — fixed | `next lint` was interactive, `tsx` was undeclared, and unit suites had no aggregate runner. | `package.json`; `package-lock.json`; `eslint.config.mjs`; `scripts/run-unit-tests.ts`; `.gitignore`; two lint-only source cleanups | Aggregate runner executed all 251 existing unit tests; the full check also executed 41 mock E2E tests. | No | SELF | Batch J will remove the remaining 15 lint warnings and then enforce a zero-warning lint gate. | A normal clean `npm ci` succeeded, followed by lint, typecheck, unit, build, and mock E2E with exit 0. |
 | L1 | Pending verification | — | — | — | — | — | — | — |
 | L2 | Pending verification | — | — | — | — | — | — | — |
-| L3 | Confirmed | Runtime CSS imports Google Fonts. | `app/globals.css` (pending) | Pending | No | Pending | — | Will be removed as part of the offline mock/UI work. |
+| L3 | Confirmed — fixed | Runtime CSS imported Fraunces and Space Grotesk from Google Fonts. | `app/layout.tsx`; `app/globals.css`; `package.json`; `package-lock.json`; mock Playwright harness/docs | The complete mock E2E suite runs with every non-local browser request blocked. | No | SELF | — | Uses OFL-1.1 `@fontsource-variable` packages served from the application bundle; the production build and hydration smoke pass. |
 | D1 | Pending verification | — | — | — | — | — | — | — |
 | D2 | Confirmed | Current docs still describe old test commands, dependency versions, dev controls, and provider behavior. | Pending | Command smoke checks pending | No | Pending | Final reconciliation after behavior batches. | Historical entries will not be rewritten. |

@@ -3,7 +3,7 @@
 // message (reason + suggested fix), never an empty map and never an error
 // borrowed from the wrong branch. Exact-text assertions on purpose: these
 // messages ARE the product behavior the manual-testing bugs were about.
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./test";
 import { planEvening, planExpectingProblem, stripCard, expectStripMatchesPin } from "./helpers";
 
 const UNPARSEABLE =

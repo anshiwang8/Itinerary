@@ -31,7 +31,8 @@ export async function planEvening(page: Page, prompt: string): Promise<void> {
     throw new Error(`pipeline failed: ${(await err.innerText()).trim()}`);
   }
 
-  // map pins appear once the Maps JS projection is live
+  // Pins remain present on the deterministic fallback projection when the
+  // external Maps JavaScript provider is unavailable.
   await expect(page.locator(".chip").first()).toBeVisible({ timeout: 30_000 });
 }
 

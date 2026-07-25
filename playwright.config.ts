@@ -25,6 +25,12 @@ export default defineConfig({
     url: "http://localhost:3100",
     reuseExistingServer: true,
     timeout: 60_000,
-    env: { ...(process.env as Record<string, string>), E2E_MOCK: "1" },
+    env: {
+      ...(process.env as Record<string, string>),
+      E2E_MOCK: "1",
+      // The mock suite proves the application remains usable without the
+      // browser Maps provider. Live mode keeps its configured browser key.
+      NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: "",
+    },
   },
 });

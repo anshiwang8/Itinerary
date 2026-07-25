@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Space+Grotesk:wght@400;500;600&display=swap');
-
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 /* ── Palette: soft pale blue → deeper teal, white card surfaces, mid-teal
@@ -35,8 +33,8 @@
   --live: #C8F000;
   --live-wash: rgba(200, 240, 0, 0.30);
 
-  --disp: 'Fraunces', Georgia, 'Times New Roman', serif;
-  --grot: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --disp: 'Fraunces Variable', Georgia, 'Times New Roman', serif;
+  --grot: 'Space Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
 
   --shadow-card: 0 6px 20px rgba(30, 58, 76, 0.09);
   --shadow-lift: 0 12px 30px rgba(30, 58, 76, 0.15);
@@ -210,7 +208,29 @@ button { font-family: var(--grot); cursor: pointer; }
 /* ─────────────────────────  Map stage  ───────────────────────── */
 .stage { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
 .mapwrap { position: absolute; inset: 0; }
-.map { position: absolute; inset: 0; }
+.map {
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(rgba(30, 58, 76, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(30, 58, 76, 0.045) 1px, transparent 1px),
+    var(--paper-2);
+  background-size: 48px 48px;
+}
+.mapfallback {
+  position: absolute; top: 72px; left: 50%; z-index: 12;
+  transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px;
+  max-width: min(460px, calc(100vw - 32px));
+  padding: 8px 10px 8px 14px;
+  border: 1px solid var(--rule-strong); border-radius: 12px;
+  background: rgba(255, 255, 255, 0.94); color: var(--ink);
+  box-shadow: var(--shadow-card); font-size: 12px;
+}
+.mapfallback__retry {
+  flex: none; min-height: 36px; padding: 7px 11px;
+  border: 1px solid var(--accent); border-radius: 8px;
+  background: var(--card); color: var(--ink); font-weight: 600;
+}
 
 .ov-layer { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
 
