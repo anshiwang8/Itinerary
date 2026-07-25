@@ -62,6 +62,35 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "failed reroute leaves the persisted version unchanged",
+    async () => {
+      resetRateLimitsForTests();
+      const created = await createRoute(
+        jsonRequest("http://localhost/api/itinerary", { stops: [stop], legs: [] })
+      );
+      const { id, version } = (await created.json()) as {
+        id: string;
+        version: number;
+      };
+      const reroute = await rerouteRoute(
+        jsonRequest(`http://localhost/api/itinerary/${id}/reroute`, {
+          disruption: { type: "transit_cancelled", legIndex: 0 },
+          version,
+          now: "2026-07-10T18:00:00-04:00",
+        }),
+        { params: Promise.resolve({ id }) }
+      );
+      assert.strictEqual(reroute.status, 200);
+      const result = (await reroute.json()) as {
+        rerouted: boolean;
+        version: number;
+      };
+      assert.strictEqual(result.rerouted, false);
+      assert.strictEqual(result.version, version);
+      assert.strictEqual(reroute.headers.get("etag"), `"${version}"`);
+    },
+  ],
+  [
     "stale swap and reroute return 409 before any provider work",
     async () => {
       resetRateLimitsForTests();

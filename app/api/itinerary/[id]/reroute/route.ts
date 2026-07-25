@@ -69,14 +69,15 @@ export async function POST(
           );
         }
         const result = await rerouteItinerary(proposal, disruption, now);
-        return { value: result };
+        return { value: result, changed: result.rerouted };
       },
       { expectedVersion, maxAttempts: 2 }
     );
     if (!updated) {
       throw new ApiError(404, "itinerary_not_found", "That itinerary was not found.");
     }
-    // Statuses and any reroute changes commit together as one CAS proposal.
+    // Only a complete reroute commits. A refusal leaves the stored JSON and
+    // version unchanged; ordinary GET owns independent status ratcheting.
     return apiJson(
       ctx,
       { ...updated.value, version: updated.itinerary.version },

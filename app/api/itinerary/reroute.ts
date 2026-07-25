@@ -1,16 +1,30 @@
 // Reroute engine — disruption trigger + floor_time replan.
-// Manual trigger for now (dev button); GTFS replaces the trigger later,
-// the engine underneath is identical.
 //
-// THE guarantee: no stop at or before floor_time is ever changed.
-// floor_time = max(now, end of the currently active stop); locked,
-// active, and completed stops are never touched.
-import { Itinerary, ItineraryStop, withStatuses, floorTime, timedIndexes, rebuildLegs } from "./store";
-import { filterPools, ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
+// A reroute is planned on an isolated clone, stabilized against the real
+// arrival time of every replacement, and copied back only after the entire
+// affected chain is complete. No partial chain is ever committed.
+import {
+  Itinerary,
+  ItineraryStop,
+  floorTime,
+  rebuildLegs,
+  timedIndexes,
+  withStatuses,
+} from "./store";
+import {
+  filterPools,
+  ParsedPrompt,
+  Place,
+  WeatherHour,
+} from "../places/search/filter";
 import { fetchWeatherHours } from "../weather/fetchWeather";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
-import { selectVenues as realSelectVenues, Selection } from "../select/selectVenues";
+import {
+  selectVenues as realSelectVenues,
+  Selection,
+} from "../select/selectVenues";
 import { buildSchedule } from "../schedule/schedule";
+import { getDuration } from "../schedule/durations";
 import { DEFAULT_ZONE } from "../../lib/zoneTime";
 import {
   getSingleLeg as realGetSingleLeg,
@@ -39,16 +53,12 @@ export type RerouteResult =
   | {
       rerouted: true;
       floor_time: string;
-      /** the instant the replanned chain actually departs from — the later
-       * of floor and the previous kept stop's committed end. The banner
-       * shows this; floor_time stays the guarantee value. */
+      /** Later of floor and the previous kept stop's committed end. */
       anchor_time: string;
       changed: ChangedStop[];
       unchanged: number[];
     };
 
-// Injectable pipeline deps so the engine's guarantees are testable
-// without network. Defaults hit the real modules with env keys.
 export interface RerouteDeps {
   searchPools: (
     parsed: ParsedPrompt,
@@ -57,7 +67,6 @@ export interface RerouteDeps {
   selectVenues: (
     parsed: ParsedPrompt,
     pools: Record<string, Place[]>,
-    /** the affected stops in order, duplicates intact — see §7.1 */
     slots?: string[]
   ) => Promise<Selection[]>;
   getSingleLeg: (
@@ -67,13 +76,16 @@ export interface RerouteDeps {
     departureTime: string | undefined,
     excludeTransit: boolean
   ) => Promise<TravelLeg>;
-  /** hourly forecast for the plan's origin — the replan consults the
-   *  weather gate like the initial plan does (§7.6). Null = keep-on-missing. */
   getWeather: (lat: number, lng: number) => Promise<WeatherHour[] | null>;
 }
 
+const MAX_STABILIZATION_PASSES = 5;
+const INCOMPLETE_REASON =
+  "Couldn't build a complete reroute for every remaining stop — the original plan is unchanged.";
+const UNSTABLE_REASON =
+  "Couldn't find a complete reroute that stays valid at the recalculated arrival times — the original plan is unchanged.";
+
 function realDeps(): RerouteDeps {
-  // e2e fixture seam — deterministic search/select/legs
   if (isMockMode()) return mockRerouteDeps();
   return {
     searchPools: (parsed, categories) =>
@@ -89,16 +101,109 @@ function realDeps(): RerouteDeps {
         departureTime,
         excludeTransit
       ),
-    getWeather: (lat, lng) => fetchWeatherHours(process.env.GOOGLE_WEATHER_API_KEY, lat, lng),
+    getWeather: (lat, lng) =>
+      fetchWeatherHours(process.env.GOOGLE_WEATHER_API_KEY, lat, lng),
   };
 }
 
-function snap(s: ItineraryStop) {
+function cloneItinerary(itinerary: Itinerary): Itinerary {
+  return JSON.parse(JSON.stringify(itinerary)) as Itinerary;
+}
+
+function snap(stop: ItineraryStop) {
   return {
-    name: s.name ?? null,
-    start: s.start_time,
-    end: s.end_time,
+    name: stop.name ?? null,
+    start: stop.start_time,
+    end: stop.end_time,
   };
+}
+
+function validLocation(value: Place["location"]): value is LatLng {
+  return (
+    !!value &&
+    Number.isFinite(value.latitude) &&
+    value.latitude >= -90 &&
+    value.latitude <= 90 &&
+    Number.isFinite(value.longitude) &&
+    value.longitude >= -180 &&
+    value.longitude <= 180
+  );
+}
+
+function validLeg(leg: TravelLeg): boolean {
+  return (
+    Number.isFinite(leg.totalMinutes) &&
+    Number.isInteger(leg.totalMinutes) &&
+    leg.totalMinutes >= 0
+  );
+}
+
+/**
+ * Convert the selector's slot-aware response into one exact entry per
+ * required slot. Slot-less injected fakes remain supported by consuming a
+ * category queue, but a missing, extra, or mis-categorized answer fails.
+ */
+function orderSelections(
+  selections: Selection[],
+  categories: string[]
+): Selection[] | null {
+  if (selections.length !== categories.length) return null;
+  const bySlot = new Map<number, Selection>();
+  const queues = new Map<string, Selection[]>();
+
+  for (const selection of selections) {
+    if (typeof selection.slot === "number") {
+      if (
+        !Number.isInteger(selection.slot) ||
+        selection.slot < 0 ||
+        selection.slot >= categories.length ||
+        bySlot.has(selection.slot)
+      ) {
+        return null;
+      }
+      bySlot.set(selection.slot, selection);
+    } else {
+      const queue = queues.get(selection.category) ?? [];
+      queue.push(selection);
+      queues.set(selection.category, queue);
+    }
+  }
+
+  const ordered: Selection[] = [];
+  for (let slot = 0; slot < categories.length; slot++) {
+    const category = categories[slot];
+    const selection = bySlot.get(slot) ?? queues.get(category)?.shift();
+    if (!selection || selection.category !== category) return null;
+    ordered.push(selection);
+  }
+  return [...queues.values()].some((queue) => queue.length > 0) ? null : ordered;
+}
+
+function candidateAtArrival(
+  place: Place,
+  category: string,
+  parsed: ParsedPrompt,
+  weather: WeatherHour[] | null,
+  now: Date,
+  arrival: Date,
+  timeZone: string
+): boolean {
+  const result = filterPools(
+    { [category]: [place] },
+    parsed,
+    weather,
+    now,
+    arrival,
+    timeZone
+  );
+  return (result.pools[category] ?? []).some((candidate) => candidate.id === place.id);
+}
+
+interface StableChain {
+  selections: Array<Selection & { location: LatLng }>;
+  inbound: TravelLeg;
+  interLegs: TravelLeg[];
+  arrivals: Date[];
 }
 
 export async function rerouteItinerary(
@@ -108,218 +213,292 @@ export async function rerouteItinerary(
   depsIn: Partial<RerouteDeps> = {}
 ): Promise<RerouteResult> {
   const deps = { ...realDeps(), ...depsIn };
-  const tz = itinerary.timeZone ?? DEFAULT_ZONE;
+  const work = cloneItinerary(itinerary);
+  const timeZone = work.timeZone ?? DEFAULT_ZONE;
 
-  // Current statuses + locked ratchet against the reference time.
-  withStatuses(itinerary, now);
-
-  // floor_time = max(now, end of the active stop); no active stop → now.
-  const floor = floorTime(itinerary, now);
-
-  // Timed-stop bookkeeping first — legs join timed pairs, and the
-  // disruption's blast radius is defined in timed positions.
-  const timedIdx = timedIndexes(itinerary);
-
-  // Affected: strictly DOWNSTREAM of the broken leg (leg k joins timed
-  // stops k → k+1, so positions ≥ k+1), strictly after the floor, and
-  // never locked. Stops upstream of the break keep their COMMITTED times
-  // even when the outing hasn't started — a reroute reflows the tail, it
-  // never re-derives the schedule from `now`.
+  // Status derivation and the lock ratchet happen on the proposal. A failed
+  // reroute leaves even those fields byte-identical on the caller's object.
+  withStatuses(work, now);
+  const floor = floorTime(work, now);
+  const timedIdx = timedIndexes(work);
   const firstDownstreamPos = Math.max(0, disruption.legIndex) + 1;
+
   const affectedIdx: number[] = [];
-  timedIdx.forEach((stopIdx, pos) => {
-    const s = itinerary.stops[stopIdx];
+  const affectedPositions: number[] = [];
+  timedIdx.forEach((stopIndex, position) => {
+    const stop = work.stops[stopIndex];
     if (
-      pos >= firstDownstreamPos &&
-      s.status !== "skipped" &&
-      !s.locked &&
-      new Date(s.start_time!).getTime() > floor.getTime()
+      position >= firstDownstreamPos &&
+      stop.status !== "skipped" &&
+      !stop.locked &&
+      new Date(stop.start_time!).getTime() > floor.getTime()
     ) {
-      affectedIdx.push(stopIdx);
+      affectedIdx.push(stopIndex);
+      affectedPositions.push(position);
     }
   });
 
-  // observability at the apply step: where is the plan anchored, what
-  // does the engine think is affected — a reroute that re-derives times
-  // from `now` instead of the committed schedule is visible right here
   logEvent("info", "reroute_started", {
     legIndex: disruption.legIndex,
     now: now.toISOString(),
     floor: floor.toISOString(),
-    committedStarts: itinerary.stops.map((stop) => stop.start_time),
+    committedStarts: work.stops.map((stop) => stop.start_time),
     affectedIndexes: affectedIdx,
   });
 
   if (affectedIdx.length === 0) {
-    return {
-      rerouted: false,
-      reason: "nothing after the current stop to replan",
-    };
+    return { rerouted: false, reason: "nothing after the current stop to replan" };
   }
 
-  const firstAffectedTimedPos = timedIdx.indexOf(affectedIdx[0]);
+  // A compacted list across a locked/skipped gap is not a chain. In
+  // particular, never claim to repair leg k while silently skipping its
+  // locked destination and starting at a later stop.
+  if (
+    affectedPositions[0] !== firstDownstreamPos ||
+    affectedPositions.some(
+      (position, index) => position !== affectedPositions[0] + index
+    )
+  ) {
+    return { rerouted: false, reason: INCOMPLETE_REASON };
+  }
+
+  const firstAffectedTimedPos = affectedPositions[0];
   const prevTimedStop =
     firstAffectedTimedPos > 0
-      ? itinerary.stops[timedIdx[firstAffectedTimedPos - 1]]
+      ? work.stops[timedIdx[firstAffectedTimedPos - 1]]
       : null;
+  if (!prevTimedStop?.end_time || !validLocation(prevTimedStop.location)) {
+    return { rerouted: false, reason: INCOMPLETE_REASON };
+  }
 
-  const beforeSnaps = affectedIdx.map((i) => snap(itinerary.stops[i]));
-
-  // ── Re-run the pipeline scoped to the affected categories ──
-  const parsed = itinerary.parsed ?? fallbackParsedFor(itinerary);
+  const parsed = work.parsed ?? fallbackParsedFor(work);
   if (!parsed) return { rerouted: false, reason: UNKNOWN_LOCATION_MESSAGE };
-  const categories = affectedIdx.map((i) => itinerary.stops[i].category);
-
-  const rawPools = await deps.searchPools(parsed, categories);
-  // the replan consults the forecast like the initial plan does (§7.6);
-  // no coords or a failed lookup → null → gate skipped (keep-on-missing)
-  const origin = itinerary.home?.location ?? null;
-  const weather = origin ? await deps.getWeather(origin.latitude, origin.longitude) : null;
-  const { pools } = filterPools(rawPools, parsed, weather, now, floor, tz);
-
-  // Venues already used by kept stops must not be re-proposed.
-  const keptIds = new Set(
-    itinerary.stops
-      .filter((_, i) => !affectedIdx.includes(i))
-      .map((s) => s.id)
-      .filter((id): id is string => id !== null)
-  );
-  for (const k of Object.keys(pools)) {
-    pools[k] = pools[k].filter((p) => !keptIds.has(p.id));
-  }
-
-  // SLOT-aware: two affected stops can share a category, and they must get
-  // DIFFERENT venues. Indexing the answers by category (as this did) made
-  // both resolve to the SAME Selection object — the reroute planned one
-  // venue twice in one evening (code-audit 2026-07-18 §7.1).
-  const selections = await deps.selectVenues(parsed, pools, categories);
-  const bySlot = new Map(
-    selections.filter((s) => typeof s.slot === "number").map((s) => [s.slot!, s])
-  );
-  const leftoverByCategory = new Map<string, Selection[]>();
-  for (const s of selections) {
-    if (typeof s.slot === "number") continue;
-    const list = leftoverByCategory.get(s.category) ?? [];
-    list.push(s);
-    leftoverByCategory.set(s.category, list);
-  }
-  const ordered: Selection[] = categories.map((c, i) => {
-    const bySlotHit = bySlot.get(i);
-    if (bySlotHit) return bySlotHit;
-    // tolerate a slot-less answer (older dep implementations/tests): take
-    // the next unused selection for that category, never the same one twice
-    const queue = leftoverByCategory.get(c);
-    const next = queue && queue.length > 0 ? queue.shift() : undefined;
-    return (
-      next ?? {
-        category: c,
-        id: null,
-        reason: "no venues survived filtering",
-      }
-    );
-  });
-
-  // attach coordinates for travel + map
-  const venueOf = (sel: Selection): Place | undefined =>
-    sel.id ? pools[sel.category]?.find((p) => p.id === sel.id) : undefined;
-  const withLocations: Array<Selection & { location?: LatLng }> = ordered.map(
-    (sel) => {
-      const loc = venueOf(sel)?.location;
-      return loc ? { ...sel, location: loc } : { ...sel };
-    }
-  );
-
-  // ── Travel: inbound leg (last kept timed stop → first new venue),
-  // then legs between the new venues. The cancelled transit leg is
-  // re-fetched with transit excluded so the dead route can't return.
-  // Departure = the later of the floor and the previous kept stop's
-  // COMMITTED end — the committed schedule is the source of truth; the
-  // clock only wins once it has actually overtaken the plan.
+  const categories = affectedIdx.map((index) => work.stops[index].category);
+  const beforeSnaps = affectedIdx.map((index) => snap(work.stops[index]));
   const departMs = Math.max(
     floor.getTime(),
-    prevTimedStop?.end_time ? new Date(prevTimedStop.end_time).getTime() : 0
+    new Date(prevTimedStop.end_time).getTime()
   );
+  if (!Number.isFinite(departMs)) {
+    return { rerouted: false, reason: INCOMPLETE_REASON };
+  }
   const departISO = new Date(departMs).toISOString();
-  const timedPicks = withLocations.filter((s) => s.id && s.location);
 
-  let inbound: TravelLeg | null = null;
-  if (prevTimedStop?.location && timedPicks[0]?.location) {
-    const pairIndex = firstAffectedTimedPos - 1;
-    inbound = await deps.getSingleLeg(
+  // Pools and weather are fetched once for the whole proposal. Subsequent
+  // stabilization passes only exclude proven-invalid candidate IDs.
+  const rawPools = await deps.searchPools(parsed, categories);
+  const weatherOrigin = work.home?.location ?? parsed.home ?? null;
+  const weather = weatherOrigin
+    ? await deps.getWeather(weatherOrigin.latitude, weatherOrigin.longitude)
+    : null;
+  const keptIds = new Set(
+    work.stops
+      .filter((_, index) => !affectedIdx.includes(index))
+      .map((stop) => stop.id)
+      .filter((id): id is string => typeof id === "string")
+  );
+  const excluded = new Map<string, Set<string>>();
+  let stable: StableChain | null = null;
+  let stableOrdered: Selection[] = [];
+
+  for (let pass = 0; pass < MAX_STABILIZATION_PASSES; pass++) {
+    const pools: Record<string, Place[]> = {};
+    for (const category of new Set(categories)) {
+      const denied = excluded.get(category) ?? new Set<string>();
+      pools[category] = (rawPools[category] ?? []).filter(
+        (candidate) => !keptIds.has(candidate.id) && !denied.has(candidate.id)
+      );
+      if (pools[category].length === 0) {
+        return { rerouted: false, reason: INCOMPLETE_REASON };
+      }
+    }
+
+    const selected = await deps.selectVenues(parsed, pools, categories);
+    const ordered = orderSelections(selected, categories);
+    if (!ordered) return { rerouted: false, reason: INCOMPLETE_REASON };
+
+    const used = new Set<string>(keptIds);
+    const chosen: Array<{
+      selection: Selection;
+      place: Place;
+      location: LatLng;
+    }> = [];
+    for (let slot = 0; slot < ordered.length; slot++) {
+      const selection = ordered[slot];
+      const id = selection.id;
+      const place =
+        typeof id === "string"
+          ? pools[categories[slot]]?.find((candidate) => candidate.id === id)
+          : undefined;
+      if (!place || used.has(place.id)) {
+        return { rerouted: false, reason: INCOMPLETE_REASON };
+      }
+      if (!validLocation(place.location)) {
+        return { rerouted: false, reason: INCOMPLETE_REASON };
+      }
+      used.add(place.id);
+      chosen.push({ selection, place, location: place.location });
+    }
+
+    let cursorMs = departMs;
+    const arrivals: Date[] = [];
+    const interLegs: TravelLeg[] = [];
+    let invalid: { category: string; id: string } | null = null;
+
+    const inbound = await deps.getSingleLeg(
       prevTimedStop.location,
-      timedPicks[0].location!,
-      pairIndex,
-      departISO,
-      pairIndex === disruption.legIndex
+      chosen[0].location,
+      firstAffectedTimedPos - 1,
+      new Date(cursorMs).toISOString(),
+      firstAffectedTimedPos - 1 === disruption.legIndex
     );
+    if (!validLeg(inbound)) {
+      return { rerouted: false, reason: INCOMPLETE_REASON };
+    }
+    cursorMs += inbound.totalMinutes * 60_000;
+
+    for (let slot = 0; slot < chosen.length; slot++) {
+      const arrival = new Date(cursorMs);
+      arrivals.push(arrival);
+      const current = chosen[slot];
+      if (
+        !candidateAtArrival(
+          current.place,
+          categories[slot],
+          parsed,
+          weather,
+          now,
+          arrival,
+          timeZone
+        )
+      ) {
+        invalid = { category: categories[slot], id: current.place.id };
+        break;
+      }
+
+      const duration = getDuration(categories[slot]);
+      cursorMs +=
+        (duration.baseMinutes + duration.bufferMinutes) * 60_000;
+      if (slot < chosen.length - 1) {
+        const absolutePair = firstAffectedTimedPos + slot;
+        const routed = await deps.getSingleLeg(
+          current.location,
+          chosen[slot + 1].location,
+          absolutePair,
+          new Date(cursorMs).toISOString(),
+          absolutePair === disruption.legIndex
+        );
+        if (!validLeg(routed)) {
+          return { rerouted: false, reason: INCOMPLETE_REASON };
+        }
+        // buildSchedule consumes relative pair indexes for this sub-chain;
+        // write-back converts them to absolute timed-pair indexes.
+        interLegs.push({ ...routed, fromIndex: slot });
+        cursorMs += routed.totalMinutes * 60_000;
+      }
+    }
+
+    if (invalid) {
+      const denied = excluded.get(invalid.category) ?? new Set<string>();
+      denied.add(invalid.id);
+      excluded.set(invalid.category, denied);
+      continue;
+    }
+
+    stableOrdered = ordered;
+    stable = {
+      inbound,
+      interLegs,
+      arrivals,
+      selections: chosen.map(({ selection, place, location }) => ({
+        ...selection,
+        id: place.id,
+        name: place.displayName?.text ?? selection.name,
+        rating: place.rating,
+        priceLevel: place.priceLevel,
+        description: place.editorialSummary?.text,
+        currentOpeningHours: place.currentOpeningHours,
+        location,
+      })),
+    };
+    break;
   }
 
-  const interLegs: TravelLeg[] = [];
-  for (let j = 0; j < timedPicks.length - 1; j++) {
-    const absolutePair = firstAffectedTimedPos + j;
-    interLegs.push(
-      await deps.getSingleLeg(
-        timedPicks[j].location!,
-        timedPicks[j + 1].location!,
-        j, // relative index — buildSchedule matches by position
-        departISO,
-        absolutePair === disruption.legIndex
-      )
-    );
-  }
+  if (!stable) return { rerouted: false, reason: UNSTABLE_REASON };
 
-  // ── Schedule the replanned chain, anchored at the departure instant
-  // (+ inbound travel when the user has to get there from the kept stop).
-  const chainStart = new Date(departMs + (inbound?.totalMinutes ?? 0) * 60_000);
-  const { stops: newSched } = buildSchedule(
-    withLocations,
+  const { stops: scheduled } = buildSchedule(
+    stable.selections,
     "",
     now,
-    interLegs,
-    chainStart,
+    stable.interLegs,
+    stable.arrivals[0],
     null,
-    tz
+    timeZone
   );
+  if (
+    scheduled.length !== affectedIdx.length ||
+    scheduled.some(
+      (stop, index) =>
+        stop.id === null ||
+        !validLocation(stop.location) ||
+        !stop.start_time ||
+        new Date(stop.start_time).getTime() !== stable!.arrivals[index].getTime()
+    )
+  ) {
+    return { rerouted: false, reason: INCOMPLETE_REASON };
+  }
 
-  // ── Write back: replace affected stops in place, renumber leg
-  // indexes to absolute timed pairs, update the boundary stop's
-  // outbound leg (its times/venue stay untouched).
-  affectedIdx.forEach((stopIdx, j) => {
-    const ns = newSched[j];
-    if (ns.travelToNext) {
-      ns.travelToNext = {
-        ...ns.travelToNext,
-        fromIndex: firstAffectedTimedPos + j,
+  affectedIdx.forEach((stopIndex, index) => {
+    const next = scheduled[index];
+    if (next.travelToNext) {
+      next.travelToNext = {
+        ...next.travelToNext,
+        fromIndex: firstAffectedTimedPos + index,
       };
     }
-    itinerary.stops[stopIdx] = {
-      ...ns,
-      status: ns.id === null ? "skipped" : "upcoming",
+    work.stops[stopIndex] = {
+      ...next,
+      status: "upcoming",
       locked: false,
     };
   });
-  if (prevTimedStop && inbound) {
-    prevTimedStop.travelToNext = inbound;
-    prevTimedStop.travelMinutesToNext = inbound.totalMinutes;
+  prevTimedStop.travelToNext = {
+    ...stable.inbound,
+    fromIndex: firstAffectedTimedPos - 1,
+  };
+  prevTimedStop.travelMinutesToNext = stable.inbound.totalMinutes;
+  rebuildLegs(work);
+  withStatuses(work, now);
+
+  // Final invariant check before the one commit to the caller's object.
+  for (let index = 0; index < itinerary.stops.length; index++) {
+    if (affectedIdx.includes(index)) continue;
+    const before = itinerary.stops[index];
+    const after = work.stops[index];
+    if (
+      before.id !== after.id ||
+      before.name !== after.name ||
+      before.start_time !== after.start_time ||
+      before.end_time !== after.end_time
+    ) {
+      return { rerouted: false, reason: INCOMPLETE_REASON };
+    }
   }
-  // legs array rebuilt from the stops' travelToNext chain
-  rebuildLegs(itinerary);
 
-  withStatuses(itinerary, now);
+  const changed: ChangedStop[] = affectedIdx.map((stopIndex, index) => ({
+    stopIndex,
+    before: beforeSnaps[index],
+    after: snap(work.stops[stopIndex]),
+    reason: stableOrdered[index].reason,
+  }));
+  const unchanged = work.stops
+    .map((_, index) => index)
+    .filter((index) => !affectedIdx.includes(index));
 
+  Object.assign(itinerary, work);
   logEvent("info", "reroute_applied", {
     starts: itinerary.stops.map((stop) => stop.start_time),
   });
-
-  const changed: ChangedStop[] = affectedIdx.map((stopIdx, j) => ({
-    stopIndex: stopIdx,
-    before: beforeSnaps[j],
-    after: snap(itinerary.stops[stopIdx]),
-    reason: ordered[j].reason,
-  }));
-  const unchanged = itinerary.stops
-    .map((_, i) => i)
-    .filter((i) => !affectedIdx.includes(i));
 
   return {
     rerouted: true,
