@@ -90,7 +90,7 @@ async function searchText(
     if (data.places === undefined) return [];
     throw new ProviderError("places", 502, "places_invalid_response");
   }
-  return data.places.map((candidate, index) => {
+  return data.places.map((candidate) => {
     if (!isRecord(candidate) || typeof candidate.id !== "string" || candidate.id === "") {
       throw new ProviderError("places", 502, "places_invalid_response");
     }
