@@ -341,6 +341,19 @@ const cases: Array<[string, () => void]> = [
         orderByRequest([pick("ramen"), emptyPick("bar")], ["ramen", "bar"]).map((s) => s.category),
         ["ramen", "bar"]
       );
+      // repeated categories cannot be ordered by category name. A recovered
+      // replacement keeps the original numeric slot even when it arrived at
+      // the end of the selection array.
+      const firstBar = { ...pick("bar", "bar_1"), slot: 0 };
+      const secondBar = { ...pick("bar", "bar_2"), slot: 2 };
+      const middleMuseum = { ...pick("museum"), slot: 1 };
+      assert.deepStrictEqual(
+        orderByRequest(
+          [secondBar, firstBar, middleMuseum],
+          ["bar", "gallery", "bar"]
+        ).map((selection) => selection.id),
+        ["bar_1", "museum_1", "bar_2"]
+      );
     },
   ],
 ];

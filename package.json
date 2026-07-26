@@ -9,8 +9,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test:unit": "tsx scripts/run-unit-tests.ts",
-    "test:e2e": "playwright test",
-    "test:e2e:headed": "playwright test --headed",
+    "test:e2e": "tsx scripts/run-mock-e2e.ts",
+    "test:e2e:headed": "tsx scripts/run-mock-e2e.ts --headed",
     "test:e2e:live": "playwright test --config playwright.live.config.ts --grep-invert @mock",
     "check": "npm run lint && npm run typecheck && npm run test:unit && npm run build && npm run test:e2e"
   },

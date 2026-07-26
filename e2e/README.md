@@ -2,8 +2,9 @@
 
 ## Modes
 
-**Mock (default).** Playwright starts its own dev server on **:3100** with
-`E2E_MOCK=1` — the pipeline data sources (Groq parse/select/interpret,
+**Mock (default).** The npm harness starts one hidden dev server on **:3100**
+with `E2E_MOCK=1`, runs Playwright against it, and tears down only the process
+trees it created — the pipeline data sources (Groq parse/select/interpret,
 Places search, Routes legs, Weather) return deterministic fixtures from
 `app/api/_mock/fixtures.ts`. No quota burned; a live server on :3000 is
 never touched. The objective filter, scheduling, floor guards, and the
@@ -20,11 +21,13 @@ npm run test:e2e:headed   # mock, headed
 npm run test:e2e:live     # live APIs on :3000, skips @mock tests
 ```
 
-Mock mode explicitly leaves `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` blank. The
-production map component renders the same venue chips on its deterministic
-fallback projection, so mock E2E burns no Maps quota and verifies that the
-itinerary remains usable without browser-side Maps JavaScript. Fonts are
-served from the application bundle; no Google Fonts request is required.
+Mock mode supplies a deliberately fake browser Maps key, while the shared
+Playwright fixture aborts every non-local browser request. The production map
+component therefore renders venue chips on its deterministic fallback
+projection without burning Maps quota. `maps-resilience.spec.ts` intercepts
+the Maps script locally to prove both provider-signalled invalid-key fallback
+and blocked-script recovery through Retry and a real component remount. Fonts
+are served from the application bundle; no Google Fonts request is required.
 
 ## Fixtures worth knowing (for scenario tests)
 
@@ -55,6 +58,11 @@ served from the application bundle; no Google Fonts request is required.
   real open venue (Citywide Dumpling Bar / Harbourside Bao House). Pair
   one or both with a resolving category ("… then a bar at 7pm") for
   single- or multi-empty recovery scenarios.
+- **Per-slot recovery triggers:** **late gallery** opens at 8 PM, so
+  "dinner then a late gallery at 7pm" is empty at the plan anchor but valid
+  at slot 2's provisional 8:45 PM arrival. **Tiny bar** has exactly one
+  venue; asking for another tiny bar proves recovery excludes the ID already
+  occupied by slot 1 instead of duplicating it.
 - Unknown categories get a generated "Fixture <Category> One/Two/Three"
   pool — **Three carries NO hours** (keep-on-missing), so it survives the
   objective filter at ANY server hour: the determinism anchor for
@@ -96,6 +104,10 @@ All of the above are pinned exact-text in `failloud.spec.ts`.
 
 - `smoke.spec.ts` — harness proof: plans "dinner and drinks", asserts both
   stop cards render with names/times, runs the desync check.
+- `maps-resilience.spec.ts` (@mock) — provider-signalled invalid browser Maps
+  key, usable fallback pins, successful bounded Retry after a blocked script,
+  and remount after a cached transport rejection. Its provider responses are
+  local stubs; no Google request runs.
 - `fixtures.spec.ts` (@mock) — guards the seam: deterministic picks,
   fixture transit line, canned weather.
 - `failloud.spec.ts` (@mock) — every bad-input message pinned exact-text
@@ -105,7 +117,12 @@ All of the above are pinned exact-text in `failloud.spec.ts`.
   reason + widen offer for an empty category, accept-widen recovers the
   slot, decline routes to the replace follow-up, TWO empties resolve one
   at a time before the plan finishes, all-empty stays on the plain
-  fail-loud path.
+  fail-loud path; later slots use their own hours/weather instant, and an
+  occupied-only repeated category remains unresolved honestly.
+- `client-resilience.spec.ts` (@mock) — every client transport stage:
+  network rejection, abort/non-JSON/invalid payload handling, stale-weather
+  clearing, recovery retry safety, store/read failures, and swap/reroute
+  follow-up 500s. Every case asserts the relevant busy control clears.
 - `scenarios.spec.ts` (@mock) — interacting state: price refresh on a
   cheaper swap ($$$ → $$), description present/absent, swap input takes
   real keystrokes with spaces, repeated swaps (cheaper → fancier →

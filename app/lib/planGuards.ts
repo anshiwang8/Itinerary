@@ -329,10 +329,10 @@ export function widenOfferLabel(locationLabel?: string | null): string {
  * (parsed.category_signals). selectVenues appends empty-pool categories
  * last and the recovery flow resolves them in that appended position — so
  * without this, a recovered FIRST-requested category ("ramen then a bar")
- * renders at the END of the plan. `slots` maps a replacement category to
- * the requested category whose slot it fills (recovery's follow-up path,
- * e.g. { dessert: "ramen" }). Categories not in the request (e.g.
- * "general") sort after the known ones, keeping their relative order.
+ * renders at the END of the plan. Modern selections carry an unambiguous
+ * numeric slot, including repeated categories. `slots` remains the legacy
+ * fallback that maps a replacement category to the requested category it
+ * fills (e.g. { dessert: "ramen" }). Unknown categories sort last.
  */
 export function orderByRequest(
   selections: Selection[],
@@ -344,6 +344,12 @@ export function orderByRequest(
   );
   if (signals.length === 0) return selections;
   const pos = (s: Selection) => {
+    // Modern selections carry their original requested slot. It is the
+    // only unambiguous ordering key when categories repeat or a recovery
+    // replacement changes the category name.
+    if (typeof s.slot === "number" && Number.isInteger(s.slot) && s.slot >= 0) {
+      return s.slot;
+    }
     const slot = slots?.[s.category] ?? s.category;
     const i = signals.indexOf(slot);
     return i === -1 ? signals.length : i;

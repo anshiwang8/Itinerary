@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   buildSchedule,
   resolveStartTime,
@@ -41,6 +41,26 @@ import {
 import type { Selection } from "./api/select/selectVenues";
 import type { DropEntry, ParsedPrompt } from "./api/places/search/filter";
 import { isOpenAtInstant, type CurrentOpeningHours } from "./api/places/search/hours";
+import { ClientFetchError, fetchJson } from "./lib/clientFetch";
+import {
+  parseCreatePayload,
+  parseGeocodePayload,
+  parseItineraryPayload,
+  parseParsedPayload,
+  parsePlacesPayload,
+  parseReroutePayload,
+  parseSelectionsPayload,
+  parseSwapPayload,
+  parseTravelPayload,
+  parseWeatherPayload,
+} from "./lib/clientPayloads";
+import {
+  arrivalForRow,
+  mergeFinalArrivals,
+  mergePlacePools,
+  provisionalArrivals,
+  usedIdsOutsideRow,
+} from "./lib/recoverySlots";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, { StripHome, StripStop } from "./ItineraryStrip";
 
@@ -59,6 +79,7 @@ interface Place {
 type Pools = Record<string, Place[]>;
 interface WeatherBlock {
   category: string;
+  slot?: number;
   weatherBlocked: true;
   reason: string;
 }
@@ -81,10 +102,13 @@ interface PlanCtx {
   planZone: string;
   hp: { label: string; location: { latitude: number; longitude: number } };
   weather: WeatherHour[] | null;
-  /** the plan's ONE resolved start instant. Re-searches for a single slot
-   * must be filtered against THIS, not against a time re-resolved from
-   * that slot's category alone (§1.7). */
+  /** The plan's one resolved anchor. Slot-aware recovery starts here, then
+   * uses arrivalBySlot rather than re-resolving time from one category. */
   startInstant: Date;
+  /** Best known arrival for each original requested slot. Provisional
+   * duration-only targets are replaced by exact scheduled starts once the
+   * first route pass exists. */
+  arrivalBySlot: Record<number, string>;
   pools: Pools;
   sels: Selection[];
   drops: DropEntry[];
@@ -111,6 +135,11 @@ const rowKey = (e: { category: string; slot?: number }): string =>
 /** Does this selection fill the given row's slot? */
 const matchesRow = (s: Selection, e: { category: string; slot?: number }): boolean =>
   e.slot != null ? s.slot === e.slot : s.category === e.category;
+
+function clientErrorMessage(error: unknown, fallback = "Something went wrong. Please try again."): string {
+  if (error instanceof ClientFetchError) return error.message;
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 function WeatherIcon({ condition, precip }: { condition: string | null; precip: number | null }) {
   const c = (condition ?? "").toLowerCase();
@@ -240,7 +269,6 @@ export default function Home() {
 
   const [error, setError] = useState<string | null>(null);
   const [loadingText, setLoadingText] = useState<string | null>(null);
-  const busy = loadingText !== null;
 
   // lightweight clarifying questions (rule-based, pre-search)
   const [clarify, setClarify] = useState<{
@@ -289,7 +317,7 @@ export default function Home() {
     | {
         mode: "weather-gate";
         ctx: PlanCtx;
-        blocks: { category: string; reason: string }[];
+        blocks: { category: string; slot?: number; reason: string }[];
         /** generically-empty categories waiting behind the gate — carried
          * through so they get their normal recovery rows afterwards */
         pendingEmpties: EmptyRow[];
@@ -298,9 +326,30 @@ export default function Home() {
     | null
   >(null);
 
+  // One user-owned operation at a time. State-derived disabled flags make
+  // that visible, while the ref closes the same-tick gap before React has
+  // rendered the new busy state (double Enter/click and cross-action races).
+  const activeOperation = useRef<symbol | null>(null);
+  const recoveryBusy =
+    recovery?.mode === "empty" || recovery?.mode === "weather-gate"
+      ? recovery.busy
+      : false;
+  const busy = loadingText !== null || swapping || recoveryBusy;
+  const beginOperation = (): symbol | null => {
+    if (activeOperation.current) return null;
+    const token = Symbol("client-operation");
+    activeOperation.current = token;
+    return token;
+  };
+  const endOperation = (token: symbol) => {
+    if (activeOperation.current === token) activeOperation.current = null;
+  };
+
   async function runPipeline() {
     const q = prompt.trim();
-    if (!q || busy) return;
+    if (!q) return;
+    const operation = beginOperation();
+    if (!operation) return;
     setError(null);
     setBanner(null);
     setChangedIds(new Set());
@@ -308,6 +357,11 @@ export default function Home() {
     setSwapError(null);
     setClarify(null);
     setRecovery(null);
+    // A new attempt never inherits another plan's forecast or skip notes.
+    // If this attempt's weather read fails, unknown is more honest than
+    // stale weather from a different city or time.
+    setWeather(null);
+    setWeatherBlocks([]);
     // THE fail-loud surface: every degenerate/impossible/contradictory
     // input lands here with a reason + a suggested fix — never an empty
     // map, never a borrowed error from the wrong branch.
@@ -321,13 +375,12 @@ export default function Home() {
       if (degenerate) return fail(degenerate);
 
       setLoadingText("Reading your evening…");
-      const parseRes = await fetch("/api/parse", {
+      const parseData = await fetchJson<ParsedPrompt>("/api/parse", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: q }),
+        parse: parseParsedPayload,
       });
-      const parseData = await parseRes.json();
-      if (!parseRes.ok) throw new Error(parseData.error ?? `parse failed (${parseRes.status})`);
       // the city is app-supplied input, never LLM-inferred — it rides on
       // the parse so swap/reroute re-searches inherit it from the store
       parseData.city = city.trim();
@@ -360,20 +413,25 @@ export default function Home() {
 
       await continuePipeline(parseData);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(clientErrorMessage(err));
+    } finally {
       setLoadingText(null);
+      endOperation(operation);
     }
   }
 
   // clarify answered or skipped → resume the pipeline with final parse
   async function submitClarify(skip: boolean) {
     if (!clarify) return;
-    let updated: ParsedPrompt = { ...clarify.parsed };
-    const distribution = clarify.questions.find((question) => question.id === "distribution");
-    if (!skip) {
-      const whenAns = clarifyWhen === "pick a time" ? clarifyTime.trim() : clarifyWhen ?? "";
-      if (whenAns) updated.time_window = timeWindowForWhenAnswer(whenAns);
-      if (clarifyVibe.trim()) updated.aesthetic = clarifyVibe.trim();
+    const operation = beginOperation();
+    if (!operation) return;
+    try {
+      let updated: ParsedPrompt = { ...clarify.parsed };
+      const distribution = clarify.questions.find((question) => question.id === "distribution");
+      if (!skip) {
+        const whenAns = clarifyWhen === "pick a time" ? clarifyTime.trim() : clarifyWhen ?? "";
+        if (whenAns) updated.time_window = timeWindowForWhenAnswer(whenAns);
+        if (clarifyVibe.trim()) updated.aesthetic = clarifyVibe.trim();
       // the KIND answer narrows an ultra-vague prompt to a real category;
       // an uncounted "something to do" keeps the general pool, while a
       // counted request materializes one broad kind so it can expand to
@@ -414,17 +472,20 @@ export default function Home() {
         });
       }
     }
-    const finalizedSlots = finalizeRequestedSlots(updated);
-    if (!finalizedSlots.ok) {
-      setError(finalizedSlots.reason);
-      setLoadingText(null);
-      return;
+      const finalizedSlots = finalizeRequestedSlots(updated);
+      if (!finalizedSlots.ok) {
+        setError(finalizedSlots.reason);
+        setLoadingText(null);
+        return;
+      }
+      updated = finalizedSlots.parsed;
+      setError(null);
+      setClarify(null);
+      setParsedObj(updated);
+      await continuePipeline(updated);
+    } finally {
+      endOperation(operation);
     }
-    updated = finalizedSlots.parsed;
-    setError(null);
-    setClarify(null);
-    setParsedObj(updated);
-    await continuePipeline(updated);
   }
 
   // everything from the time check onward — parseData is final here.
@@ -449,15 +510,12 @@ export default function Home() {
       setLoadingText("Finding your city…");
       const cityQ = city.trim();
       if (!cityQ) return fail("Add a city so I know where to plan.");
-      const cityRes = await fetch("/api/geocode", {
+      const cityData = await fetchJson("/api/geocode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: cityQ }),
+        parse: parseGeocodePayload,
       });
-      const cityData = await cityRes.json();
-      if (!cityRes.ok) {
-        return fail(cityData.error ?? `Couldn't find "${cityQ}" — check the spelling?`);
-      }
       // the plan's resolved zone (geocoder-derived); fail-soft to Toronto —
       // a missing zone must not block a plan, but it's surfaced (banner + log)
       let planZone: string = cityData.timeZone ?? "America/Toronto";
@@ -467,15 +525,12 @@ export default function Home() {
       };
       const addrQ = startAddress.trim();
       if (addrQ) {
-        const addrRes = await fetch("/api/geocode", {
+        const addrData = await fetchJson("/api/geocode", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ query: `${addrQ}, ${cityQ}` }),
+          parse: parseGeocodePayload,
         });
-        const addrData = await addrRes.json();
-        if (!addrRes.ok) {
-          return fail(addrData.error ?? `Couldn't find "${addrQ}" — check the spelling?`);
-        }
         hp = { label: `Start · ${addrData.label ?? addrQ}`, location: addrData.location };
         if (addrData.timeZone) planZone = addrData.timeZone;
       }
@@ -525,32 +580,31 @@ export default function Home() {
         return fail(check.reason);
       }
 
-      let weather = null;
+      let weather: WeatherHour[] | null = null;
       try {
-        const wr = await fetch(
-          `/api/weather?lat=${hp.location.latitude}&lng=${hp.location.longitude}`
+        weather = await fetchJson(
+          `/api/weather?lat=${hp.location.latitude}&lng=${hp.location.longitude}`,
+          { parse: parseWeatherPayload }
         );
-        if (wr.ok) {
-          weather = await wr.json();
-          // the ambient chip should show the PLAN's city, not the default
-          if (Array.isArray(weather)) setWeather(weather);
-        }
+        // the ambient chip should show the PLAN's city, not the default
+        setWeather(weather);
       } catch {
         weather = null;
+        setWeather(null);
       }
 
       setLoadingText("Finding places…");
-      const placesRes = await fetch("/api/places/search", {
+      const {
+        pools: categories,
+        drops,
+        weatherBlocks: wxBlocks,
+      } = await fetchJson("/api/places/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ parsed: parseData, weather, timeZone: planZone }),
+        parse: parsePlacesPayload,
       });
-      const placesData = await placesRes.json();
-      if (!placesRes.ok) throw new Error(placesData.error ?? `places failed (${placesRes.status})`);
-      const { _dropLog, _weatherBlocked, ...categories } = placesData;
-      const drops: DropEntry[] = Array.isArray(_dropLog) ? _dropLog : [];
-      setPools(categories as Pools);
-      const wxBlocks = Array.isArray(_weatherBlocked) ? _weatherBlocked : [];
+      setPools(categories);
       setWeatherBlocks(wxBlocks);
 
       // the empty-map net: EVERY pool came back empty → say why, don't
@@ -559,23 +613,45 @@ export default function Home() {
       // to push past one — so that case routes into the SAME recovery
       // panel instead (widen / try something else), with synthesized
       // null-id selections since select never ran.
-      const poolEntries = Object.entries(categories as Pools);
+      const poolEntries = Object.entries(categories);
       const allEmpty =
         poolEntries.length === 0 ||
         poolEntries.every(([, arr]) => !Array.isArray(arr) || arr.length === 0);
       if (allEmpty) {
         if (opts.overrideTimeGate && poolEntries.length > 0) {
-          const emptySels: Selection[] = poolEntries.map(([c]) => ({
-            category: c,
+          const requestedSlots =
+            parseData.category_signals.length > 0
+              ? parseData.category_signals
+              : poolEntries.map(([category]) => category);
+          const emptySels: Selection[] = requestedSlots.map((category, slot) => ({
+            category,
+            slot,
             id: null,
             reason: "no venues survived filtering",
           }));
+          const arrivalBySlot = provisionalArrivals(
+            requestedSlots,
+            startInstant,
+            emptySels
+          );
           setRecovery({
             mode: "empty",
-            ctx: { parseData, planZone, hp, weather, startInstant, pools: categories as Pools, sels: emptySels, drops, slots: {} },
-            empties: poolEntries.map(([c]) => ({
-              category: c,
-              reason: emptyCategoryReason(c, drops, parseData.location),
+            ctx: {
+              parseData,
+              planZone,
+              hp,
+              weather,
+              startInstant,
+              arrivalBySlot,
+              pools: categories,
+              sels: emptySels,
+              drops,
+              slots: {},
+            },
+            empties: requestedSlots.map((category, slot) => ({
+              category,
+              slot,
+              reason: emptyCategoryReason(category, drops, parseData.location),
             })),
             replaceText: {},
             busy: false,
@@ -592,7 +668,7 @@ export default function Home() {
       }
 
       setLoadingText("Choosing the spots…");
-      const selectRes = await fetch("/api/select", {
+      const { selections: sels } = await fetchJson("/api/select", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -602,23 +678,30 @@ export default function Home() {
           // for twice is TWO stops sharing one pool (code-audit §7.1)
           slots: (parseData.category_signals ?? []).length > 0 ? parseData.category_signals : undefined,
         }),
+        parse: parseSelectionsPayload,
       });
-      const selectData = await selectRes.json();
-      if (!selectRes.ok) throw new Error(selectData.error ?? `select failed (${selectRes.status})`);
-      const sels: Selection[] = selectData.selections ?? [];
 
       // a hard constraint nothing actually meets → fail loud, never a
       // pick with a "check with the venue" hedge
       const unmet = sels.find((s) => s.unmetConstraint);
       if (unmet) return fail(unmetConstraintReason(unmet.category, unmet.unmetConstraint!));
 
+      const requestedCategories =
+        parseData.category_signals.length > 0
+          ? parseData.category_signals
+          : sels.map((selection) => selection.category);
       const ctx: PlanCtx = {
         parseData,
         planZone,
         hp,
         weather,
         startInstant,
-        pools: categories as Pools,
+        arrivalBySlot: provisionalArrivals(
+          requestedCategories,
+          startInstant,
+          sels
+        ),
+        pools: categories,
         sels,
         drops,
         slots: {},
@@ -651,7 +734,11 @@ export default function Home() {
           setRecovery({
             mode: "weather-gate",
             ctx,
-            blocks: blocked.map((s) => ({ category: s.category, reason: wxByCat.get(s.category)! })),
+            blocks: blocked.map((s) => ({
+              category: s.category,
+              slot: s.slot,
+              reason: wxByCat.get(s.category)!,
+            })),
             pendingEmpties: genericEmpties,
             busy: false,
           });
@@ -672,7 +759,8 @@ export default function Home() {
 
       await finishPipeline(ctx);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(clientErrorMessage(err));
+    } finally {
       setLoadingText(null);
     }
   }
@@ -715,7 +803,7 @@ export default function Home() {
             0,
             ...dry.stops.filter((st) => st.id !== null).map((st) => st.durationMinutes?.total ?? 0),
           ];
-          const travelRes = await fetch("/api/schedule/travel", {
+          const travelData = await fetchJson("/api/schedule/travel", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -723,9 +811,8 @@ export default function Home() {
               departureTime: startISO,
               dwellMinutes,
             }),
+            parse: parseTravelPayload,
           });
-          const travelData = await travelRes.json();
-          if (!travelRes.ok) throw new Error(travelData.error ?? `travel failed (${travelRes.status})`);
           const split = splitHomeLeg(travelData.legs ?? []);
           hl = split.homeLeg;
           legs = split.interLegs;
@@ -813,7 +900,11 @@ export default function Home() {
             );
             setRecovery({
               mode: "empty",
-              ctx: { ...ctx, sels: clearedSels },
+              ctx: {
+                ...ctx,
+                sels: clearedSels,
+                arrivalBySlot: mergeFinalArrivals(ctx.arrivalBySlot, stops),
+              },
               empties: rows,
               replaceText: {},
               busy: false,
@@ -841,9 +932,9 @@ export default function Home() {
 
       // auto-store the itinerary so the live/reroute controls work at once
       await storeItinerary(stops, legs, hl, parseData, pools, "", hp, planZone);
-      setLoadingText(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(clientErrorMessage(err));
+    } finally {
       setLoadingText(null);
     }
   }
@@ -855,9 +946,16 @@ export default function Home() {
   // run for real.
   async function searchSlot(
     ctx: PlanCtx,
+    row: { category: string; slot?: number },
     searchCategory: string,
     opts: { dropLocation?: boolean; ignoreWeather?: boolean }
-  ): Promise<{ sel?: Selection; pool: Place[]; drops: DropEntry[] }> {
+  ): Promise<{
+    sel?: Selection;
+    pool: Place[];
+    drops: DropEntry[];
+    onlyUsed: boolean;
+    weatherReason?: string;
+  }> {
     const scopedParsed = {
       ...ctx.parseData,
       // Selection is for this ONE recovery slot. Passing the original
@@ -869,7 +967,16 @@ export default function Home() {
       stop_count: 1,
       ...(opts.dropLocation ? { location: "" } : {}),
     };
-    const placesRes = await fetch("/api/places/search", {
+    const targetTime = arrivalForRow(
+      ctx.arrivalBySlot,
+      row,
+      ctx.startInstant
+    );
+    const {
+      pools: poolObj,
+      drops,
+      weatherBlocks,
+    } = await fetchJson("/api/places/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -877,31 +984,37 @@ export default function Home() {
         categoriesOverride: [searchCategory],
         weather: opts.ignoreWeather ? null : ctx.weather,
         timeZone: ctx.planZone,
-        // filter the replacement at the SLOT's real instant (§1.7)
-        targetTime: ctx.startInstant.toISOString(),
+        // Filter against this slot's own provisional or scheduled arrival,
+        // never the whole plan's opening anchor.
+        targetTime: targetTime.toISOString(),
       }),
+      parse: parsePlacesPayload,
     });
-    const placesData = await placesRes.json();
-    if (!placesRes.ok) throw new Error(placesData.error ?? `places failed (${placesRes.status})`);
-    const { _dropLog, _weatherBlocked, ...poolObj } = placesData;
-    void _weatherBlocked;
-    const pool: Place[] = (poolObj as Pools)[searchCategory] ?? [];
-    const drops: DropEntry[] = Array.isArray(_dropLog) ? _dropLog : [];
+    const pool = poolObj[searchCategory] ?? [];
+    const usedIds = usedIdsOutsideRow(ctx.sels, row);
+    const availablePool = pool.filter((place) => !usedIds.has(place.id));
+    const onlyUsed = pool.length > 0 && availablePool.length === 0;
+    const weatherReason = weatherBlocks.find(
+      (block) => block.category === searchCategory
+    )?.reason;
 
     let sel: Selection | undefined;
-    if (pool.length > 0) {
-      const selRes = await fetch("/api/select", {
+    if (availablePool.length > 0) {
+      const { selections } = await fetchJson("/api/select", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parsed: scopedParsed, pools: { [searchCategory]: pool } }),
+        body: JSON.stringify({
+          parsed: scopedParsed,
+          pools: { [searchCategory]: availablePool },
+          slots: [searchCategory],
+        }),
+        parse: parseSelectionsPayload,
       });
-      const selData = await selRes.json();
-      if (!selRes.ok) throw new Error(selData.error ?? `select failed (${selRes.status})`);
-      sel = (selData.selections as Selection[] | undefined)?.find(
+      sel = selections.find(
         (s) => s.category === searchCategory
       );
     }
-    return { sel, pool, drops };
+    return { sel, pool, drops, onlyUsed, weatherReason };
   }
 
   /** Merge a resolved slot back into the plan context (prompt order is
@@ -917,12 +1030,29 @@ export default function Home() {
     const mergedSels = ctx.sels.map((s) =>
       matchesRow(s, row) ? { ...sel, slot: s.slot ?? sel.slot } : s
     );
-    const mergedPools: Pools = { ...ctx.pools, [sel.category]: pool };
+    const mergedPools: Pools = {
+      ...ctx.pools,
+      [sel.category]: mergePlacePools(ctx.pools[sel.category], pool),
+    };
     const mergedSlots =
       sel.category === row.category
         ? ctx.slots
         : { ...ctx.slots, [sel.category]: ctx.slots[row.category] ?? row.category };
-    return { ...ctx, sels: mergedSels, pools: mergedPools, slots: mergedSlots };
+    const requestedCategories =
+      ctx.parseData.category_signals.length > 0
+        ? ctx.parseData.category_signals
+        : mergedSels.map((selection) => selection.category);
+    return {
+      ...ctx,
+      sels: mergedSels,
+      pools: mergedPools,
+      slots: mergedSlots,
+      arrivalBySlot: provisionalArrivals(
+        requestedCategories,
+        ctx.startInstant,
+        mergedSels
+      ),
+    };
   }
 
   // Re-resolve ONE empty category — widen (drop the neighbourhood, search
@@ -935,12 +1065,19 @@ export default function Home() {
   ) {
     if (recovery?.mode !== "empty") return;
     const { ctx } = recovery;
-    const category = row.category;
     const searchCategory = opts.searchCategory.trim();
     if (!searchCategory) return;
+    const operation = beginOperation();
+    if (!operation) return;
     setRecovery({ ...recovery, busy: true, note: null });
     try {
-      const { sel: newSel, pool: newPool, drops: newDrops } = await searchSlot(ctx, searchCategory, {
+      const {
+        sel: newSel,
+        pool: newPool,
+        drops: newDrops,
+        onlyUsed,
+        weatherReason,
+      } = await searchSlot(ctx, row, searchCategory, {
         dropLocation: opts.dropLocation,
       });
 
@@ -965,7 +1102,11 @@ export default function Home() {
         setRecovery({
           ...recovery,
           busy: false,
-          note: opts.dropLocation
+          note: onlyUsed
+            ? `${narrowedSlotReason(searchCategory, opts.dropLocation ? null : ctx.parseData.location)} Try a different kind of stop?`
+            : weatherReason
+            ? `${weatherReason.charAt(0).toUpperCase()}${weatherReason.slice(1)} — ${searchCategory} does not fit this slot right now. Try another?`
+            : opts.dropLocation
             ? `Still no ${searchCategory} city-wide — tell me what you'd like there instead?`
             : `${stillReason} Try another?`,
         });
@@ -973,9 +1114,16 @@ export default function Home() {
     } catch (err) {
       setRecovery((r) =>
         r && r.mode === "empty"
-          ? { ...r, busy: false, note: err instanceof Error ? err.message : String(err) }
+          ? { ...r, busy: false, note: clientErrorMessage(err) }
           : r
       );
+    } finally {
+      setRecovery((current) =>
+        current?.mode === "empty" && current.busy
+          ? { ...current, busy: false }
+          : current
+      );
+      endOperation(operation);
     }
   }
 
@@ -983,11 +1131,17 @@ export default function Home() {
   // without them (they stay skipped, as before, but now by explicit choice)
   async function planWithoutEmpties() {
     if (recovery?.mode !== "empty") return;
+    const operation = beginOperation();
+    if (!operation) return;
     const ctx = recovery.ctx;
-    setRecovery(null);
-    // the arrival check already ran for this plan and the user has decided
-    // — the failing slots are emptied, so don't re-litigate them (§1.4)
-    await finishPipeline(ctx, { skipArrivalCheck: true });
+    try {
+      setRecovery(null);
+      // the arrival check already ran for this plan and the user has decided
+      // — the failing slots are emptied, so don't re-litigate them (§1.4)
+      await finishPipeline(ctx, { skipArrivalCheck: true });
+    } finally {
+      endOperation(operation);
+    }
   }
 
   // ── time-gate actions (batch 4b) ──────────────────────────────────────
@@ -997,9 +1151,15 @@ export default function Home() {
   // via keep-on-missing; nothing surviving lands in the recovery panel).
   async function overrideTimeGate() {
     if (recovery?.mode !== "time-gate") return;
+    const operation = beginOperation();
+    if (!operation) return;
     const parsed = recovery.parsed;
-    setRecovery(null);
-    await continuePipeline(parsed, { overrideTimeGate: true });
+    try {
+      setRecovery(null);
+      await continuePipeline(parsed, { overrideTimeGate: true });
+    } finally {
+      endOperation(operation);
+    }
   }
 
   // "Something else": swap direction without retyping — re-open the kind
@@ -1014,7 +1174,7 @@ export default function Home() {
   // consequences: a category that's genuinely closed right now gets the
   // explicit-window refusal, exactly like now+that-category typed fresh.
   function timeGateSomethingElse() {
-    if (recovery?.mode !== "time-gate") return;
+    if (recovery?.mode !== "time-gate" || activeOperation.current) return;
     const parsed = {
       ...recovery.parsed,
       category_signals: [],
@@ -1038,31 +1198,51 @@ export default function Home() {
   // the EXISTING generic recovery flow — never a third dead end.
   async function overrideWeatherGate() {
     if (recovery?.mode !== "weather-gate") return;
+    const operation = beginOperation();
+    if (!operation) return;
     const gate = recovery;
     setRecovery({ ...gate, busy: true });
     setLoadingText("Checking anyway…");
     try {
       let ctx = gate.ctx;
       const resolved = new Set<string>();
-      const stillEmpty: { category: string; reason: string; noWiden?: boolean }[] = [];
+      const stillEmpty: EmptyRow[] = [];
       for (const b of gate.blocks) {
-        const { sel, pool, drops } = await searchSlot(ctx, b.category, { ignoreWeather: true });
+        const { sel, pool, drops, onlyUsed } = await searchSlot(
+          ctx,
+          b,
+          b.category,
+          { ignoreWeather: true }
+        );
         if (sel && sel.id !== null) {
-          ctx = mergeSlot(ctx, { category: b.category }, sel, pool);
-          resolved.add(b.category);
+          ctx = mergeSlot(ctx, b, sel, pool);
+          resolved.add(rowKey(b));
         } else {
           // empty even with weather ignored — a real availability problem
           // now, so the normal empty-slot reasons (and widen) apply
           stillEmpty.push({
             category: b.category,
-            reason: emptyCategoryReason(b.category, drops, ctx.parseData.location),
+            slot: b.slot,
+            reason: onlyUsed
+              ? narrowedSlotReason(b.category, ctx.parseData.location)
+              : emptyCategoryReason(b.category, drops, ctx.parseData.location),
           });
         }
       }
       // a planned stop is no longer "skipped" — drop its stale weather note
       // (unresolved/declined blocks keep theirs; those stay honestly skipped)
       if (resolved.size > 0) {
-        setWeatherBlocks((prev) => prev.filter((b) => !resolved.has(b.category)));
+        const blockedCategories = new Set(gate.blocks.map((block) => block.category));
+        const unresolvedCategories = new Set(
+          stillEmpty.map((block) => block.category)
+        );
+        setWeatherBlocks((prev) =>
+          prev.filter(
+            (block) =>
+              !blockedCategories.has(block.category) ||
+              unresolvedCategories.has(block.category)
+          )
+        );
       }
       const remaining = [...stillEmpty, ...gate.pendingEmpties];
       if (remaining.length === 0) {
@@ -1080,9 +1260,15 @@ export default function Home() {
         setLoadingText(null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setRecovery(null);
+      setError(clientErrorMessage(err));
+    } finally {
+      setRecovery((current) =>
+        current?.mode === "weather-gate" && current.busy
+          ? { ...current, busy: false }
+          : current
+      );
       setLoadingText(null);
+      endOperation(operation);
     }
   }
 
@@ -1092,7 +1278,7 @@ export default function Home() {
   // input is the "different direction" affordance, and "Plan without it"
   // stays available since other stops survived.
   function weatherGateSomethingElse() {
-    if (recovery?.mode !== "weather-gate") return;
+    if (recovery?.mode !== "weather-gate" || activeOperation.current) return;
     const gate = recovery;
     setRecovery({
       mode: "empty",
@@ -1100,6 +1286,7 @@ export default function Home() {
       empties: [
         ...gate.blocks.map((b) => ({
           category: b.category,
+          slot: b.slot,
           reason: `${b.reason.charAt(0).toUpperCase()}${b.reason.slice(1)} — pick something else for this stop?`,
           noWiden: true,
         })),
@@ -1125,59 +1312,70 @@ export default function Home() {
       const loc = st.id ? (poolsIn[st.category] ?? []).find((p) => p.id === st.id)?.location : undefined;
       return loc ? { ...st, location: loc } : st;
     });
-    const res = await fetch("/api/itinerary", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        stops: enriched,
-        legs,
-        parsed,
-        homeLeg: hl,
-        ...(home ? { home } : {}),
-        ...(timeZone ? { timeZone } : {}),
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
+    try {
+      const data = await fetchJson("/api/itinerary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stops: enriched,
+          legs,
+          parsed,
+          homeLeg: hl,
+          ...(home ? { home } : {}),
+          ...(timeZone ? { timeZone } : {}),
+        }),
+        parse: parseCreatePayload,
+      });
+      const stored = await readItinerary(data.id, simValue);
+      setItinerary(stored);
+      const active = stored.stops.find((stop) => stop.status === "active");
+      if (active?.id) setSelected(active.id);
+    } catch (err) {
       // the plan is already rendered at this point, but without a stored id
       // there is no swapping or rerouting it — say so rather than leaving a
       // map whose controls quietly do nothing (§6.4)
-      setError(
-        (data.error ?? `itinerary failed (${res.status})`) +
-          " — the plan is shown but can't be swapped or rerouted; try planning again."
+      throw new Error(
+        `${clientErrorMessage(err)} — the plan is shown but can't be swapped or rerouted; try planning again.`
       );
-      return;
     }
-    await refreshItinerary(data.id, simValue);
+  }
+
+  async function readItinerary(id: string, simValue: string): Promise<Itinerary> {
+    const nowISO = simValue ? new Date(simValue).toISOString() : "";
+    const url = `/api/itinerary/${id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`;
+    return fetchJson<Itinerary>(url, { parse: parseItineraryPayload });
   }
 
   async function refreshItinerary(id: string, simValue: string) {
-    const nowISO = simValue ? new Date(simValue).toISOString() : "";
-    const url = `/api/itinerary/${id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`;
-    let res: Response;
-    let data: Itinerary;
     try {
-      res = await fetch(url);
-      data = await res.json();
+      const data = await readItinerary(id, simValue);
+      setItinerary(data);
+      const active = data.stops.find((s) => s.status === "active");
+      if (active?.id) setSelected(active.id);
+      return data;
     } catch (err) {
       // a silent return left the strip and map showing state the store no
       // longer agrees with — including right after a swap or reroute that
       // actually succeeded server-side (code-audit 2026-07-18 §6.4)
       setError(
-        `Couldn't refresh the plan — what you see may be out of date. (${err instanceof Error ? err.message : String(err)})`
+        `Couldn't refresh the plan — what you see may be out of date. (${clientErrorMessage(err)})`
       );
-      return;
+      return null;
     }
-    if (!res.ok) {
-      setError(
-        (data as unknown as { error?: string })?.error ??
-          "Couldn't refresh the plan — what you see may be out of date."
-      );
-      return;
+  }
+
+  async function updateSimulationTime(value: string) {
+    if (!itinerary) return;
+    const operation = beginOperation();
+    if (!operation) return;
+    setSimNow(value);
+    setLoadingText("Refreshing the simulated time…");
+    try {
+      await refreshItinerary(itinerary.id, value);
+    } finally {
+      setLoadingText(null);
+      endOperation(operation);
     }
-    setItinerary(data);
-    const active = data.stops.find((s) => s.status === "active");
-    if (active?.id) setSelected(active.id);
   }
 
   function applyItinerary(it: Itinerary) {
@@ -1187,67 +1385,112 @@ export default function Home() {
     setHomeLeg(it.homeLeg ?? null);
   }
 
+  function mutationOutcomeMayBeAmbiguous(err: unknown): boolean {
+    if (!(err instanceof ClientFetchError)) return true;
+    return (
+      err.status === null ||
+      err.code === "invalid_json" ||
+      err.code === "invalid_payload" ||
+      (err.status != null && err.status >= 500)
+    );
+  }
+
   async function fireDisruption() {
     if (!itinerary) return;
+    const operation = beginOperation();
+    if (!operation) return;
     const timed = itinerary.stops.filter((s) => s.start_time);
     const broken = timed[disruptLeg]?.travelToNext;
     const legName =
       broken?.transit?.lineName ?? (broken?.mode === "transit" ? "The transit leg" : "That leg");
 
     const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
-    const res = await fetch(`/api/itinerary/${itinerary.id}/reroute`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        disruption: { type: "transit_cancelled", legIndex: disruptLeg },
-        version: itinerary.version,
-        ...(nowISO ? { now: nowISO } : {}),
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setError(data.error ?? `reroute failed (${res.status})`);
-      return;
-    }
-    if (!data.rerouted) {
-      setBannerFlat(true);
-      setBanner(`${legName} cancelled — ${data.reason}.`);
-      setChangedIds(new Set());
-      return;
-    }
-
-    const itRes = await fetch(
-      `/api/itinerary/${itinerary.id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`
-    );
-    const updated: Itinerary = await itRes.json();
-
-    // capture pre-reroute starts for the strike-through, keyed by venue id
-    const olds: Record<string, string | null> = {};
-    const ids = new Set<string>();
-    for (const c of data.changed as { stopIndex: number; before: { start: string | null } }[]) {
-      const st = updated.stops[c.stopIndex];
-      if (st.id) {
-        ids.add(st.id);
-        olds[st.id] = c.before.start;
+    let mutationApplied = false;
+    setError(null);
+    setLoadingText("Replanning the route…");
+    try {
+      const data = await fetchJson(
+        `/api/itinerary/${itinerary.id}/reroute`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            disruption: { type: "transit_cancelled", legIndex: disruptLeg },
+            version: itinerary.version,
+            ...(nowISO ? { now: nowISO } : {}),
+          }),
+          parse: parseReroutePayload,
+        }
+      );
+      if (!data.rerouted) {
+        setBannerFlat(true);
+        setBanner(`${legName} cancelled — ${data.reason}.`);
+        setChangedIds(new Set());
+        return;
       }
-    }
-    applyItinerary(updated);
-    setChangedIds(ids);
-    setOldStarts(olds);
-    // surface the change: expand the first replanned stop so its new venue
-    // and settled time are the hero of the moment
-    const firstChanged = (data.changed as { stopIndex: number }[])[0];
-    if (firstChanged) setSelected(updated.stops[firstChanged.stopIndex].id ?? null);
+      mutationApplied = true;
+      const updated = await readItinerary(itinerary.id, nowISO ?? "");
 
-    // the banner shows the instant the new chain actually departs from —
-    // for an unstarted plan that's the kept stop's committed end, not `now`
-    const floorLabel = formatStopTime(data.anchor_time ?? data.floor_time, new Date(), itinerary.timeZone ?? planZone);
-    const kept = updated.stops.find((s) => s.status === "active" || s.status === "completed");
-    setBannerFlat(false);
-    setBanner(
-      `${legName} cancelled. Replanned from ${floorLabel}` +
-        (kept ? ` — your ${kept.category}'s unchanged.` : ".")
-    );
+      // capture pre-reroute starts for the strike-through, keyed by venue id
+      const olds: Record<string, string | null> = {};
+      const ids = new Set<string>();
+      for (const changed of data.changed) {
+        const stop = updated.stops[changed.stopIndex];
+        if (stop?.id) {
+          ids.add(stop.id);
+          olds[stop.id] = changed.before.start;
+        }
+      }
+      applyItinerary(updated);
+      setChangedIds(ids);
+      setOldStarts(olds);
+      // surface the change: expand the first replanned stop so its new venue
+      // and settled time are the hero of the moment
+      const firstChanged = data.changed[0];
+      if (firstChanged) {
+        setSelected(updated.stops[firstChanged.stopIndex]?.id ?? null);
+      }
+
+      // the banner shows the instant the new chain actually departs from —
+      // for an unstarted plan that's the kept stop's committed end, not `now`
+      const floorLabel = formatStopTime(
+        data.anchor_time,
+        new Date(),
+        itinerary.timeZone ?? planZone
+      );
+      const kept = updated.stops.find(
+        (stop) => stop.status === "active" || stop.status === "completed"
+      );
+      setBannerFlat(false);
+      setBanner(
+        `${legName} cancelled. Replanned from ${floorLabel}` +
+          (kept ? ` — your ${kept.category}'s unchanged.` : ".")
+      );
+    } catch (err) {
+      const detail = clientErrorMessage(err);
+      if (!mutationApplied && mutationOutcomeMayBeAmbiguous(err)) {
+        try {
+          const latest = await readItinerary(itinerary.id, nowISO ?? "");
+          applyItinerary(latest);
+          setError(
+            `The reroute response was interrupted, so the latest saved plan was refreshed. Check the route before retrying. (${detail})`
+          );
+        } catch (refreshErr) {
+          setError(
+            `The reroute response was interrupted and the saved plan could not be refreshed; what you see may be out of date. (${clientErrorMessage(refreshErr)})`
+          );
+        }
+        return;
+      }
+      setError(
+        mutationApplied
+          ? `Couldn't refresh the replanned itinerary — what you see may be out of date. (${detail})`
+          : detail
+      );
+    } finally {
+      setLoadingText(null);
+      endOperation(operation);
+    }
   }
 
   // Surgical per-stop swap: replace the selected upcoming stop from its
@@ -1260,69 +1503,94 @@ export default function Home() {
     // findIndex by category always returned the FIRST one (§7.2)
     const stopIndex = itinerary.stops.findIndex((s) => s.id === selected);
     if (stopIndex < 0) return;
+    const operation = beginOperation();
+    if (!operation) return;
 
     setSwapping(true);
     setSwapError(null);
     const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
+    let mutationApplied = false;
     // pre-swap starts (by id) so downstream shifts can strike-through
     const oldById = Object.fromEntries(
       itinerary.stops.filter((s) => s.id).map((s) => [s.id as string, s.start_time])
     );
-    const res = await fetch(`/api/itinerary/${itinerary.id}/swap`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        stopIndex,
-        refinement,
-        version: itinerary.version,
-        ...(nowISO ? { now: nowISO } : {}),
-      }),
-    });
-    const data = await res.json();
-    setSwapping(false);
-    if (!res.ok) {
-      setSwapError(data.error ?? `swap failed (${res.status})`);
-      return;
-    }
-    if (!data.swapped) {
-      // honest refusal — nothing better found, original kept
-      setBannerFlat(true);
-      setBanner(data.reason);
-      return;
-    }
-
-    const itRes = await fetch(
-      `/api/itinerary/${itinerary.id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`
-    );
-    const updated: Itinerary = await itRes.json();
-
-    const ids = new Set<string>();
-    const olds: Record<string, string | null> = {};
-    const swapped = updated.stops[data.stopIndex];
-    // the swapped stop: venue changed, slot held → no time strike, just settle
-    if (swapped.id) ids.add(swapped.id);
-    // downstream shifts: their times moved → strike old, settle new
-    for (const di of data.downstreamShifted as number[]) {
-      const s = updated.stops[di];
-      if (s.id) {
-        ids.add(s.id);
-        olds[s.id] = oldById[s.id] ?? null;
+    try {
+      const data = await fetchJson(`/api/itinerary/${itinerary.id}/swap`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stopIndex,
+          refinement,
+          version: itinerary.version,
+          ...(nowISO ? { now: nowISO } : {}),
+        }),
+        parse: parseSwapPayload,
+      });
+      if (!data.swapped) {
+        // honest refusal — nothing better found, original kept
+        setBannerFlat(true);
+        setBanner(data.reason);
+        return;
       }
+      mutationApplied = true;
+      const updated = await readItinerary(itinerary.id, nowISO ?? "");
+
+      const ids = new Set<string>();
+      const olds: Record<string, string | null> = {};
+      const swapped = updated.stops[data.stopIndex];
+      if (!swapped) {
+        throw new Error("The service returned an unexpected response. Please try again.");
+      }
+      // the swapped stop: venue changed, slot held → no time strike, just settle
+      if (swapped.id) ids.add(swapped.id);
+      // downstream shifts: their times moved → strike old, settle new
+      for (const downstreamIndex of data.downstreamShifted) {
+        const stop = updated.stops[downstreamIndex];
+        if (stop?.id) {
+          ids.add(stop.id);
+          olds[stop.id] = oldById[stop.id] ?? null;
+        }
+      }
+      applyItinerary(updated);
+      setChangedIds(ids);
+      setOldStarts(olds);
+      setSelected(swapped.id ?? null);
+      setSwapText("");
+      setBannerFlat(false);
+      // time/duration reasons are self-contained ("Moved dinner to 7:29 PM",
+      // "Extended dinner to 2 hours"); venue reasons describe the pick, so
+      // they get the "Swapped" lead.
+      setBanner(
+        data.path === "time" || data.path === "duration"
+          ? data.reason
+          : `Swapped ${data.before.category} — ${data.reason}`
+      );
+    } catch (err) {
+      const detail = clientErrorMessage(err);
+      if (!mutationApplied && mutationOutcomeMayBeAmbiguous(err)) {
+        try {
+          const latest = await readItinerary(itinerary.id, nowISO ?? "");
+          applyItinerary(latest);
+          setSelected(latest.stops[stopIndex]?.id ?? null);
+          setSwapError(
+            `The swap response was interrupted, so the latest saved plan was refreshed. Check this stop before retrying. (${detail})`
+          );
+        } catch (refreshErr) {
+          setSwapError(
+            `The swap response was interrupted and the saved plan could not be refreshed; what you see may be out of date. (${clientErrorMessage(refreshErr)})`
+          );
+        }
+        return;
+      }
+      setSwapError(
+        mutationApplied
+          ? `The swap finished, but the follow-up refresh failed; what you see may be out of date. (${detail})`
+          : detail
+      );
+    } finally {
+      setSwapping(false);
+      endOperation(operation);
     }
-    applyItinerary(updated);
-    setChangedIds(ids);
-    setOldStarts(olds);
-    setSelected(swapped.id ?? null);
-    setSwapText("");
-    setBannerFlat(false);
-    // time/duration reasons are self-contained ("Moved dinner to 7:29 PM",
-    // "Extended dinner to 2 hours"); venue reasons describe the pick, so
-    // they get the "Swapped" lead.
-    setBanner(
-      data.path === "time" || data.path === "duration"
-        ? data.reason
-        : `Swapped ${data.before.category} — ${data.reason}`
-    );
   }
 
   // merge live status + changed flags (by venue id) onto the base map stops
@@ -1469,6 +1737,7 @@ export default function Home() {
                     ? "chipbtn--on"
                     : "")
                 }
+                disabled={busy}
                 onClick={() =>
                   qq.id === "when"
                     ? setClarifyWhen(o)
@@ -1488,6 +1757,7 @@ export default function Home() {
               <input
                 className="clarify__input"
                 value={clarifyTime}
+                disabled={busy}
                 onChange={(e) => setClarifyTime(e.target.value)}
                 placeholder="7pm"
                 aria-label="Pick a time"
@@ -1498,6 +1768,7 @@ export default function Home() {
               <input
                 className="clarify__input"
                 value={clarifyNarrow[qq.category ?? ""] ?? ""}
+                disabled={busy}
                 onChange={(e) =>
                   setClarifyNarrow((m) => ({ ...m, [qq.category ?? ""]: e.target.value }))
                 }
@@ -1509,6 +1780,7 @@ export default function Home() {
               <input
                 className="clarify__input"
                 value={clarifyKind}
+                disabled={busy}
                 onChange={(e) => setClarifyKind(e.target.value)}
                 placeholder="or type one… (bowling, live music)"
                 aria-label="What kind of thing"
@@ -1518,6 +1790,7 @@ export default function Home() {
               <input
                 className="clarify__input"
                 value={clarifyDistribution}
+                disabled={busy}
                 onChange={(e) => setClarifyDistribution(e.target.value)}
                 placeholder={qq.options[0] ?? "2 dinner + 1 drinks"}
                 aria-label="How to split the stops"
@@ -1527,6 +1800,7 @@ export default function Home() {
               <input
                 className="clarify__input"
                 value={clarifyVibe}
+                disabled={busy}
                 onChange={(e) => setClarifyVibe(e.target.value)}
                 placeholder="or type one…"
                 aria-label="Describe the vibe"
@@ -1536,10 +1810,10 @@ export default function Home() {
         </div>
       ))}
       <div className="clarify__actions">
-        <button className="clarify__go" onClick={() => submitClarify(false)}>
+        <button className="clarify__go" disabled={busy} onClick={() => submitClarify(false)}>
           Go
         </button>
-        <button className="clarify__skip" onClick={() => submitClarify(true)}>
+        <button className="clarify__skip" disabled={busy} onClick={() => submitClarify(true)}>
           Skip — just plan it
         </button>
       </div>
@@ -1568,10 +1842,10 @@ export default function Home() {
             {recovery.reason} Still want to try one, or do something else?
           </div>
           <div className="clarify__chips">
-            <button className="chipbtn recover__override" onClick={overrideTimeGate}>
+            <button className="chipbtn recover__override" disabled={busy} onClick={overrideTimeGate}>
               Still want it
             </button>
-            <button className="chipbtn recover__else" onClick={timeGateSomethingElse}>
+            <button className="chipbtn recover__else" disabled={busy} onClick={timeGateSomethingElse}>
               Something else
             </button>
           </div>
@@ -1580,7 +1854,7 @@ export default function Home() {
     ) : recovery && recovery.mode === "weather-gate" ? (
       <div className={"clarify recover recover--gate" + (itinerary ? " clarify--stage" : "")}>
         {recovery.blocks.map((b) => (
-          <div key={b.category} className="clarify__q">
+          <div key={rowKey(b)} className="clarify__q">
             <div className="clarify__label recover__reason">
               {b.reason.charAt(0).toUpperCase() + b.reason.slice(1)} — {b.category} might not be
               great right now. Still want it, or something else?
@@ -1588,10 +1862,10 @@ export default function Home() {
           </div>
         ))}
         <div className="clarify__chips">
-          <button className="chipbtn recover__override" disabled={recovery.busy} onClick={overrideWeatherGate}>
+          <button className="chipbtn recover__override" disabled={busy} onClick={overrideWeatherGate}>
             Still want it
           </button>
-          <button className="chipbtn recover__else" disabled={recovery.busy} onClick={weatherGateSomethingElse}>
+          <button className="chipbtn recover__else" disabled={busy} onClick={weatherGateSomethingElse}>
             Something else
           </button>
         </div>
@@ -1605,7 +1879,7 @@ export default function Home() {
             {recoveryCanWiden && !e.noWiden && (
               <button
                 className="chipbtn recover__widen"
-                disabled={recovery.busy}
+                disabled={busy}
                 onClick={() => resolveEmpty(e, { searchCategory: e.category, dropLocation: true })}
               >
                 {widenOfferLabel(recovery.ctx.parseData.location)}
@@ -1613,6 +1887,7 @@ export default function Home() {
             )}
             <input
               className="clarify__input recover__input"
+              disabled={busy}
               value={recovery.replaceText[rowKey(e)] ?? ""}
               onChange={(ev) =>
                 setRecovery((r) =>
@@ -1622,7 +1897,7 @@ export default function Home() {
                 )
               }
               onKeyDown={(ev) => {
-                if (ev.key === "Enter" && recovery.replaceText[rowKey(e)]?.trim())
+                if (ev.key === "Enter" && !busy && recovery.replaceText[rowKey(e)]?.trim())
                   resolveEmpty(e, {
                     searchCategory: recovery.replaceText[rowKey(e)],
                     dropLocation: false,
@@ -1633,7 +1908,7 @@ export default function Home() {
             />
             <button
               className="chipbtn recover__go"
-              disabled={recovery.busy || !recovery.replaceText[rowKey(e)]?.trim()}
+              disabled={busy || !recovery.replaceText[rowKey(e)]?.trim()}
               onClick={() =>
                 resolveEmpty(e, {
                   searchCategory: recovery.replaceText[rowKey(e)],
@@ -1652,7 +1927,7 @@ export default function Home() {
           to plan around, so recovering or redirecting are the options */}
       {recovery.ctx.sels.some((s) => s.id !== null) && (
         <div className="clarify__actions">
-          <button className="clarify__skip recover__skip" disabled={recovery.busy} onClick={planWithoutEmpties}>
+          <button className="clarify__skip recover__skip" disabled={busy} onClick={planWithoutEmpties}>
             Plan without it
           </button>
         </div>
@@ -1681,6 +1956,7 @@ export default function Home() {
             <input
               id="q-search"
               className="prompt__input"
+              disabled={busy}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={(e) => {
@@ -1698,6 +1974,7 @@ export default function Home() {
             <input
               id="q-city"
               className="where__input"
+              disabled={busy}
               value={city}
               onChange={(e) => setCity(e.target.value)}
               onKeyDown={(e) => {
@@ -1714,6 +1991,7 @@ export default function Home() {
             <input
               id="q-start"
               className="where__input where__input--addr"
+              disabled={busy}
               value={startAddress}
               onChange={(e) => setStartAddress(e.target.value)}
               onKeyDown={(e) => {
@@ -1767,7 +2045,7 @@ export default function Home() {
           text: swapText,
           onText: setSwapText,
           onSubmit: doSwap,
-          submitting: swapping,
+          submitting: swapping || busy,
           error: swapError,
           canSwap,
         }}
@@ -1778,6 +2056,7 @@ export default function Home() {
         <span className="topbar__rule" />
         <input
           className="topbar__input"
+          disabled={busy}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
@@ -1837,32 +2116,32 @@ export default function Home() {
             <label>time</label>
             <input
               type="datetime-local"
+              disabled={busy}
               value={simNow}
-              onChange={(e) => {
-                setSimNow(e.target.value);
-                refreshItinerary(itinerary.id, e.target.value);
-              }}
+              onChange={(e) => void updateSimulationTime(e.target.value)}
             />
             <button
               className="ghost"
-              onClick={() => {
-                setSimNow("");
-                refreshItinerary(itinerary.id, "");
-              }}
+              disabled={busy}
+              onClick={() => void updateSimulationTime("")}
             >
               real
             </button>
           </div>
           <div className="dev__row">
             <label>leg</label>
-            <select value={disruptLeg} onChange={(e) => setDisruptLeg(Number(e.target.value))}>
+            <select
+              value={disruptLeg}
+              disabled={busy}
+              onChange={(e) => setDisruptLeg(Number(e.target.value))}
+            >
               {timedStops.slice(0, -1).map((s, i) => (
                 <option key={i} value={i}>
                   {s.name} → {timedStops[i + 1]?.name} ({s.travelToNext?.mode ?? "?"})
                 </option>
               ))}
             </select>
-            <button onClick={fireDisruption}>cancel</button>
+            <button disabled={busy} onClick={fireDisruption}>cancel</button>
           </div>
         </div>
       ) : (

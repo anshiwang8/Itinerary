@@ -10,6 +10,18 @@ import type { Page } from "@playwright/test";
 import { test, expect } from "./test";
 import { stripCard, dismissClarifyIfShown } from "./helpers";
 
+function torontoClock(iso: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Toronto",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(iso));
+  const hour = parts.find((part) => part.type === "hour")?.value;
+  const minute = parts.find((part) => part.type === "minute")?.value;
+  return `${hour}:${minute}`;
+}
+
 // plan the dumplings prompt and land on the recovery panel (no clarify,
 // since the prompt carries a time)
 async function planToRecovery(page: Page): Promise<void> {
@@ -135,6 +147,125 @@ test.describe("@mock partial-failure recovery", () => {
     // the recovery panel is for PARTIAL failures only
     await expect(page.locator(".recover")).toHaveCount(0);
     await expect(page.locator(".lstrip")).toHaveCount(0);
+  });
+});
+
+test.describe("@mock per-slot recovery targeting", () => {
+  async function planPrompt(page: Page, prompt: string): Promise<void> {
+    await page.goto("/");
+    await page.locator(".prompt__input").fill(prompt);
+    await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
+    await expect(page.locator(".recover")).toBeVisible({ timeout: 90_000 });
+  }
+
+  test("later-opening candidate is retried at the target slot's own arrival @mock", async ({ page }) => {
+    await planPrompt(page, "dinner then a late gallery at 7pm in Ossington");
+    const galleryRow = page.locator(".clarify__q", { hasText: "late gallery" });
+    await expect(galleryRow.locator(".recover__reason")).toContainText(/closed at that hour/i);
+
+    const retryRequest = page.waitForRequest((request) => {
+      if (!request.url().includes("/api/places/search") || request.method() !== "POST") {
+        return false;
+      }
+      try {
+        const body = JSON.parse(request.postData() ?? "{}");
+        return body.categoriesOverride?.[0] === "late gallery";
+      } catch {
+        return false;
+      }
+    });
+    await galleryRow.locator(".recover__widen").click();
+    const request = await retryRequest;
+    const body = JSON.parse(request.postData() ?? "{}");
+
+    // Dinner occupies 90 + 15 minutes, so slot 1 starts at 8:45 PM.
+    // The fixture gallery opens at 8 PM and was closed at the 7 PM anchor.
+    expect(torontoClock(body.targetTime)).toBe("20:45");
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".lstrip__stop")).toHaveCount(2);
+    await expect(page.locator(".lstrip__stop .lstrip__name").nth(1)).toHaveText(
+      "After Eight Gallery"
+    );
+  });
+
+  test("later-slot replacement applies weather at that slot, not the plan anchor @mock", async ({ page }) => {
+    // The 1:15 PM anchor is dry. Dinner's 105-minute dwell puts slot 1 at
+    // exactly 3 PM, the mock forecast's deterministic rain hour.
+    await planPrompt(page, "dinner then a late gallery at 1:15pm in Ossington");
+    await page.locator(".recover__input").fill("park walk");
+
+    const retryResponse = page.waitForResponse((response) => {
+      const request = response.request();
+      if (!request.url().includes("/api/places/search") || request.method() !== "POST") {
+        return false;
+      }
+      try {
+        const body = JSON.parse(request.postData() ?? "{}");
+        return body.categoriesOverride?.[0] === "park walk";
+      } catch {
+        return false;
+      }
+    });
+    await page.locator(".recover__go").click();
+    const response = await retryResponse;
+    const requestBody = JSON.parse(response.request().postData() ?? "{}");
+    const responseBody = await response.json();
+
+    expect(torontoClock(requestBody.targetTime)).toBe("15:00");
+    expect(responseBody._weatherBlocked).toEqual([
+      expect.objectContaining({
+        category: "park walk",
+        reason: "rain likely at 3pm",
+      }),
+    ]);
+    // Had recovery reused the dry 1:15 PM anchor, this would have silently
+    // completed with a park. At the real slot hour it stays unresolved.
+    await expect(page.locator(".recover")).toBeVisible();
+    await expect(page.locator(".recover__note")).toContainText(/park walk/i);
+    await expect(page.locator(".lstrip")).toHaveCount(0);
+  });
+
+  test("repeated category slots stay distinct and an occupied-only retry never duplicates @mock", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page
+      .locator(".prompt__input")
+      .fill("tiny bar then another tiny bar at 7pm in Ossington");
+    const initialSelect = page.waitForRequest(
+      (request) =>
+        request.url().includes("/api/select") && request.method() === "POST"
+    );
+    await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
+    const selectBody = JSON.parse((await initialSelect).postData() ?? "{}");
+    expect(selectBody.slots).toEqual(["tiny bar", "tiny bar"]);
+
+    const recover = page.locator(".recover");
+    await expect(recover).toBeVisible({ timeout: 90_000 });
+    await expect(recover.locator(".recover__reason")).toContainText(
+      /asked for more than one tiny bar/i
+    );
+
+    // Widening returns the same single provider candidate. It is already
+    // occupied by slot 0, so slot 1 must stay open instead of reusing it.
+    await recover.locator(".recover__widen").click();
+    await expect(recover.locator(".recover__note")).toContainText(
+      /asked for more than one tiny bar.*could only find one/i
+    );
+    await expect(page.locator(".lstrip")).toHaveCount(0);
+
+    // A genuinely different replacement fills only slot 1. Slot 0 remains
+    // the original tiny bar and the final plan has two distinct venues.
+    await recover.locator(".recover__input").fill("dessert");
+    await recover.locator(".recover__go").click();
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".lstrip__stop")).toHaveCount(2);
+    const names = page.locator(".lstrip__stop .lstrip__name");
+    await expect(names.nth(0)).toHaveText("The One-Seat Bar");
+    const renderedNames = await names.allTextContents();
+    expect(new Set(renderedNames).size).toBe(2);
   });
 });
 

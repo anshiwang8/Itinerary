@@ -203,6 +203,38 @@ const BAO_OPEN: Place = {
   editorialSummary: { text: "Pillowy bao by the water, open late." },
 };
 
+// Per-slot recovery fixtures:
+// - the gallery is closed at a 7 PM plan anchor but open at the second
+//   slot's provisional 8:45 PM arrival (dinner = 90 + 15 minutes)
+// - the tiny-bar category deliberately has only one candidate, so asking
+//   for it twice proves recovery never reuses an occupied venue id
+const LATE_GALLERY: Place[] = [
+  venue(
+    "fx_late_gallery",
+    "After Eight Gallery",
+    43.6508,
+    -79.4184,
+    4.7,
+    "PRICE_LEVEL_MODERATE",
+    20,
+    23,
+    "A small evening gallery whose doors open at eight."
+  ),
+];
+const TINY_BAR: Place[] = [
+  venue(
+    "fx_tiny_bar_only",
+    "The One-Seat Bar",
+    43.6484,
+    -79.4196,
+    4.8,
+    "PRICE_LEVEL_MODERATE",
+    17,
+    2,
+    "A single-room bar used to exercise a genuinely narrowed second slot."
+  ),
+];
+
 // unknown categories still get a small deterministic pool
 const genericCache = new Map<string, Place[]>();
 function genericPool(category: string): Place[] {
@@ -237,6 +269,8 @@ export function poolFor(category: string, hasNeighbourhood = false): Place[] {
   // (widened) → a real open venue (see DUMPLING_* / BAO_* above)
   if (/dumpling/i.test(category)) return hasNeighbourhood ? [DUMPLING_CLOSED] : [DUMPLING_OPEN];
   if (/\bbao\b/i.test(category)) return hasNeighbourhood ? [BAO_CLOSED] : [BAO_OPEN];
+  if (/\blate gallery\b/i.test(category)) return LATE_GALLERY;
+  if (/\btiny bar\b/i.test(category)) return TINY_BAR;
   // "beach" is the deliberately EMPTY park-family pool: it shares the park
   // plausible band (so the time-gate fires late at night) but nothing is
   // ever found — the deterministic trigger for "override finds nothing →
@@ -279,12 +313,21 @@ export function mockParse(prompt: string): ParsedPrompt {
   if (/\bsushi\b/.test(p)) signals.push("sushi");
   else if (/\bramen\b/.test(p)) signals.push("ramen");
   else if (/dinner|restaurant|food|eat/.test(p)) signals.push("dinner");
-  if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
-  // A SECOND stop of the same kind — "drinks then another bar" is two
-  // stops, not one. The deterministic duplicate-category trigger (§7.1):
-  // both slots share the BAR pool and must still get different venues.
-  if (/another (?:bar|drink|round)|two bars|bar hop|second bar/.test(p)) {
-    signals.push("drinks");
+  if (/\blate gallery\b/.test(p)) signals.push("late gallery");
+  const tinyBar = /\btiny bar\b/.test(p);
+  if (tinyBar) {
+    signals.push("tiny bar");
+    if (/another tiny bar|two tiny bars|second tiny bar/.test(p)) {
+      signals.push("tiny bar");
+    }
+  } else {
+    if (/drink|bar|cocktail|pub/.test(p)) signals.push("drinks");
+    // A SECOND stop of the same kind — "drinks then another bar" is two
+    // stops, not one. The deterministic duplicate-category trigger (§7.1):
+    // both slots share the BAR pool and must still get different venues.
+    if (/another (?:bar|drink|round)|two bars|bar hop|second bar/.test(p)) {
+      signals.push("drinks");
+    }
   }
   if (/dessert|ice\s*cream|gelato/.test(p)) signals.push("dessert");
   if (/coffee|caf[eé]/.test(p)) signals.push("coffee");
