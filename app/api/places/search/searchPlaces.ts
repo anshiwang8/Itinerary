@@ -26,6 +26,12 @@ const FIELD_MASK = [
   "places.currentOpeningHours",
   "places.businessStatus",
   "places.editorialSummary",
+  "places.servesVegetarianFood",
+  "places.outdoorSeating",
+  "places.liveMusic",
+  "places.goodForChildren",
+  "places.allowsDogs",
+  "places.accessibilityOptions",
 ].join(",");
 
 // e.g. aesthetic="lively night out", category="bar", location="Ossington",

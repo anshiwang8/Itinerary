@@ -13,6 +13,7 @@ import {
   CurrentOpeningHours,
   isOpenAt,
   isOpenAtInstant,
+  parseClockTime,
   parseTargetTime,
   targetTimeAt,
 } from "./hours";
@@ -116,6 +117,120 @@ const cases: Array<[string, () => void]> = [
       assert.deepStrictEqual(Object.keys(parseTargetTime("6am")!).sort(), ["hour", "minute"]);
       // and "tomorrow" no longer changes the result — the resolver owns day math
       assert.deepStrictEqual(parseTargetTime("tomorrow, 6am"), parseTargetTime("6am"));
+    },
+  ],
+  [
+    "clock parser distinguishes absent clocks from malformed explicit clocks",
+    () => {
+      assert.deepStrictEqual(parseClockTime("19"), {
+        kind: "valid",
+        time: { hour: 19, minute: 0 },
+      });
+      assert.strictEqual(parseClockTime("5 hours").kind, "none");
+      assert.strictEqual(parseClockTime("2026-08-15").kind, "none");
+      for (const value of [
+        "13pm",
+        "00pm",
+        "24:00",
+        "7:5pm",
+        "7:60",
+        "-1pm",
+        "at -1:30",
+        "001pm",
+        "019:00",
+        "019",
+      ]) {
+        assert.strictEqual(parseClockTime(value).kind, "invalid", value);
+        assert.strictEqual(parseTargetTime(value), null, value);
+      }
+    },
+  ],
+  [
+    "malformed or mixed periods are inconclusive unless a valid period proves open",
+    () => {
+      const target = { day: 1, hour: 12, minute: 0 };
+      assert.strictEqual(
+        isOpenAt({ periods: [{ open: { day: 1, hour: 9, minute: 0 } }] }, target),
+        null
+      );
+      assert.strictEqual(
+        isOpenAt({ periods: [null] } as unknown as CurrentOpeningHours, target),
+        null
+      );
+      assert.strictEqual(
+        isOpenAt(
+          {
+            periods: [
+              {
+                open: { day: 1, hour: 99, minute: 0 },
+                close: { day: 1, hour: 17, minute: 0 },
+              },
+            ],
+          },
+          target
+        ),
+        null
+      );
+      assert.strictEqual(
+        isOpenAt(
+          {
+            periods: [
+              {
+                open: { day: 1, hour: 9, minute: 0 },
+                close: { day: 1, hour: 10, minute: 0 },
+              },
+              {
+                open: { day: 1, hour: 99, minute: 0 },
+                close: { day: 1, hour: 17, minute: 0 },
+              },
+            ],
+          },
+          target
+        ),
+        null
+      );
+      assert.strictEqual(
+        isOpenAt(
+          {
+            periods: [
+              {
+                open: { day: 1, hour: 11, minute: 0 },
+                close: { day: 1, hour: 13, minute: 0 },
+              },
+              { open: { day: 1, hour: 99, minute: 0 } },
+            ],
+          },
+          target
+        ),
+        true
+      );
+    },
+  ],
+  [
+    "fully valid non-matches are closed; overnight and 24/7 shapes remain conclusive",
+    () => {
+      assert.strictEqual(isOpenAt(NINE_TO_FIVE, { day: 1, hour: 18, minute: 0 }), false);
+      assert.strictEqual(
+        isOpenAt(
+          {
+            periods: [
+              {
+                open: { day: 6, hour: 22, minute: 0 },
+                close: { day: 0, hour: 2, minute: 0 },
+              },
+            ],
+          },
+          { day: 0, hour: 1, minute: 0 }
+        ),
+        true
+      );
+      assert.strictEqual(
+        isOpenAt(
+          { periods: [{ open: { day: 0, hour: 0, minute: 0 } }] },
+          { day: 4, hour: 12, minute: 0 }
+        ),
+        true
+      );
     },
   ],
 ];

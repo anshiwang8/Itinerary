@@ -17,7 +17,12 @@ import type { ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
 // openness reasoning of its own (see the availability-seam note below)
 import type { CurrentOpeningHours } from "../places/search/hours";
 import type { LatLng, TravelLeg } from "../schedule/travel";
-import type { Selection } from "../select/selectVenues";
+import type { Selection, SelectModelCall } from "../select/selectVenues";
+import { parseBudget } from "../../lib/budget";
+import {
+  normalizeConstraints,
+  placeMeetsAllConstraints,
+} from "../../lib/constraints";
 import type {
   SwapDeps,
   SwapIntent,
@@ -70,18 +75,30 @@ function venue(
   };
 }
 
-// ── the fixture pools (Ossington-strip coordinates). Descriptions double
-// as constraint evidence for mockSelect: "vegan" lives on Noodle
-// Letterpress, "patio" on The Standing Room — everything else fails those
-// constraints, deterministically. ──
+// ── the fixture pools (Ossington-strip coordinates). Hard constraints use
+// explicit provider fields only: Noodle carries servesVegetarianFood and
+// The Standing Room carries outdoorSeating below. Narrative descriptions
+// remain display copy and never become factual evidence. ──
 const DINNER: Place[] = [
   // top-rated but EXPENSIVE → the default pick; "cheaper" must beat it
   venue("fx_dinner_velvet", "Velvet Fig", 43.6491, -79.4203, 4.8, "PRICE_LEVEL_EXPENSIVE", 17, 23,
     "Dim-lit modern bistro known for fig-glazed duck and a serious wine list."),
   venue("fx_dinner_corner", "The Corner Table", 43.6478, -79.4194, 4.5, "PRICE_LEVEL_MODERATE", 17, 23,
     "Neighbourhood standby doing honest plates and warm service."),
-  venue("fx_dinner_noodle", "Noodle Letterpress", 43.6502, -79.4211, 4.3, "PRICE_LEVEL_INEXPENSIVE", 11, 22,
-    "Hand-pulled noodle counter with a deep vegan menu."),
+  {
+    ...venue(
+      "fx_dinner_noodle",
+      "Noodle Letterpress",
+      43.6502,
+      -79.4211,
+      4.3,
+      "PRICE_LEVEL_INEXPENSIVE",
+      11,
+      22,
+      "Hand-pulled noodle counter with a deep vegan menu."
+    ),
+    servesVegetarianFood: true,
+  },
   // closes at 8 PM → late dinners drop it / adapt away from it
   venue("fx_dinner_early", "Early Bird Diner", 43.6468, -79.4186, 4.1, "PRICE_LEVEL_INEXPENSIVE", 8, 20,
     "Sunny all-day diner that packs it in early."),
@@ -90,8 +107,20 @@ const BAR: Place[] = [
   // top-rated but closes 10 PM → pushing drinks later fires the adapt path
   venue("fx_bar_curfew", "Ten O'Clock Curfew", 43.6485, -79.4199, 4.7, "PRICE_LEVEL_EXPENSIVE", 16, 22,
     "Cocktail room with strict hours and stricter pours."),
-  venue("fx_bar_standing", "The Standing Room", 43.6495, -79.4207, 4.6, "PRICE_LEVEL_MODERATE", 17, 2,
-    "Snug standing bar with a lantern-lit patio out back."),
+  {
+    ...venue(
+      "fx_bar_standing",
+      "The Standing Room",
+      43.6495,
+      -79.4207,
+      4.6,
+      "PRICE_LEVEL_MODERATE",
+      17,
+      2,
+      "Snug standing bar with a lantern-lit patio out back."
+    ),
+    outdoorSeating: true,
+  },
   venue("fx_bar_lantern", "Paper Lantern", 43.6473, -79.419, 4.4, "PRICE_LEVEL_INEXPENSIVE", 18, 2,
     "Cheap-and-cheerful late-night bar under red lanterns."),
   // NO hours — keep-on-missing makes it the any-hour survivor (same role
@@ -272,49 +301,203 @@ export function mockParse(prompt: string): ParsedPrompt {
   }
 
   const clock = p.match(/\d{1,2}(?::\d{2})?\s*(?:am|pm)/);
-  const time_window = clock
-    ? clock[0]
-    : /tonight/.test(p)
+  const qualifier = p.match(
+    /\b(?:today|tomorrow|next\s+(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)|sunday|monday|tuesday|wednesday|thursday|friday|saturday|\d{4}-\d{1,2}-\d{1,2}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:,\s*\d{4})?)\b/
+  );
+  const dayPart = /tonight/.test(p)
     ? "tonight"
     : /evening/.test(p)
     ? "evening"
-    : "unspecified";
+    : /afternoon/.test(p)
+    ? "afternoon"
+    : /morning/.test(p)
+    ? "morning"
+    : null;
+  const time_window =
+    [qualifier?.[0], clock?.[0] ?? dayPart].filter(Boolean).join(", ") ||
+    "unspecified";
+
+  const countWords: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+  };
+  const countMatch = p.match(
+    /\b(one|two|three|four|five|six|seven|eight|\d+)\s+(?:stops?|places?|coffee shops?|caf[eé]s?|bars?)\b/
+  );
+  const stop_count = countMatch
+    ? countWords[countMatch[1]] ?? Number(countMatch[1])
+    : null;
 
   const constraints: string[] = [];
   if (/patio/.test(p)) constraints.push("patio");
   if (/vegan/.test(p)) constraints.push("vegan");
+  if (/vegetarian/.test(p)) constraints.push("vegetarian");
+  if (/wheelchair|accessible/.test(p)) constraints.push("wheelchair accessible");
+  if (/live music/.test(p)) constraints.push("live music");
+
+  const numericBudget = p.match(
+    /\b(?:under|below|less than|up to|max(?:imum)?)\s*(?:us\$|ca\$|c\$|\$|€|£|¥|usd|cad|eur|gbp|jpy)?\s*\d+(?:\.\d{1,2})?(?:\s*(?:usd|cad|eur|gbp|jpy))?\b/i
+  );
+  const symbolicBudget = p.match(/(?:^|\s)(\${1,2})(?:\s|$)/);
+  const budget =
+    numericBudget?.[0] ??
+    symbolicBudget?.[1] ??
+    (/\b(?:cheap|budget)\b/.test(p) ? "cheap" : null);
 
   return {
     time_window,
-    stop_count: null,
+    stop_count,
     aesthetic: /fancy|upscale|fine dining/.test(p) ? "fancy" : "unspecified",
     category_signals: signals,
     group_context: "unspecified",
-    budget: /cheap|budget/.test(p) ? "cheap" : null,
+    budget,
     constraints,
     location: "Ossington",
   };
 }
 
-// ── select: highest-rated wins; a stated cheap budget prefers non-$$$.
-// Hard constraints mirror the real contract: a candidate meets one only
-// when its name/description evidences it; none do → id:null +
-// unmetConstraint, never a hedged pick. ──
-function meetsConstraint(place: Place, constraint: string): boolean {
-  const hay = `${place.displayName?.text ?? ""} ${place.editorialSummary?.text ?? ""}`.toLowerCase();
-  const tokens = constraint.toLowerCase().split(/\W+/).filter(Boolean);
-  return tokens.length > 0 && tokens.every((t) => hay.includes(t));
+interface MockModelCandidate {
+  id: string;
+  rating: number | null;
+  price: string | null;
+  constraintEvidence: string[];
 }
 
+function mockSelectionPayload(messages: unknown[]): Record<string, unknown> {
+  for (const message of messages) {
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      !("role" in message) ||
+      !("content" in message) ||
+      message.role !== "user" ||
+      typeof message.content !== "string"
+    ) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(message.content);
+      if (typeof parsed === "object" && parsed !== null && "slots" in parsed) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Correction prompts are plain text. The original JSON user payload
+      // remains earlier in the same message list.
+    }
+  }
+  return {};
+}
+
+/** Deterministic stand-in for the Groq completion only. The production
+ * selectVenues core still owns slot validation, correction, constraint
+ * enforcement, global uniqueness, and fallback assignment in mock E2E. */
+export const mockSelectModelResponse: SelectModelCall = async (messages) => {
+  const payload = mockSelectionPayload(messages);
+  const request =
+    typeof payload.request === "object" && payload.request !== null
+      ? (payload.request as Record<string, unknown>)
+      : {};
+  const constraints = Array.isArray(request.constraints)
+    ? request.constraints.filter((value): value is string => typeof value === "string")
+    : [];
+  const budget =
+    typeof request.budget === "object" && request.budget !== null
+      ? (request.budget as Record<string, unknown>)
+      : null;
+  const cheap =
+    budget?.kind === "relative" ||
+    (budget?.kind === "places-level" &&
+      typeof budget.maxLevel === "number" &&
+      budget.maxLevel <= 2);
+  const candidatePools =
+    typeof payload.candidates === "object" && payload.candidates !== null
+      ? (payload.candidates as Record<string, unknown>)
+      : {};
+  const slots = Array.isArray(payload.slots) ? payload.slots : [];
+
+  const selections: Array<{
+    slot: number;
+    category: string;
+    id: string | null;
+    reason: string;
+    unmet_constraint: string | null;
+  }> = [];
+  for (const value of slots) {
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !("slot" in value) ||
+      !("category" in value) ||
+      typeof value.slot !== "number" ||
+      typeof value.category !== "string"
+    ) {
+      continue;
+    }
+    const rawCandidates = candidatePools[value.category];
+    const candidates = (Array.isArray(rawCandidates) ? rawCandidates : [])
+      .filter(
+        (candidate): candidate is MockModelCandidate =>
+          typeof candidate === "object" &&
+          candidate !== null &&
+          "id" in candidate &&
+          typeof candidate.id === "string" &&
+          "constraintEvidence" in candidate &&
+          Array.isArray(candidate.constraintEvidence)
+      )
+      .filter((candidate) =>
+        constraints.every((constraint) =>
+          candidate.constraintEvidence.includes(constraint)
+        )
+      )
+      .sort((a, b) => (b.rating ?? -1) - (a.rating ?? -1));
+    const pick = cheap
+      ? candidates.find(
+          (candidate) =>
+            candidate.price !== "PRICE_LEVEL_EXPENSIVE" &&
+            candidate.price !== "PRICE_LEVEL_VERY_EXPENSIVE"
+        ) ?? candidates[0]
+      : candidates[0];
+    if (!pick) {
+      selections.push({
+        slot: value.slot,
+        category: value.category,
+        id: null,
+        reason: "No candidate carries all requested evidence.",
+        unmet_constraint: constraints[0] ?? null,
+      });
+      continue;
+    }
+    selections.push({
+      slot: value.slot,
+      category: value.category,
+      id: pick.id,
+      reason: `A reliable ${value.category} spot that suits the outing.`,
+      unmet_constraint: null,
+    });
+  }
+  return JSON.stringify({ selections });
+};
+
+// ── engine select fixture: highest-rated wins; a stated cheap budget prefers non-$$$.
+// Hard constraints mirror the real contract: only deterministic candidate
+// evidence counts; none do → id:null +
+// unmetConstraint, never a hedged pick. ──
 export function mockSelect(
   parsed: ParsedPrompt,
   poolsIn: Record<string, Place[]>,
   slotsIn?: string[]
 ): Selection[] {
-  const cheap = /cheap|budget/i.test(parsed.budget ?? "");
-  const constraints = (parsed.constraints ?? []).filter(
-    (c) => typeof c === "string" && c.trim() !== ""
-  );
+  const budget = parseBudget(parsed.budget);
+  const cheap =
+    budget?.kind === "relative" ||
+    (budget?.kind === "places-level" && budget.maxLevel <= 2);
+  const constraints = normalizeConstraints(parsed.constraints);
   const out: Selection[] = [];
   // mirror the REAL selectVenues contract: empty-pool categories are
   // answered without the LLM and appended LAST — the recovery flow's
@@ -336,7 +519,12 @@ export function mockSelect(
     }
     let pool = places;
     if (constraints.length > 0) {
-      const unmet = constraints.find((c) => !places.some((p) => meetsConstraint(p, c)));
+      const unmet = constraints.find(
+        (constraint) =>
+          !places.some((place) =>
+            placeMeetsAllConstraints(place, [constraint])
+          )
+      );
       if (unmet) {
         out.push({
           category,
@@ -347,7 +535,9 @@ export function mockSelect(
         });
         return;
       }
-      pool = places.filter((p) => constraints.every((c) => meetsConstraint(p, c)));
+      pool = places.filter((place) =>
+        placeMeetsAllConstraints(place, constraints)
+      );
     }
     const ranked = [...pool]
       .filter((p) => !taken.has(p.id))

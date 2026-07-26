@@ -57,8 +57,21 @@ const cases: Array<[string, () => void]> = [
       const v = mockParse("vegan dinner");
       assert.deepStrictEqual(v.category_signals, ["dinner"]);
       assert.deepStrictEqual(v.constraints, ["vegan"]);
+      const vegetarian = mockParse("vegetarian dinner");
+      assert.deepStrictEqual(vegetarian.category_signals, ["dinner"]);
+      assert.deepStrictEqual(vegetarian.constraints, ["vegetarian"]);
       // genuinely distinct activities still get their own entries
       assert.deepStrictEqual(mockParse("dinner then a bar").category_signals, ["dinner", "drinks"]);
+    },
+  ],
+  [
+    "calendar qualifiers, stop counts, and structured budget text survive the mock seam",
+    () => {
+      const dated = mockParse("three coffee shops next Saturday at 7pm under $20");
+      assert.strictEqual(dated.time_window, "next saturday, 7pm");
+      assert.strictEqual(dated.stop_count, 3);
+      assert.deepStrictEqual(dated.category_signals, ["coffee"]);
+      assert.strictEqual(dated.budget, "under $20");
     },
   ],
 ];

@@ -309,6 +309,40 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "$ and $$ map to relative Places levels; numeric maxima never become a hard cheap filter",
+    () => {
+      const candidates = [
+        mkPlace("cheap", { priceLevel: "PRICE_LEVEL_INEXPENSIVE" }),
+        mkPlace("moderate", { priceLevel: "PRICE_LEVEL_MODERATE" }),
+        mkPlace("expensive", { priceLevel: "PRICE_LEVEL_EXPENSIVE" }),
+        mkPlace("unknown", { priceLevel: undefined }),
+      ];
+      const one = filterPools({ cafe: candidates }, mkParsed({ budget: "$" }));
+      assert.deepStrictEqual(one.pools.cafe.map((place) => place.id), [
+        "cheap",
+        "unknown",
+      ]);
+      const two = filterPools({ cafe: candidates }, mkParsed({ budget: "$$" }));
+      assert.deepStrictEqual(two.pools.cafe.map((place) => place.id), [
+        "cheap",
+        "moderate",
+        "unknown",
+      ]);
+      for (const budget of ["under $20", "under $300", "under €30"]) {
+        const numeric = filterPools(
+          { cafe: candidates },
+          mkParsed({ budget })
+        );
+        assert.deepStrictEqual(
+          numeric.pools.cafe.map((place) => place.id),
+          ["cheap", "moderate", "expensive", "unknown"],
+          budget
+        );
+        assert.strictEqual(numeric.dropLog.length, 0, budget);
+      }
+    },
+  ],
+  [
     "no budget stated → EXPENSIVE kept",
     () => {
       const { pools, dropLog } = filterPools(
@@ -320,21 +354,21 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
-    "duplicate id dropped from SECOND category only (rule: dedup)",
+    "shared ids survive across categories; duplicates are removed only inside a pool",
     () => {
       const shared = mkPlace("dup");
       const { pools, dropLog } = filterPools(
         {
-          dinner: [shared, mkPlace("d2")],
+          dinner: [shared, { ...shared }, mkPlace("d2")],
           bars: [mkPlace("b1"), { ...shared }],
         },
         mkParsed({ category_signals: ["dinner", "bars"] })
       );
       assert.deepStrictEqual(pools.dinner.map((p) => p.id), ["dup", "d2"]);
-      assert.deepStrictEqual(pools.bars.map((p) => p.id), ["b1"]);
+      assert.deepStrictEqual(pools.bars.map((p) => p.id), ["b1", "dup"]);
       const dupDrops = dropLog.filter((d) => d.id === "dup");
       assert.strictEqual(dupDrops.length, 1);
-      assert.strictEqual(dupDrops[0].category, "bars");
+      assert.strictEqual(dupDrops[0].category, "dinner");
       assert.strictEqual(dupDrops[0].rule, "dedup");
     },
   ],

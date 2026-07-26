@@ -67,6 +67,12 @@ const cases: Array<[string, () => void]> = [
       // "something to do" deliberately stays general — the broad pool IS
       // the right tool for "surprise me"
       assert.deepStrictEqual(categoriesForKindAnswer("something to do"), []);
+      // Counted general stops need an explicit broad category so the slot
+      // normalizer can repeat it to the exact requested count.
+      assert.deepStrictEqual(
+        categoriesForKindAnswer("something to do", { materializeGeneral: true }),
+        ["things to do"]
+      );
       // free text becomes its own category, like any typed prompt would
       assert.deepStrictEqual(categoriesForKindAnswer("bowling"), ["bowling"]);
       assert.deepStrictEqual(categoriesForKindAnswer("  "), []);
@@ -175,6 +181,23 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(timeWindowForWhenAnswer("now"), "now");
       assert.strictEqual(timeWindowForWhenAnswer("later today"), "evening");
       assert.strictEqual(timeWindowForWhenAnswer("7pm"), "7pm"); // free text passthrough
+    },
+  ],
+  [
+    "ambiguous stop_count distribution is the first clarification and offers exact splits",
+    () => {
+      const questions = clarifyQuestions({
+        ...base,
+        stop_count: 3,
+        category_signals: ["dinner", "drinks"],
+        time_window: "7pm",
+      });
+      assert.strictEqual(questions[0].id, "distribution");
+      assert.strictEqual(questions[0].question, "How should I split the 3 stops?");
+      assert.deepStrictEqual(questions[0].options, [
+        "2 dinner + 1 drinks",
+        "1 dinner + 2 drinks",
+      ]);
     },
   ],
 ];

@@ -33,6 +33,11 @@ import {
   kindQuestion,
   timeWindowForWhenAnswer,
 } from "./lib/clarify";
+import {
+  finalizeRequestedSlots,
+  resolveRequestedSlots,
+  slotsFromDistributionAnswer,
+} from "./lib/planSlots";
 import type { Selection } from "./api/select/selectVenues";
 import type { DropEntry, ParsedPrompt } from "./api/places/search/filter";
 import { isOpenAtInstant, type CurrentOpeningHours } from "./api/places/search/hours";
@@ -246,6 +251,7 @@ export default function Home() {
   const [clarifyTime, setClarifyTime] = useState("");
   const [clarifyVibe, setClarifyVibe] = useState("");
   const [clarifyKind, setClarifyKind] = useState("");
+  const [clarifyDistribution, setClarifyDistribution] = useState("");
   // narrowing answers for GENERIC categories ("restaurant" -> "Italian"),
   // keyed by the category each narrow question targets — there can be
   // several in one clarify round ("dinner and drinks" is two)
@@ -346,6 +352,7 @@ export default function Home() {
         setClarifyTime("");
         setClarifyVibe("");
         setClarifyKind("");
+        setClarifyDistribution("");
         setClarifyNarrow({});
         setLoadingText(null);
         return;
@@ -361,16 +368,41 @@ export default function Home() {
   // clarify answered or skipped → resume the pipeline with final parse
   async function submitClarify(skip: boolean) {
     if (!clarify) return;
-    const updated: ParsedPrompt = { ...clarify.parsed };
+    let updated: ParsedPrompt = { ...clarify.parsed };
+    const distribution = clarify.questions.find((question) => question.id === "distribution");
     if (!skip) {
       const whenAns = clarifyWhen === "pick a time" ? clarifyTime.trim() : clarifyWhen ?? "";
       if (whenAns) updated.time_window = timeWindowForWhenAnswer(whenAns);
       if (clarifyVibe.trim()) updated.aesthetic = clarifyVibe.trim();
       // the KIND answer narrows an ultra-vague prompt to a real category;
-      // "something to do" maps to [] and deliberately keeps the general pool
+      // an uncounted "something to do" keeps the general pool, while a
+      // counted request materializes one broad kind so it can expand to
+      // exactly the requested number of slots.
       if (clarifyKind.trim()) {
-        const cats = categoriesForKindAnswer(clarifyKind);
+        const beforeKind = resolveRequestedSlots(updated);
+        const cats = categoriesForKindAnswer(clarifyKind, {
+          materializeGeneral: beforeKind.kind === "needs-kind",
+        });
         if (cats.length > 0) updated.category_signals = cats;
+      }
+      if (distribution) {
+        const count = updated.stop_count;
+        const slots =
+          typeof count === "number"
+            ? slotsFromDistributionAnswer(
+                clarifyDistribution,
+                updated.category_signals,
+                count
+              )
+            : null;
+        if (!slots) {
+          setError(
+            `Describe all ${count ?? "requested"} stops, for example "${distribution.options[0] ?? "2 dinner + 1 drinks"}".`
+          );
+          setLoadingText(null);
+          return;
+        }
+        updated.category_signals = slots;
       }
       // narrow answers fold back onto EXACTLY the generic signal each
       // question targeted; untouched signals (and duplicate slots of the
@@ -382,6 +414,14 @@ export default function Home() {
         });
       }
     }
+    const finalizedSlots = finalizeRequestedSlots(updated);
+    if (!finalizedSlots.ok) {
+      setError(finalizedSlots.reason);
+      setLoadingText(null);
+      return;
+    }
+    updated = finalizedSlots.parsed;
+    setError(null);
     setClarify(null);
     setParsedObj(updated);
     await continuePipeline(updated);
@@ -820,6 +860,13 @@ export default function Home() {
   ): Promise<{ sel?: Selection; pool: Place[]; drops: DropEntry[] }> {
     const scopedParsed = {
       ...ctx.parseData,
+      // Selection is for this ONE recovery slot. Passing the original
+      // whole-plan category list makes the production selector look for
+      // those old categories and omit a newly named replacement entirely.
+      // Keep the original time/budget/constraints, but scope the requested
+      // slot identity just as categoriesOverride scopes the Places search.
+      category_signals: [searchCategory],
+      stop_count: 1,
       ...(opts.dropLocation ? { location: "" } : {}),
     };
     const placesRes = await fetch("/api/places/search", {
@@ -976,6 +1023,7 @@ export default function Home() {
     setRecovery(null);
     setClarify({ questions: [kindQuestion()], parsed });
     setClarifyKind("");
+    setClarifyDistribution("");
     setClarifyWhen(null);
     setClarifyTime("");
     setClarifyVibe("");
@@ -1413,6 +1461,8 @@ export default function Home() {
                     ? clarifyWhen === o
                     : qq.id === "kind"
                     ? clarifyKind === o
+                    : qq.id === "distribution"
+                    ? clarifyDistribution === o
                     : qq.id === "narrow"
                     ? clarifyNarrow[qq.category ?? ""] === o
                     : clarifyVibe === o)
@@ -1424,6 +1474,8 @@ export default function Home() {
                     ? setClarifyWhen(o)
                     : qq.id === "kind"
                     ? setClarifyKind(o)
+                    : qq.id === "distribution"
+                    ? setClarifyDistribution(o)
                     : qq.id === "narrow"
                     ? setClarifyNarrow((m) => ({ ...m, [qq.category ?? ""]: o }))
                     : setClarifyVibe(o)
@@ -1460,6 +1512,15 @@ export default function Home() {
                 onChange={(e) => setClarifyKind(e.target.value)}
                 placeholder="or type one… (bowling, live music)"
                 aria-label="What kind of thing"
+              />
+            )}
+            {qq.id === "distribution" && (
+              <input
+                className="clarify__input"
+                value={clarifyDistribution}
+                onChange={(e) => setClarifyDistribution(e.target.value)}
+                placeholder={qq.options[0] ?? "2 dinner + 1 drinks"}
+                aria-label="How to split the stops"
               />
             )}
             {qq.id === "vibe" && (

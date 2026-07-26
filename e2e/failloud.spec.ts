@@ -69,11 +69,10 @@ test("constraints: 'dessert with a patio' hits the unmet-constraint fail-loud @m
   await expect(page.locator(".recover")).toHaveCount(0);
 });
 
-test("constraints: 'vegan dinner' takes the evidenced pick @mock", async ({ page }) => {
-  // Noodle Letterpress is the one dinner fixture whose description
-  // evidences "vegan" — the constraint narrows the pool to it, beating
-  // the higher-rated Velvet Fig
-  await planEvening(page, "vegan dinner");
+test("constraints: 'vegetarian dinner' takes the structured-evidence pick @mock", async ({ page }) => {
+  // Noodle Letterpress is the one dinner fixture whose provider field
+  // servesVegetarianFood is true. Narrative text alone is never evidence.
+  await planEvening(page, "vegetarian dinner");
   await expect(stripCard(page, "Noodle Letterpress")).toBeVisible();
   await expect(page.locator(".lstrip__stop")).toHaveCount(1);
   await expectStripMatchesPin(page, "Noodle Letterpress");

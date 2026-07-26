@@ -604,6 +604,154 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "CALENDAR: bare weekdays use the nearest future occurrence; next weekday is strict when today matches",
+    () => {
+      // NOW is Friday. A future clock on bare Friday stays today; a passed
+      // clock rolls to the following Friday. "next Friday" is always +7.
+      assert.strictEqual(
+        resolveStartTime("Friday, 7pm", NOW).toISOString(),
+        new Date(2026, 6, 3, 19, 0).toISOString()
+      );
+      assert.strictEqual(
+        resolveStartTime("Friday, 10am", NOW).toISOString(),
+        new Date(2026, 6, 10, 10, 0).toISOString()
+      );
+      assert.strictEqual(
+        resolveStartTime("next Friday, 7pm", NOW).toISOString(),
+        new Date(2026, 6, 10, 19, 0).toISOString()
+      );
+      assert.strictEqual(
+        resolveStartTime("Monday, 7pm", NOW).toISOString(),
+        new Date(2026, 6, 6, 19, 0).toISOString()
+      );
+    },
+  ],
+  [
+    "CALENDAR: ISO and named dates combine with clocks in the plan zone",
+    () => {
+      assert.strictEqual(
+        resolveStartTime("2026-08-15 at 19:30", NOW, [], "America/Toronto").toISOString(),
+        "2026-08-15T23:30:00.000Z"
+      );
+      assert.strictEqual(
+        resolveStartTime("August 15, 2026 at 7:30pm", NOW, [], "America/Toronto").toISOString(),
+        "2026-08-15T23:30:00.000Z"
+      );
+      assert.strictEqual(
+        resolveStartTime("15 August 2026 at 7:30pm", NOW, [], "America/Toronto").toISOString(),
+        "2026-08-15T23:30:00.000Z"
+      );
+      assert.strictEqual(
+        resolveStartTime("Friday 19", NOW, [], "America/Toronto").toISOString(),
+        "2026-07-03T23:00:00.000Z"
+      );
+      assert.strictEqual(
+        resolveStartTime("2026-08-15 19", NOW, [], "America/Toronto").toISOString(),
+        "2026-08-15T23:00:00.000Z"
+      );
+      assert.strictEqual(
+        resolveStartTime("August 15 19", NOW, [], "America/Toronto").toISOString(),
+        "2026-08-15T23:00:00.000Z"
+      );
+      // Date components and durations are not clocks when no separate clock
+      // token exists.
+      assert.strictEqual(
+        resolveStartTime("2026-08-15", NOW, [], "America/Toronto").toISOString(),
+        "2026-08-15T14:00:00.000Z"
+      );
+      assert.strictEqual(
+        resolveStartTime("August 15", NOW, [], "America/Toronto").toISOString(),
+        "2026-08-15T14:00:00.000Z"
+      );
+      assert.strictEqual(
+        resolveStartTime("Friday, 5 hours", NOW, [], "America/Toronto").toISOString(),
+        "2026-07-10T14:00:00.000Z"
+      );
+
+      const explicitBare = resolveStartTimeChecked(
+        "Monday 2",
+        NOW,
+        ["dinner"],
+        "America/Toronto"
+      );
+      assert.strictEqual(explicitBare.ok, false);
+      if (!explicitBare.ok) {
+        assert.strictEqual(explicitBare.overridable, undefined);
+        assert.match(explicitBare.reason, /dinner/);
+      }
+    },
+  ],
+  [
+    "CALENDAR: invalid dates, ambiguous numeric dates, and impossible clocks fail loud",
+    () => {
+      for (const tw of [
+        "February 30, 2027 at 7pm",
+        "02/03/2027 at 7pm",
+        "13pm",
+        "00pm",
+        "24:00",
+        "7:5pm",
+        "7:60",
+        "-1pm",
+        "at -1:30",
+        "2026-08-150",
+        "August 123",
+        "August 15thh",
+      ]) {
+        const result = resolveStartTimeChecked(tw, NOW, ["dinner"]);
+        assert.strictEqual(result.ok, false, `${tw} must be rejected`);
+        if (!result.ok) assert.ok(result.reason.length > 20);
+      }
+      for (const tw of ["-1pm", "at -1:30"]) {
+        const result = resolveStartTimeChecked(tw, NOW, ["dinner"]);
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) assert.match(result.reason, /Couldn't understand the time/);
+      }
+      for (const tw of ["2026-08-150", "August 123", "August 15thh"]) {
+        const result = resolveStartTimeChecked(tw, NOW, ["dinner"]);
+        assert.strictEqual(result.ok, false);
+        if (!result.ok) assert.match(result.reason, /calendar date/);
+      }
+    },
+  ],
+  [
+    "CALENDAR: DST gaps reject and fall-back overlaps choose the earliest instant",
+    () => {
+      const beforeSpring = new Date("2026-03-07T17:00:00Z");
+      const gap = resolveStartTimeChecked(
+        "2026-03-08 at 2:30am",
+        beforeSpring,
+        ["coffee"],
+        "America/Toronto"
+      );
+      assert.strictEqual(gap.ok, false);
+
+      const beforeFall = new Date("2026-10-31T16:00:00Z");
+      assert.strictEqual(
+        resolveStartTime(
+          "2026-11-01 at 1:30am",
+          beforeFall,
+          ["bar"],
+          "America/Toronto"
+        ).toISOString(),
+        "2026-11-01T05:30:00.000Z"
+      );
+    },
+  ],
+  [
+    "plausibility validates the first scheduled category, not a later permissive one",
+    () => {
+      const result = resolveStartTimeChecked(
+        "1am",
+        new Date("2026-07-03T00:00:00Z"),
+        ["dinner", "bar"],
+        "America/Toronto"
+      );
+      assert.strictEqual(result.ok, false);
+      if (!result.ok) assert.match(result.reason, /dinner/);
+    },
+  ],
+  [
     "3-stop chain: sequential, non-overlapping, Toronto ISO, travel placeholder",
     () => {
       const { startISO, stops } = buildSchedule(

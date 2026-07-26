@@ -142,6 +142,32 @@ test("vague-but-sincere prompt: clarify shows, answering lands a general itinera
   await expectStripMatchesPin(page, "Fixture General One");
 });
 
+test("an exact stop count cannot bypass kind clarification and produces every stop @mock", async ({ page }) => {
+  await page.goto("/");
+  await page.locator(".prompt__input").fill("exactly three places at 7pm");
+  await page.locator(".prompt__go").click();
+
+  const clarify = page.locator(".clarify");
+  await expect(clarify).toBeVisible({ timeout: 30_000 });
+  await expect(clarify).toContainText("What kind of thing?");
+
+  // Both escape hatches must refuse to bypass the required kind answer:
+  // the accessible label is intentionally "Skip — just plan it".
+  await clarify.locator(".clarify__skip").click();
+  await expect(clarify).toBeVisible();
+  await clarify.getByRole("button", { name: "Go", exact: true }).click();
+  await expect(clarify).toBeVisible();
+
+  await clarify.getByRole("button", { name: "something to do", exact: true }).click();
+  await clarify.getByRole("button", { name: "Go", exact: true }).click();
+
+  await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+  const names = await page.locator(".lstrip__stop .lstrip__name").allInnerTexts();
+  expect(names).toHaveLength(3);
+  expect(new Set(names).size).toBe(3);
+  for (const name of names) await expectStripMatchesPin(page, name);
+});
+
 test("clarify: the KIND answer steers the plan, and repeated answers don't leak @mock", async ({ page }) => {
   // batch 4: answering "what kind of thing?" must actually narrow the
   // plan away from the general pool...

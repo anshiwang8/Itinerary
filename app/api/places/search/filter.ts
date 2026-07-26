@@ -6,6 +6,7 @@ import { resolveStartTime } from "../../schedule/schedule";
 import { DEFAULT_ZONE, wallClockParts } from "../../../lib/zoneTime";
 import { isOutdoorCategory } from "../../../lib/categoryTraits";
 import { logEvent } from "../../_shared/http";
+import { hardPriceLevelMaximum, parseBudget, priceLevelRank } from "../../../lib/budget";
 
 export interface Place {
   id: string;
@@ -15,9 +16,20 @@ export interface Place {
   priceLevel?: string;
   currentOpeningHours?: CurrentOpeningHours;
   businessStatus?: string;
-  /** one-line venue blurb — shown on the stop card, and constraint
-   * evidence for the selector */
+  /** one-line venue blurb shown on the stop card. Narrative prose is not
+   * trusted as hard-constraint evidence. */
   editorialSummary?: { text: string };
+  servesVegetarianFood?: boolean;
+  outdoorSeating?: boolean;
+  liveMusic?: boolean;
+  goodForChildren?: boolean;
+  allowsDogs?: boolean;
+  accessibilityOptions?: {
+    wheelchairAccessibleParking?: boolean;
+    wheelchairAccessibleEntrance?: boolean;
+    wheelchairAccessibleRestroom?: boolean;
+    wheelchairAccessibleSeating?: boolean;
+  };
 }
 
 // Shape returned by /api/parse.
@@ -109,20 +121,6 @@ function forecastAt(
 }
 
 const DEAD_STATUSES = new Set(["CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"]);
-const EXPENSIVE_LEVELS = new Set([
-  "PRICE_LEVEL_EXPENSIVE",
-  "PRICE_LEVEL_VERY_EXPENSIVE",
-]);
-
-// Budget language that signals "keep it cheap". Only these trigger the
-// price rule; other budget phrasings pass through untouched for now.
-function isCheapBudget(budget: string | null): boolean {
-  if (!budget) return false;
-  return /cheap|budget|broke|inexpensive|affordable|student|under\s*\$?\d+|^\$$/i.test(
-    budget
-  );
-}
-
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 function fmtTarget(t: TargetTime): string {
   return `${DAY_NAMES[t.day]} ${String(t.hour).padStart(2, "0")}:${String(
@@ -148,9 +146,8 @@ export function filterPools(
 } {
   const dropLog: DropEntry[] = [];
   const weatherBlocked: WeatherBlock[] = [];
-  const cheap = isCheapBudget(parsed.budget);
-  // Ids that already survived in an earlier category (original order).
-  const seen = new Set<string>();
+  const budget = parseBudget(parsed.budget);
+  const maxPriceRank = hardPriceLevelMaximum(budget);
   const out: Record<string, Place[]> = {};
 
   // THE resolved start instant — identical to what buildSchedule will
@@ -209,6 +206,10 @@ export function filterPools(
     }
 
     const survivors: Place[] = [];
+    // Duplicate provider rows inside one category are redundant. The same
+    // venue appearing in DIFFERENT categories must remain in both pools so
+    // the selector can find a globally feasible assignment.
+    const seenInCategory = new Set<string>();
     for (const place of places) {
       const drop = (rule: DropRule, detail: string) =>
         dropLog.push({
@@ -241,23 +242,21 @@ export function filterPools(
         continue;
       }
 
-      // d. price — only when budget stated AND priceLevel present
-      if (
-        cheap &&
-        place.priceLevel &&
-        EXPENSIVE_LEVELS.has(place.priceLevel)
-      ) {
+      // d. price — only when the user's signal maps defensibly to Google's
+      // relative levels. Numeric maxima are ranking information only.
+      const priceRank = priceLevelRank(place.priceLevel);
+      if (maxPriceRank !== null && priceRank !== null && priceRank > maxPriceRank) {
         drop("price", `${place.priceLevel} vs budget "${parsed.budget}"`);
         continue;
       }
 
-      // e. cross-category dedup — first surviving occurrence wins
-      if (seen.has(place.id)) {
-        drop("dedup", "already surviving in an earlier category");
+      // e. de-duplicate only inside this pool.
+      if (seenInCategory.has(place.id)) {
+        drop("dedup", "duplicate result inside this category");
         continue;
       }
 
-      seen.add(place.id);
+      seenInCategory.add(place.id);
       survivors.push(place);
     }
     out[category] = survivors;

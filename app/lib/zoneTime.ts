@@ -91,3 +91,73 @@ export function instantAtWallClock(
   if (rollForward && dt.toMillis() <= now.getTime()) dt = dt.plus({ days: 1 });
   return dt.toJSDate();
 }
+
+export interface LocalDate {
+  year: number;
+  month: number;
+  day: number;
+}
+
+/** Calendar date in `timeZone`, shifted by whole local days (DST-safe). */
+export function localDateAfterDays(
+  now: Date,
+  timeZone: string,
+  dayOffset: number
+): LocalDate {
+  const dt = DateTime.fromJSDate(now).setZone(normalizeZone(timeZone)).plus({ days: dayOffset });
+  return { year: dt.year, month: dt.month, day: dt.day };
+}
+
+/**
+ * Strict local date/time construction. Invalid calendar dates and
+ * spring-forward gaps return null instead of being normalized. During a
+ * fall-back overlap, the earliest matching instant is chosen deterministically.
+ */
+export function instantAtLocalDateTime(
+  date: LocalDate,
+  timeZone: string,
+  hour: number,
+  minute: number
+): Date | null {
+  if (
+    !Number.isInteger(date.year) ||
+    !Number.isInteger(date.month) ||
+    !Number.isInteger(date.day) ||
+    !Number.isInteger(hour) ||
+    !Number.isInteger(minute) ||
+    date.month < 1 ||
+    date.month > 12 ||
+    date.day < 1 ||
+    date.day > 31 ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+  const dt = DateTime.fromObject(
+    {
+      year: date.year,
+      month: date.month,
+      day: date.day,
+      hour,
+      minute,
+      second: 0,
+      millisecond: 0,
+    },
+    { zone: normalizeZone(timeZone) }
+  );
+  if (
+    !dt.isValid ||
+    dt.year !== date.year ||
+    dt.month !== date.month ||
+    dt.day !== date.day ||
+    dt.hour !== hour ||
+    dt.minute !== minute
+  ) {
+    return null;
+  }
+  const candidates = dt.getPossibleOffsets().sort((a, b) => a.toMillis() - b.toMillis());
+  return (candidates[0] ?? dt).toJSDate();
+}

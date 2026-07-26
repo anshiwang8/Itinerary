@@ -160,6 +160,42 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.deepStrictEqual(await res.json(), good);
     },
   ],
+  [
+    "stop_count expands one category but leaves multi-category distribution for clarification",
+    async () => {
+      groqContent = model({
+        stop_count: 3,
+        category_signals: ["coffee shop"],
+      });
+      const repeated = await POST(req("three coffee shops"));
+      assert.deepStrictEqual((await repeated.json()).category_signals, [
+        "coffee shop",
+        "coffee shop",
+        "coffee shop",
+      ]);
+
+      groqContent = model({
+        stop_count: 3,
+        category_signals: ["dinner", "drinks"],
+      });
+      const ambiguous = await POST(req("three stops consisting of dinner and drinks"));
+      assert.deepStrictEqual((await ambiguous.json()).category_signals, [
+        "dinner",
+        "drinks",
+      ]);
+    },
+  ],
+  [
+    "zero, negative, fractional, and excessive stop counts are rejected",
+    async () => {
+      for (const stop_count of [0, -1, 1.5, 9]) {
+        groqContent = model({ stop_count, category_signals: ["cafe"] });
+        const response = await POST(req(`${stop_count} stops`));
+        assert.strictEqual(response.status, 502, String(stop_count));
+        assert.strictEqual((await response.json()).code, "groq_invalid_schema");
+      }
+    },
+  ],
 ];
 
 (async () => {

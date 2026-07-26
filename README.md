@@ -31,6 +31,19 @@ install, no keys, nothing to set up. **This is the main way to use it.**
    questions — what kind of thing, when, what vibe — with one-tap chips and a *Skip — just
    plan it* escape. A prompt that already says enough is never interrupted.
 
+   Calendar language is resolved in the plan city's timezone. Supported qualifiers are
+   `today`, `tomorrow`, bare weekdays, `next <weekday>`, ISO dates such as `2026-08-15`,
+   and named dates such as `August 15, 2026`, with or without a clock. A bare weekday means
+   the nearest future occurrence: today when its requested clock is still ahead, otherwise
+   the following week. `next Friday` is also the nearest future Friday, but when today is
+   Friday it means the Friday one week later. Nonexistent DST wall times and invalid dates
+   or clocks are rejected instead of being normalized. During a fall-back overlap, the
+   earlier occurrence is used deterministically.
+
+   A stated stop count is also enforced: "three coffee shops" becomes three distinct
+   coffee-shop slots. If one count spans several categories ("three stops: dinner and
+   drinks"), the planner asks how to split them rather than guessing.
+
 4. **Swap a stop.** Click a stop card in the top strip to open its inline prompt, then try:
    - `somewhere cheaper` — swaps in a cheaper venue and holds the time slot (watch `$$$` → `$$`).
    - `an hour earlier` — moves the stop and reflows everything after it.

@@ -3,6 +3,7 @@ import type { LatLng } from "../schedule/travel";
 import type { TravelLeg } from "../schedule/travel";
 import type { ScheduledStop } from "../schedule/schedule";
 import type { HomePoint } from "../schedule/home";
+import { normalizeStopCountSlots } from "../../lib/planSlots";
 import {
   REQUEST_LIMITS,
   badRequest,
@@ -99,7 +100,7 @@ export function parseParsedPrompt(value: unknown): ParsedPrompt {
       longitude: value.home.longitude,
     };
   }
-  return parsed;
+  return normalizeStopCountSlots(parsed);
 }
 
 function parsePlace(value: unknown, field: string): Place {

@@ -16,6 +16,7 @@ import {
 } from "../_shared/http";
 import { fetchProvider, readProviderJson, requireProviderRecord } from "../_shared/provider";
 import { parsePromptBody } from "../_shared/schemas";
+import { normalizeStopCountSlots } from "../../lib/planSlots";
 
 // Standalone LLM parse step: natural-language prompt → structured plan
 // parameters. Not connected to Places yet — this route only proves Groq
@@ -28,7 +29,7 @@ const SYSTEM_PROMPT = `You are a parser for a day-plan generator. Convert the us
 Respond with ONLY a single JSON object. No prose, no explanations, no markdown fences, no leading or trailing text. The object must match this exact schema — every key present, no extra keys:
 
 {
-  "time_window": string,        // ONLY timing and duration, nothing else. Capture the MOST SPECIFIC time information given: if an exact time is stated (e.g. "7pm", "around 3:30"), include it verbatim alongside any duration, e.g. "7pm, 2 hours". Preserve day qualifiers verbatim too ("today", "tomorrow", "Saturday"): e.g. "coffee at 6am tomorrow" → "tomorrow, 6am". IMMEDIACY ("right now", "ASAP", "immediately", "at this moment", "as soon as possible", "open now") is time information — capture it as exactly "now", never a day-part and never "unspecified". An ALL-DAY ask ("a full day", "the whole day", "a full schedule", "all day", "for a day") is duration information — include exactly "all day" alongside any day qualifier, e.g. "plan a full schedule for tomorrow" → "tomorrow, all day". Only fall back to a general day-part (morning/afternoon/evening/night) when no specific time is stated. "unspecified" if no time information at all
+  "time_window": string,        // ONLY timing and duration, nothing else. Capture the MOST SPECIFIC time information given: if an exact time is stated (e.g. "7pm", "around 3:30"), include it verbatim alongside any duration, e.g. "7pm, 2 hours". Preserve calendar qualifiers verbatim: today, tomorrow, bare weekdays, "next <weekday>", ISO dates (2026-08-15), and named dates (August 15, 2026). Keep the qualifier beside its clock/day-part: "coffee at 6am next Saturday" → "next Saturday, 6am". Never normalize or invent a date. IMMEDIACY ("right now", "ASAP", "immediately", "at this moment", "as soon as possible", "open now") is time information — capture it as exactly "now", never a day-part and never "unspecified". An ALL-DAY ask ("a full day", "the whole day", "a full schedule", "all day", "for a day") is duration information — include exactly "all day" alongside any day qualifier, e.g. "plan a full schedule for tomorrow" → "tomorrow, all day". Only fall back to a general day-part (morning/afternoon/evening/night) when no specific time is stated. "unspecified" if no time information at all
   "stop_count": number | null,  // ONLY if the user states a NUMBER of stops/places in words or digits (e.g. "3 stops", "exactly two places"); otherwise null. Never count listed activities yourself: "dinner then a bar" has no stated number, so stop_count is null (the activities still go in category_signals). Numbers that describe duration, clock times, people, or budget are NOT stop counts.
   "aesthetic": string,          // the vibe/mood the user wants, e.g. "cozy", "lively night out", "quiet and scenic"
   "category_signals": string[], // place/activity categories implied, e.g. ["coffee shop", "bookstore", "park"]. Capture EVERY distinct activity in the prompt, one entry each, including non-venue activities: "a walk" → "walk", "shopping" → "shopping", "a stroll in the park" → "park walk". Never merge or drop an activity because it isn't a business type. Preserve specific cuisine/food types as the category — "ramen" stays "ramen", "tacos" stays "tacos", never generalized to "restaurant". A VENUE FEATURE attached to an activity is NOT its own category: "dessert with a patio", "a bar with live music", "dinner with a view", "somewhere with outdoor seating" are each ONE activity — the feature ("patio", "live music", "a view", "outdoor seating", "rooftop") goes in "constraints", exactly like dietary words do. Only a genuinely distinct activity gets its own entry: "dinner then a bar" is two. PASSIVE OUTDOOR/NATURE ENJOYMENT normalizes to the category "park": sitting on a bench, quiet scenery, greenery, fresh air, people-watching outside, "somewhere calm outside", enjoying nature — all of these are "park", never a cafe/bar/restaurant with a view. THEME EXPANSION: a prompt that states an INTEREST or IDENTITY rather than concrete activities — "as a ___ fan", "a full day around ___", "explore ___ culture", "immerse myself in ___", "a ___-themed day" — combined with an open-ended ask ("a full schedule", "a full day", "things to do") is NOT one category. Expand the theme into 3-4 DISTINCT categories, each a DIFFERENT concrete, map-searchable kind of place representing a different facet of the interest, e.g. a soccer fan's full day → ["soccer stadium tour", "sports museum", "sports bar", "restaurant"]; "immerse myself in jazz" → ["jazz club", "record store", "music venue", "cocktail bar"]. Facets must be genuinely different kinds of places — never four near-synonyms, and at most ONE general food stop. Do NOT expand when the user already names a concrete place kind ("a soccer museum" → ["soccer museum"]) or lists their own activities — expansion applies only to open-ended themed asks
@@ -112,6 +113,12 @@ function withAllDayFloor(prompt: string, parsed: ParsedPrompt): ParsedPrompt {
   return { ...parsed, time_window: base ? `${base}, all day` : "all day" };
 }
 
+function finalizeParsed(prompt: string, parsed: ParsedPrompt): ParsedPrompt {
+  return normalizeStopCountSlots(
+    withImmediateFloor(prompt, withAllDayFloor(prompt, parsed))
+  );
+}
+
 export async function POST(request: NextRequest) {
   const ctx = requestContext(request, "parse");
   try {
@@ -124,7 +131,7 @@ export async function POST(request: NextRequest) {
     if (isMockMode()) {
       return apiJson(
         ctx,
-        withImmediateFloor(prompt, withAllDayFloor(prompt, mockParse(prompt)))
+        finalizeParsed(prompt, parseModelOutput(mockParse(prompt)))
       );
     }
 
@@ -168,7 +175,7 @@ export async function POST(request: NextRequest) {
     }
     return apiJson(
       ctx,
-      withImmediateFloor(prompt, withAllDayFloor(prompt, parseModelOutput(parsed)))
+      finalizeParsed(prompt, parseModelOutput(parsed))
     );
   } catch (err) {
     return apiError(ctx, err);

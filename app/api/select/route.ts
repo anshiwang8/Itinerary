@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { ParsedPrompt, Place } from "../places/search/filter";
 import { SelectParseError, selectVenues } from "./selectVenues";
-import { isMockMode, mockSelect } from "../_mock/fixtures";
+import { isMockMode, mockSelectModelResponse } from "../_mock/fixtures";
 import {
   ApiError,
   apiError,
@@ -29,9 +29,18 @@ export async function POST(request: NextRequest) {
     // is two stops sharing one pool, not one stop (code-audit §7.1)
     const slots = parseSlots(body.slots);
 
-    // fixture seam: deterministic highest-rated pick, no Groq call
+    // Fixture seam replaces the Groq completion only. Slot validation,
+    // constraint enforcement, correction, and global assignment below are
+    // the same production core used outside mock mode.
     if (isMockMode()) {
-      return apiJson(ctx, { selections: mockSelect(parsed, poolsIn, slots) });
+      const selections = await selectVenues(
+        "",
+        parsed,
+        poolsIn,
+        slots,
+        mockSelectModelResponse
+      );
+      return apiJson(ctx, { selections });
     }
     const apiKey = requireServiceKey(process.env.GROQ_API_KEY);
     const selections = await selectVenues(apiKey, parsed, poolsIn, slots);

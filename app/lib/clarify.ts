@@ -3,9 +3,13 @@
 // field check). Given a parse, return 0–3 targeted questions to show
 // before search/select. No accounts, no profiles — deliberately deferred.
 import { ParsedPrompt } from "../api/places/search/filter";
+import {
+  distributionOptions,
+  resolveRequestedSlots,
+} from "./planSlots";
 
 export interface ClarifyQuestion {
-  id: "kind" | "when" | "vibe" | "narrow";
+  id: "kind" | "when" | "vibe" | "narrow" | "distribution";
   question: string;
   /** quick-pick chips; the UI also allows free text */
   options: string[];
@@ -164,6 +168,18 @@ export function clarifyQuestions(parsed: ParsedPrompt): ClarifyQuestion[] {
   const hasConstraints = (parsed.constraints ?? []).some(
     (c) => typeof c === "string" && c.trim() !== ""
   );
+  const slotResolution = resolveRequestedSlots(parsed);
+  const distributionQuestion: ClarifyQuestion | null =
+    slotResolution.kind === "needs-distribution"
+      ? {
+          id: "distribution",
+          question: `How should I split the ${slotResolution.count} stops?`,
+          options: distributionOptions(
+            slotResolution.categories,
+            slotResolution.count
+          ),
+        }
+      : null;
 
   // one narrowing question per DISTINCT generic category ("drinks then
   // another bar" is two slots but one question — the answer applies to both)
@@ -176,9 +192,17 @@ export function clarifyQuestions(parsed: ParsedPrompt): ClarifyQuestion[] {
     if (q) narrowQuestions.push(q);
   }
 
-  if (hasCategory && (hasTime || hasAesthetic) && narrowQuestions.length === 0) return [];
+  if (
+    hasCategory &&
+    (hasTime || hasAesthetic) &&
+    narrowQuestions.length === 0 &&
+    !distributionQuestion
+  ) {
+    return [];
+  }
 
   const questions: ClarifyQuestion[] = [];
+  if (distributionQuestion) questions.push(distributionQuestion);
   // An ultra-vague prompt gives the pipeline nothing to aim at. One cheap
   // question ("what kind of thing?") narrows it from "everything open in
   // the city" to a real intent — deliberately 4 broad buckets, not an
@@ -210,17 +234,25 @@ export function clarifyQuestions(parsed: ParsedPrompt): ClarifyQuestion[] {
  * Map a "What kind of thing?" answer onto category_signals. The buckets
  * map to terms the rest of the pipeline already understands (bands,
  * durations, search): "drinks"→bar, "outdoors"→park. "Something to do"
- * stays deliberately EMPTY — that's the general pool, which is exactly
- * the right tool for "surprise me"; free text passes through as its own
- * category so "bowling" works like any typed prompt.
+ * normally stays EMPTY — that's the general pool, which is exactly the
+ * right tool for an uncounted "surprise me". A counted request must name
+ * its slots, so materializeGeneral turns that same choice into one broad
+ * category that stop-count normalization can repeat deterministically.
+ * Free text passes through as its own category so "bowling" works like
+ * any typed prompt.
  */
-export function categoriesForKindAnswer(answer: string): string[] {
+export function categoriesForKindAnswer(
+  answer: string,
+  options: { materializeGeneral?: boolean } = {}
+): string[] {
   const a = answer.trim().toLowerCase();
   if (!a) return [];
   if (a === "food") return ["restaurant"];
   if (a === "drinks") return ["bar"];
   if (a === "outdoors") return ["park"];
-  if (a === "something to do") return [];
+  if (a === "something to do") {
+    return options.materializeGeneral ? ["things to do"] : [];
+  }
   return [answer.trim()];
 }
 

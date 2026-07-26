@@ -5,13 +5,18 @@
 // America/Toronto). "now", "today", "which hour" and the ISO output are
 // all computed in THAT zone via app/lib/zoneTime — never the server's
 // wall clock. Toronto plans are byte-identical to the pre-Phase-5 code.
-import { CurrentOpeningHours, parseTargetTime } from "../places/search/hours";
+import {
+  CurrentOpeningHours,
+  parseClockTime,
+  parseTargetTime,
+} from "../places/search/hours";
 import { getDuration } from "./durations";
 import { isParkLike } from "../../lib/categoryTraits";
 import { TravelLeg } from "./travel";
 import {
   DEFAULT_ZONE,
-  instantAtWallClock,
+  instantAtLocalDateTime,
+  localDateAfterDays,
   nextFullHourInZone,
   toZonedISO as toZonedISOImpl,
   wallClockParts,
@@ -131,13 +136,17 @@ function inBand(d: Date, band: PlausibleBand, timeZone: string = DEFAULT_ZONE): 
   return hourInBand(hour + minute / 60, band);
 }
 
-/** The plausible-hours band for a set of categories (first match wins). */
+function firstCategory(categories: string[]): string | null {
+  return categories.find((category) => typeof category === "string" && category.trim()) ?? null;
+}
+
+/** The plausible-hours band for the first scheduled category. */
 export function bandForCategories(categories: string[]): PlausibleBand {
-  for (const c of categories) {
-    const b = PLAUSIBLE_BANDS.find(([p]) => p.test(c))?.[1];
-    if (b) return b;
-  }
-  return DEFAULT_PLAUSIBLE_BAND;
+  const category = firstCategory(categories);
+  return category
+    ? PLAUSIBLE_BANDS.find(([pattern]) => pattern.test(category))?.[1] ??
+        DEFAULT_PLAUSIBLE_BAND
+    : DEFAULT_PLAUSIBLE_BAND;
 }
 
 /** Is `d` a sensible hour for these categories, in the plan's zone? Reused
@@ -185,16 +194,10 @@ function implausibleExplicitReason(
   categories: string[],
   timeZone: string = DEFAULT_ZONE
 ): string {
-  let label: string | null = null;
-  let band = DEFAULT_PLAUSIBLE_BAND;
-  for (const c of categories) {
-    const hit = PLAUSIBLE_BANDS.find(([p]) => p.test(c));
-    if (hit) {
-      label = c;
-      band = hit[1];
-      break;
-    }
-  }
+  const first = firstCategory(categories);
+  const hit = first ? PLAUSIBLE_BANDS.find(([pattern]) => pattern.test(first)) : undefined;
+  const label = hit ? first : null;
+  const band = hit?.[1] ?? DEFAULT_PLAUSIBLE_BAND;
   const { hour, minute } = wallClockParts(start, timeZone);
   const h = hour + minute / 60;
   // outside a non-wrapping band: before open → later; past close → earlier.
@@ -221,20 +224,19 @@ function implausibleInferredReason(
   categories: string[],
   timeZone: string = DEFAULT_ZONE
 ): { reason: string; category: string } | null {
-  for (const c of categories) {
-    const hit = PLAUSIBLE_BANDS.find(([p]) => p.test(c));
-    if (!hit) continue;
-    const band = hit[1];
-    const { hour, minute } = wallClockParts(start, timeZone);
-    const h = hour + minute / 60;
-    const beforeOpen = band.startHour <= band.endHour ? h < band.startHour : true;
-    const window = `${c} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}`;
-    const reason = beforeOpen
-      ? `It's ${clock12(start, timeZone)} — early for ${c} (${window}).`
-      : `It's ${clock12(start, timeZone)} — late for a typical ${c} visit (${window}).`;
-    return { reason, category: c };
-  }
-  return null;
+  const category = firstCategory(categories);
+  if (!category) return null;
+  const hit = PLAUSIBLE_BANDS.find(([pattern]) => pattern.test(category));
+  if (!hit) return null;
+  const band = hit[1];
+  const { hour, minute } = wallClockParts(start, timeZone);
+  const h = hour + minute / 60;
+  const beforeOpen = band.startHour <= band.endHour ? h < band.startHour : true;
+  const window = `${category} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}`;
+  const reason = beforeOpen
+    ? `It's ${clock12(start, timeZone)} — early for ${category} (${window}).`
+    : `It's ${clock12(start, timeZone)} — late for a typical ${category} visit (${window}).`;
+  return { reason, category };
 }
 
 /**
@@ -252,16 +254,19 @@ export function resolveStartTimeChecked(
   categories: string[] = [],
   timeZone: string = DEFAULT_ZONE
 ): StartResolution {
-  const start = resolveStartTime(timeWindow, now, categories, timeZone);
+  const resolved = resolveStartTimeResult(timeWindow, now, categories, timeZone);
+  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  const start = resolved.start;
   const tw = (timeWindow ?? "").toLowerCase();
 
-  const bands = categories
-    .map((c) => PLAUSIBLE_BANDS.find(([p]) => p.test(c))?.[1])
-    .filter((b): b is PlausibleBand => !!b);
-  if (bands.length === 0) bands.push(DEFAULT_PLAUSIBLE_BAND);
-  if (bands.some((b) => inBand(start, b, timeZone))) return { ok: true, start };
+  const band = bandForCategories(categories);
+  if (inBand(start, band, timeZone)) return { ok: true, start };
 
-  const hasClockTime = parseTargetTime(tw) !== null;
+  const qualifier = calendarQualifier(tw);
+  const calendarClock =
+    qualifier.kind === "invalid" ? { kind: "none" as const } : bareClockAfterCalendar(tw, qualifier);
+  const hasClockTime =
+    parseTargetTime(tw) !== null || calendarClock.kind === "valid";
   const hasDayPart = Object.keys(DAY_PART_DEFAULTS).some((k) => tw.includes(k));
   // an explicit "now" (clarify answer) is a stated time too — a 3 AM
   // refusal must say "nothing's open then", never "add a time" (they just did)
@@ -304,70 +309,317 @@ export function toTorontoISO(d: Date): string {
  *    categories that match (anchor).
  * 4. No category matches either → next full hour from now.
  */
+const WEEKDAYS: Record<string, number> = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+};
+
+const MONTHS: Record<string, number> = {
+  january: 1,
+  jan: 1,
+  february: 2,
+  feb: 2,
+  march: 3,
+  mar: 3,
+  april: 4,
+  apr: 4,
+  may: 5,
+  june: 6,
+  jun: 6,
+  july: 7,
+  jul: 7,
+  august: 8,
+  aug: 8,
+  september: 9,
+  sep: 9,
+  sept: 9,
+  october: 10,
+  oct: 10,
+  november: 11,
+  nov: 11,
+  december: 12,
+  dec: 12,
+};
+
+const MONTH_NAME_PATTERN = Object.keys(MONTHS).join("|");
+const NAMED_DATE_FORWARD = new RegExp(
+  `\\b(${MONTH_NAME_PATTERN})\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?(?!\\w)`
+);
+const NAMED_DATE_REVERSE = new RegExp(
+  `\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(${MONTH_NAME_PATTERN})(?:,?\\s+(\\d{4}))?(?!\\w)`
+);
+
+interface CalendarSpan {
+  start: number;
+  end: number;
+}
+
+type CalendarQualifier =
+  | { kind: "none" }
+  | ({ kind: "today" } & CalendarSpan)
+  | ({ kind: "tomorrow" } & CalendarSpan)
+  | ({ kind: "weekday"; weekday: number; next: boolean } & CalendarSpan)
+  | ({ kind: "date"; year: number | null; month: number; day: number } & CalendarSpan)
+  | { kind: "invalid"; reason: string };
+
+function spanOf(match: RegExpMatchArray): CalendarSpan {
+  const start = match.index ?? 0;
+  return { start, end: start + match[0].length };
+}
+
+function isMalformedNamedDayToken(token: string): boolean {
+  const looksDateLike =
+    /^\d+$/.test(token) || /^\d+(?:st|nd|rd|th)/.test(token);
+  return looksDateLike && !/^\d{1,2}(?:st|nd|rd|th)?$/.test(token);
+}
+
+function malformedCalendarReason(tw: string): string | null {
+  // ISO-looking tokens must be complete dates. This catches partial matches
+  // such as 2026-08-150 instead of letting the resolver silently discard them.
+  for (const candidate of tw.matchAll(/\b\d{4}-[a-z0-9_+-]+/g)) {
+    if (!/^\d{4}-\d{1,2}-\d{1,2}$/.test(candidate[0])) {
+      return "Couldn't understand that calendar date. Use a date such as 2026-08-15 or August 15.";
+    }
+  }
+
+  const validReverse = tw.match(NAMED_DATE_REVERSE);
+  const forwardLike = new RegExp(
+    `\\b(${MONTH_NAME_PATTERN})\\s+(\\d[^\\s,.;!?)]*)`,
+    "g"
+  );
+  for (const candidate of tw.matchAll(forwardLike)) {
+    const candidateStart = candidate.index ?? 0;
+    const insideReverseDate =
+      !!validReverse &&
+      candidateStart >= (validReverse.index ?? 0) &&
+      candidateStart < (validReverse.index ?? 0) + validReverse[0].length;
+    if (insideReverseDate) continue;
+    if (isMalformedNamedDayToken(candidate[2])) {
+      return "Couldn't understand that calendar date. Use a date such as 2026-08-15 or August 15.";
+    }
+  }
+
+  const reverseLike = new RegExp(
+    `\\b(\\d[^\\s,.;!?(]*)\\s+(${MONTH_NAME_PATTERN})\\b`,
+    "g"
+  );
+  for (const candidate of tw.matchAll(reverseLike)) {
+    if (isMalformedNamedDayToken(candidate[1])) {
+      return "Couldn't understand that calendar date. Use a date such as 2026-08-15 or August 15.";
+    }
+  }
+  return null;
+}
+
+function calendarQualifier(timeWindow: string): CalendarQualifier {
+  const tw = timeWindow.toLowerCase();
+  const malformedReason = malformedCalendarReason(tw);
+  if (malformedReason) return { kind: "invalid", reason: malformedReason };
+
+  const iso = tw.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})(?![\w-])/);
+  const namedForward = tw.match(NAMED_DATE_FORWARD);
+  const namedReverse = tw.match(NAMED_DATE_REVERSE);
+  const weekday = tw.match(
+    /\b(next\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/
+  );
+  const today = tw.match(/\btoday\b/);
+  const tomorrow = tw.match(/\btomorrow\b/);
+  const qualifierCount =
+    Number(!!iso) +
+    Number(!!namedForward) +
+    Number(!!namedReverse) +
+    Number(!!weekday) +
+    Number(!!today) +
+    Number(!!tomorrow);
+  if (qualifierCount > 1) {
+    return {
+      kind: "invalid",
+      reason: "That request has conflicting calendar dates. Choose one day.",
+    };
+  }
+  if (iso) {
+    return {
+      kind: "date",
+      year: Number(iso[1]),
+      month: Number(iso[2]),
+      day: Number(iso[3]),
+      ...spanOf(iso),
+    };
+  }
+  if (namedForward || namedReverse) {
+    const month = namedForward?.[1] ?? namedReverse![2];
+    const day = namedForward?.[2] ?? namedReverse![1];
+    const year = namedForward?.[3] ?? namedReverse?.[3];
+    return {
+      kind: "date",
+      year: year ? Number(year) : null,
+      month: MONTHS[month],
+      day: Number(day),
+      ...spanOf(namedForward ?? namedReverse!),
+    };
+  }
+  if (/\b\d+\s*\/\s*\d+/.test(tw)) {
+    return {
+      kind: "invalid",
+      reason: "Use an unambiguous date such as 2026-08-15 or August 15.",
+    };
+  }
+  if (weekday) {
+    return {
+      kind: "weekday",
+      weekday: WEEKDAYS[weekday[2]],
+      next: !!weekday[1],
+      ...spanOf(weekday),
+    };
+  }
+  if (today) return { kind: "today", ...spanOf(today) };
+  if (tomorrow) return { kind: "tomorrow", ...spanOf(tomorrow) };
+  return { kind: "none" };
+}
+
+type StartTimeResult =
+  | { ok: true; start: Date }
+  | { ok: false; reason: string };
+
+function bareClockAfterCalendar(
+  tw: string,
+  qualifier: Exclude<CalendarQualifier, { kind: "invalid" }>
+): ReturnType<typeof parseClockTime> {
+  if (qualifier.kind === "none") return { kind: "none" };
+  const suffix = tw.slice(qualifier.end);
+  const candidate = suffix.match(/^\s*,?\s*(?:at\s+)?([+-]?\s*\d+)\s*$/);
+  return candidate ? parseClockTime(candidate[1]) : { kind: "none" };
+}
+
+function resolvedClock(
+  tw: string,
+  categories: string[],
+  qualifier: CalendarQualifier
+): { hour: number; minute: number } | StartTimeResult {
+  let clock = parseClockTime(tw);
+  if (clock.kind === "none" && qualifier.kind !== "invalid") {
+    clock = bareClockAfterCalendar(tw, qualifier);
+  }
+  if (clock.kind === "invalid") {
+    return {
+      ok: false,
+      reason: `Couldn't understand the time "${clock.value}". Use a valid clock such as 7pm or 19:00.`,
+    };
+  }
+  if (clock.kind === "valid") return clock.time;
+  for (const [keyword, time] of Object.entries(DAY_PART_DEFAULTS)) {
+    if (tw.includes(keyword)) return time;
+  }
+  let inferred: { hour: number; minute: number } | null = null;
+  for (const category of categories) {
+    if (typeof category !== "string" || !category.trim()) continue;
+    const time = inferCategoryStart(category);
+    if (
+      time &&
+      (!inferred || time.hour * 60 + time.minute < inferred.hour * 60 + inferred.minute)
+    ) {
+      inferred = time;
+    }
+  }
+  if (inferred) return inferred;
+  if (qualifier.kind !== "none" && qualifier.kind !== "today") {
+    return DAY_PART_DEFAULTS.morning;
+  }
+  return { hour: -1, minute: -1 };
+}
+
+function resolveStartTimeResult(
+  timeWindow: string,
+  now: Date = new Date(),
+  categories: string[] = [],
+  timeZone: string = DEFAULT_ZONE
+): StartTimeResult {
+  const tw = (timeWindow ?? "").toLowerCase();
+
+  // explicit "now" (a clarify answer, or user phrasing like "right now")
+  // → the immediate slot: next full hour, ignoring category defaults
+  if (/\bnow\b/.test(tw)) {
+    return { ok: true, start: nextFullHourInZone(now, timeZone) };
+  }
+
+  const qualifier = calendarQualifier(tw);
+  if (qualifier.kind === "invalid") return { ok: false, reason: qualifier.reason };
+  const clock = resolvedClock(tw, categories, qualifier);
+  if ("ok" in clock) return clock;
+  if (clock.hour < 0) return { ok: true, start: nextFullHourInZone(now, timeZone) };
+
+  const localNow = wallClockParts(now, timeZone);
+  let dayOffset = 0;
+  if (qualifier.kind === "tomorrow") dayOffset = 1;
+  if (qualifier.kind === "weekday") {
+    dayOffset = (qualifier.weekday - localNow.weekday + 7) % 7;
+    if (qualifier.next && dayOffset === 0) dayOffset = 7;
+  }
+  let date =
+    qualifier.kind === "date"
+      ? {
+          year: qualifier.year ?? localNow.year,
+          month: qualifier.month,
+          day: qualifier.day,
+        }
+      : localDateAfterDays(now, timeZone, dayOffset);
+  let start = instantAtLocalDateTime(date, timeZone, clock.hour, clock.minute);
+  if (!start) {
+    return {
+      ok: false,
+      reason: "That date or local time doesn't exist. Choose another date or time.",
+    };
+  }
+
+  if (qualifier.kind === "date" && qualifier.year === null && start.getTime() <= now.getTime()) {
+    date = { ...date, year: date.year + 1 };
+    start = instantAtLocalDateTime(date, timeZone, clock.hour, clock.minute);
+    if (!start) {
+      return {
+        ok: false,
+        reason: "That date or local time doesn't exist. Choose another date or time.",
+      };
+    }
+  }
+
+  if (qualifier.kind === "weekday" && dayOffset === 0 && start.getTime() <= now.getTime()) {
+    date = localDateAfterDays(now, timeZone, 7);
+    start = instantAtLocalDateTime(date, timeZone, clock.hour, clock.minute)!;
+  } else if (
+    (qualifier.kind === "none" || qualifier.kind === "today") &&
+    start.getTime() <= now.getTime()
+  ) {
+    date = localDateAfterDays(now, timeZone, 1);
+    start = instantAtLocalDateTime(date, timeZone, clock.hour, clock.minute)!;
+  } else if (
+    qualifier.kind === "date" &&
+    qualifier.year !== null &&
+    start.getTime() <= now.getTime()
+  ) {
+    return {
+      ok: false,
+      reason: "That date and time have already passed. Choose a future time.",
+    };
+  }
+  return { ok: true, start };
+}
+
 export function resolveStartTime(
   timeWindow: string,
   now: Date = new Date(),
   categories: string[] = [],
   timeZone: string = DEFAULT_ZONE
 ): Date {
-  const tw = (timeWindow ?? "").toLowerCase();
-  // "tomorrow" shifts one local day; the clock branch's daysAhead is only
-  // ever 0/1 (parseTargetTime has no weekday names), so this single offset
-  // captures every branch's day math — computed in the PLAN's zone.
-  const dayOffset = tw.includes("tomorrow") ? 1 : 0;
-
-  // explicit "now" (a clarify answer, or user phrasing like "right now")
-  // → the immediate slot: next full hour, ignoring category defaults
-  if (/\bnow\b/.test(tw)) {
-    return nextFullHourInZone(now, timeZone);
+  const result = resolveStartTimeResult(timeWindow, now, categories, timeZone);
+  if (!result.ok) {
+    throw new RangeError(result.reason);
   }
-
-  const target = parseTargetTime(tw);
-  if (target) {
-    return instantAtWallClock(now, timeZone, target.hour, target.minute, dayOffset, true);
-  }
-
-  for (const [keyword, t] of Object.entries(DAY_PART_DEFAULTS)) {
-    if (tw.includes(keyword)) {
-      return instantAtWallClock(now, timeZone, t.hour, t.minute, dayOffset, true);
-    }
-  }
-
-  // No clock time, no day-part → infer from the categories. Anchor on
-  // the EARLIEST default among the categories that match the table —
-  // not blindly the first category ("dessert then dinner" must anchor
-  // on dinner's 19:00, not wipe every pool at next-full-hour because
-  // the first category alone decided). No match at all → fall through.
-  let inferred: { hour: number; minute: number } | null = null;
-  for (const c of categories) {
-    if (typeof c !== "string" || !c.trim()) continue;
-    const t = inferCategoryStart(c);
-    if (t && (!inferred || t.hour * 60 + t.minute < inferred.hour * 60 + inferred.minute)) {
-      inferred = t;
-    }
-  }
-  if (inferred) {
-    return instantAtWallClock(now, timeZone, inferred.hour, inferred.minute, dayOffset, true);
-  }
-
-  // Unspecified → next full hour… but a day qualifier must survive the
-  // fall-through. This line used to ignore dayOffset entirely, so
-  // "things to do as a soccer fan tomorrow" (no clock time, no day-part,
-  // "soccer" matches nothing in CATEGORY_START_DEFAULTS) silently
-  // discarded "tomorrow" and planned at the next full hour from now —
-  // at 11:38 PM, an overnight plan. NOT fixed by day-adding the
-  // next-full-hour instant: the hour the user happened to TYPE at is an
-  // artifact, and projecting it onto tomorrow gives "tomorrow 11 PM" for
-  // a night-typed prompt (the same overnight complaint, one day later) —
-  // and at 11-to-midnight the next full hour is already tomorrow's date,
-  // so a day-add overshoots to the day AFTER. "Tomorrow" with no other
-  // time info means "tomorrow, daytime": anchor at the morning day-part
-  // default, exactly where "tomorrow morning" already lands.
-  if (dayOffset > 0) {
-    const t = DAY_PART_DEFAULTS.morning;
-    return instantAtWallClock(now, timeZone, t.hour, t.minute, dayOffset, true);
-  }
-  return nextFullHourInZone(now, timeZone);
+  return result.start;
 }
 
 export interface SelectionLike {
