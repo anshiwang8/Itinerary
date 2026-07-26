@@ -3,6 +3,11 @@ import type { Selection } from "../api/select/selectVenues";
 import type { TravelLeg, TransitSummary } from "../api/schedule/travel";
 import type { CurrentOpeningHours } from "../api/places/search/hours";
 import type { DropEntry, ParsedPrompt, Place } from "../api/places/search/filter";
+import type {
+  GeocodeBounds,
+  GeocodeCandidate,
+  GeocodeOutcome,
+} from "../api/geocode/geocode";
 import { normalizeZone } from "./zoneTime";
 
 export interface ClientWeatherHour {
@@ -335,28 +340,72 @@ export function parseParsedPayload(value: unknown): ParsedPrompt {
   return parsed as unknown as ParsedPrompt;
 }
 
-export function parseGeocodePayload(value: unknown): {
-  label?: string;
-  location: { latitude: number; longitude: number };
-  timeZone?: string;
-} {
+export function parseGeocodePayload(value: unknown): GeocodeOutcome {
   const data = record(value);
-  const location = record(data.location);
-  if (
-    typeof location.latitude !== "number" ||
-    !Number.isFinite(location.latitude) ||
-    typeof location.longitude !== "number" ||
-    !Number.isFinite(location.longitude) ||
-    (data.label !== undefined && typeof data.label !== "string") ||
-    (data.timeZone !== undefined && typeof data.timeZone !== "string")
-  ) {
-    throw new Error("invalid geocode");
-  }
-  return data as {
-    label?: string;
-    location: { latitude: number; longitude: number };
-    timeZone?: string;
+
+  const isBounds = (candidate: unknown): candidate is GeocodeBounds => {
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      Array.isArray(candidate)
+    ) {
+      return false;
+    }
+    const bounds = candidate as JsonRecord;
+    return isLatLng(bounds.southwest) && isLatLng(bounds.northeast);
   };
+
+  const isCandidate = (candidate: unknown): candidate is GeocodeCandidate => {
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      Array.isArray(candidate)
+    ) {
+      return false;
+    }
+    const item = candidate as JsonRecord;
+    return (
+      typeof item.label === "string" &&
+      item.label.trim().length > 0 &&
+      typeof item.formattedAddress === "string" &&
+      item.formattedAddress.trim().length > 0 &&
+      isLatLng(item.location) &&
+      isIanaTimeZone(item.timeZone) &&
+      typeof item.locality === "string" &&
+      item.locality.trim().length > 0 &&
+      optionalString(item.administrativeArea) &&
+      typeof item.country === "string" &&
+      item.country.trim().length > 0 &&
+      typeof item.countryCode === "string" &&
+      /^[A-Z]{2}$/.test(item.countryCode) &&
+      strings(item.resultTypes) &&
+      item.resultTypes.length > 0 &&
+      (item.bounds === undefined || isBounds(item.bounds)) &&
+      optionalString(item.placeId)
+    );
+  };
+
+  if (
+    data.outcome === "resolved" &&
+    (data.queryType === "city" || data.queryType === "address") &&
+    isCandidate(data)
+  ) {
+    return data as unknown as GeocodeOutcome;
+  }
+  if (
+    data.outcome === "ambiguous" &&
+    (data.queryType === "city" || data.queryType === "address") &&
+    data.code === "geocode_ambiguous" &&
+    typeof data.message === "string" &&
+    data.message.trim().length > 0 &&
+    Array.isArray(data.candidates) &&
+    data.candidates.length > 1 &&
+    data.candidates.length <= 5 &&
+    data.candidates.every(isCandidate)
+  ) {
+    return data as unknown as GeocodeOutcome;
+  }
+  throw new Error("invalid geocode");
 }
 
 export function parseWeatherPayload(value: unknown): ClientWeatherHour[] {

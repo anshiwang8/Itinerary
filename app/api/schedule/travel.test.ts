@@ -4,9 +4,13 @@ import assert from "node:assert";
 import {
   buildLeg,
   ComputeRoutesResponse,
+  FALLBACK_WALK_DETOUR_FACTOR,
+  FALLBACK_WALK_MIN_UNCERTAINTY_MIN,
+  FALLBACK_WALK_UNCERTAINTY_RATIO,
   getTravelLegs,
   MAX_WALK_LABEL_MIN,
   SHORT_LEG_WALK_METERS,
+  TRANSIT_SKIP_HAVERSINE_METERS,
   TRANSIT_MARGIN_MIN,
 } from "./travel";
 import { buildSchedule } from "./schedule";
@@ -349,7 +353,7 @@ const cases: Array<[string, () => void]> = [
 // stopped running). Each leg must depart at its own estimated instant.
 const asyncCases: Array<[string, () => Promise<void>]> = [
   [
-    "§6.2: an unpriceable leg gets an ESTIMATE, never a confident zero",
+    "Routes failure over irregular geography gets a detour-adjusted uncertain estimate",
     async () => {
       const realFetch = globalThis.fetch;
       globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
@@ -363,22 +367,92 @@ const asyncCases: Array<[string, () => Promise<void>]> = [
         return realFetch(url as never, init);
       }) as typeof fetch;
       try {
-        // ~4.5 km apart
+        // Toronto Island to the waterfront is close as the crow flies but
+        // water makes that distance especially unrepresentative of a
+        // walkable path. A Routes outage must not turn it into an
+        // optimistic straight-line promise.
         const legs = await getTravelLegs("k", [
-          { latitude: 43.65, longitude: -79.4 },
-          { latitude: 43.69, longitude: -79.4 },
+          { latitude: 43.6205, longitude: -79.3786 },
+          { latitude: 43.6416, longitude: -79.3777 },
         ]);
         assert.strictEqual(legs.length, 1);
         const leg = legs[0];
         assert.strictEqual(leg.mode, "unknown", "honest about not knowing");
-        // "we don't know" must NOT be scheduled as "zero minutes", which
-        // would put the next stop the instant this one ends
-        assert.ok(leg.totalMinutes > 0, `expected a positive estimate, got ${leg.totalMinutes}`);
+        const directWalkMinutes =
+          ((leg.distanceMeters ?? 0) / 1000 / 5) * 60;
         assert.ok(
-          leg.totalMinutes >= 45 && leg.totalMinutes <= 60,
-          `~4.5km at walking pace should be ~53 min, got ${leg.totalMinutes}`
+          FALLBACK_WALK_DETOUR_FACTOR >= 1.3,
+          "the fallback policy keeps at least a 30% network-detour allowance"
         );
-        assert.ok((leg.distanceMeters ?? 0) > 4000, "distance is reported so the UI can qualify it");
+        assert.ok(
+          FALLBACK_WALK_UNCERTAINTY_RATIO >= 0.2,
+          "the fallback policy keeps at least 20% uncertainty"
+        );
+        assert.ok(
+          FALLBACK_WALK_MIN_UNCERTAINTY_MIN >= 5,
+          "even a nearby failed route keeps at least five uncertain minutes"
+        );
+        assert.ok(
+          leg.rawMinutes >= Math.ceil(directWalkMinutes * 1.3),
+          "raw fallback includes the street-network detour factor"
+        );
+        assert.ok(
+          leg.marginMinutes >= Math.max(5, Math.ceil(leg.rawMinutes * 0.2)),
+          "uncertainty is a separate, inspectable margin"
+        );
+        assert.strictEqual(
+          leg.totalMinutes,
+          leg.rawMinutes + leg.marginMinutes
+        );
+        assert.ok(
+          leg.totalMinutes > directWalkMinutes,
+          "fallback must be more conservative than crow-flies walking time"
+        );
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
+    "short hop requests WALK once and omits TRANSIT upstream",
+    async () => {
+      const modes: string[] = [];
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("routes.googleapis.com")) {
+          const body = JSON.parse(String(init?.body));
+          modes.push(body.travelMode);
+          return new Response(
+            JSON.stringify({
+              routes: [
+                {
+                  duration: "120s",
+                  distanceMeters: 180,
+                  polyline: { encodedPolyline: "enc_short_walk" },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const origin = { latitude: 43.65, longitude: -79.4 };
+        const destination = { latitude: 43.651, longitude: -79.4 };
+        const legs = await getTravelLegs("k", [origin, destination]);
+        assert.strictEqual(
+          TRANSIT_SKIP_HAVERSINE_METERS,
+          250,
+          "the provider-call policy keeps the audited conservative threshold"
+        );
+        assert.ok(
+          TRANSIT_SKIP_HAVERSINE_METERS < SHORT_LEG_WALK_METERS,
+          "the provider-skip threshold stays stricter than route relabeling"
+        );
+        assert.deepStrictEqual(modes, ["WALK"], "one upstream request; no TRANSIT");
+        assert.strictEqual(legs[0].mode, "walk");
+        assert.strictEqual(legs[0].encodedPolyline, "enc_short_walk");
       } finally {
         globalThis.fetch = realFetch;
       }

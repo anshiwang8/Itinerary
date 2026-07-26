@@ -13,6 +13,10 @@ const STOPS: MapStop[] = [
     startTime: "2026-07-25T19:00:00-04:00",
     endTime: "2026-07-25T20:30:00-04:00",
     status: "upcoming",
+    // An unknown travel estimate has no provider geometry. The map harness
+    // keeps one in view so browser coverage can prove it never becomes a
+    // confident straight walking line.
+    legModeToNext: "unknown",
   },
   {
     id: "maps-harness-two",

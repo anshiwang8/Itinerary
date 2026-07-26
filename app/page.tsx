@@ -40,6 +40,7 @@ import {
 } from "./lib/planSlots";
 import type { Selection } from "./api/select/selectVenues";
 import type { DropEntry, ParsedPrompt } from "./api/places/search/filter";
+import type { GeocodeCandidate } from "./api/geocode/geocode";
 import { isOpenAtInstant, type CurrentOpeningHours } from "./api/places/search/hours";
 import { ClientFetchError, fetchJson } from "./lib/clientFetch";
 import {
@@ -88,6 +89,19 @@ interface WeatherHour {
   tempC: number | null;
   precipProbability: number | null;
   condition: string | null;
+}
+
+/** Resolved geocoder choices carried through a paused pipeline. Ambiguous
+ * city/address results resume with the exact candidate the user selected,
+ * rather than issuing the same ambiguous query and taking index zero. */
+interface PipelineGeocode {
+  city?: GeocodeCandidate;
+  address?: GeocodeCandidate;
+}
+
+interface ContinueOptions {
+  overrideTimeGate?: boolean;
+  geocode?: PipelineGeocode;
 }
 
 // everything the tail of the pipeline needs to build + store a plan —
@@ -274,6 +288,7 @@ export default function Home() {
   const [clarify, setClarify] = useState<{
     questions: ClarifyQuestion[];
     parsed: ParsedPrompt;
+    geocode?: PipelineGeocode;
   } | null>(null);
   const [clarifyWhen, setClarifyWhen] = useState<string | null>(null);
   const [clarifyTime, setClarifyTime] = useState("");
@@ -285,7 +300,10 @@ export default function Home() {
   // several in one clarify round ("dinner and drinks" is two)
   const [clarifyNarrow, setClarifyNarrow] = useState<Record<string, string>>({});
 
-  // The interactive-recovery panel — one component, three triggers:
+  // The interactive-recovery panel — one component, four triggers:
+  //  - "geocode": a city or starting address has multiple factual matches
+  //    → show formatted-address candidates and resume with the exact choice.
+  //    Never select provider result zero implicitly.
   //  - "empty": SOME (or, after an override, ALL) categories came back
   //    empty → honest reason + widen / replace that slot. Rows flagged
   //    noWiden suppress the widen offer (a weather problem isn't a radius
@@ -301,6 +319,15 @@ export default function Home() {
   //    slot) — never the useless widen offer.
   const [recovery, setRecovery] = useState<
     | {
+        mode: "geocode";
+        parsed: ParsedPrompt;
+        queryType: "city" | "address";
+        message: string;
+        candidates: GeocodeCandidate[];
+        geocode: PipelineGeocode;
+        overrideTimeGate?: boolean;
+      }
+    | {
         mode: "empty";
         ctx: PlanCtx;
         empties: EmptyRow[];
@@ -313,6 +340,7 @@ export default function Home() {
         parsed: ParsedPrompt;
         reason: string;
         category: string;
+        geocode: PipelineGeocode;
       }
     | {
         mode: "weather-gate";
@@ -482,7 +510,7 @@ export default function Home() {
       setError(null);
       setClarify(null);
       setParsedObj(updated);
-      await continuePipeline(updated);
+      await continuePipeline(updated, { geocode: clarify.geocode });
     } finally {
       endOperation(operation);
     }
@@ -494,7 +522,7 @@ export default function Home() {
   // inferred-time band check is bypassed for THIS run only.
   async function continuePipeline(
     parseData: ParsedPrompt,
-    opts: { overrideTimeGate?: boolean } = {}
+    opts: ContinueOptions = {}
   ) {
     const fail = (reason: string) => {
       setError(reason);
@@ -510,33 +538,76 @@ export default function Home() {
       setLoadingText("Finding your city…");
       const cityQ = city.trim();
       if (!cityQ) return fail("Add a city so I know where to plan.");
-      const cityData = await fetchJson("/api/geocode", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: cityQ }),
-        parse: parseGeocodePayload,
-      });
-      // the plan's resolved zone (geocoder-derived); fail-soft to Toronto —
-      // a missing zone must not block a plan, but it's surfaced (banner + log)
-      let planZone: string = cityData.timeZone ?? "America/Toronto";
-      let hp: { label: string; location: { latitude: number; longitude: number } } = {
-        label: `Start · ${cityQ} centre`,
-        location: cityData.location,
-      };
-      const addrQ = startAddress.trim();
-      if (addrQ) {
-        const addrData = await fetchJson("/api/geocode", {
+      let cityData = opts.geocode?.city;
+      if (!cityData) {
+        const cityOutcome = await fetchJson("/api/geocode", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: `${addrQ}, ${cityQ}` }),
+          body: JSON.stringify({ query: cityQ, kind: "city" }),
           parse: parseGeocodePayload,
         });
-        hp = { label: `Start · ${addrData.label ?? addrQ}`, location: addrData.location };
-        if (addrData.timeZone) planZone = addrData.timeZone;
+        if (cityOutcome.outcome === "ambiguous") {
+          setRecovery({
+            mode: "geocode",
+            parsed: parseData,
+            queryType: "city",
+            message: cityOutcome.message,
+            candidates: cityOutcome.candidates,
+            geocode: {},
+            overrideTimeGate: opts.overrideTimeGate,
+          });
+          setLoadingText(null);
+          return;
+        }
+        cityData = cityOutcome;
       }
-      if (!cityData.timeZone) {
-        // fail-soft, but never silent
-        console.warn(`[timezone] no zone resolved for "${cityQ}" — defaulting to America/Toronto`);
+
+      // Once the user/provider has resolved an ambiguous city, carry its
+      // formatted locality/region/country into every Places query. Keeping
+      // the original bare "London" here would reintroduce ambiguity later.
+      parseData.city = cityData.formattedAddress;
+      let planZone: string = cityData.timeZone;
+      let hp: { label: string; location: { latitude: number; longitude: number } } = {
+        label: `Start · ${cityData.formattedAddress} centre`,
+        location: cityData.location,
+      };
+      const resolvedGeocode: PipelineGeocode = { city: cityData };
+      const addrQ = startAddress.trim();
+      if (addrQ) {
+        let addrData = opts.geocode?.address;
+        if (!addrData) {
+          setLoadingText("Finding your starting address…");
+          const addressOutcome = await fetchJson("/api/geocode", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query: addrQ,
+              kind: "address",
+              cityContext: cityData,
+            }),
+            parse: parseGeocodePayload,
+          });
+          if (addressOutcome.outcome === "ambiguous") {
+            setRecovery({
+              mode: "geocode",
+              parsed: parseData,
+              queryType: "address",
+              message: addressOutcome.message,
+              candidates: addressOutcome.candidates,
+              geocode: resolvedGeocode,
+              overrideTimeGate: opts.overrideTimeGate,
+            });
+            setLoadingText(null);
+            return;
+          }
+          addrData = addressOutcome;
+        }
+        resolvedGeocode.address = addrData;
+        hp = {
+          label: `Start · ${addrData.formattedAddress}`,
+          location: addrData.location,
+        };
+        planZone = addrData.timeZone;
       }
       setHomePoint(hp);
       setPlanZone(planZone);
@@ -573,6 +644,7 @@ export default function Home() {
           parsed: parseData,
           reason: check.reason,
           category: check.category ?? "that",
+          geocode: resolvedGeocode,
         });
         setLoadingText(null);
         return;
@@ -1144,6 +1216,33 @@ export default function Home() {
     }
   }
 
+  // ── geocode-choice action ─────────────────────────────────────────────
+  // Resume the exact paused pipeline with the chosen provider candidate.
+  // The next run does not repeat that query, so ambiguity cannot loop and
+  // a later time-gate override retains the same factual city/address.
+  async function chooseGeocodeCandidate(candidate: GeocodeCandidate) {
+    if (recovery?.mode !== "geocode") return;
+    const operation = beginOperation();
+    if (!operation) return;
+    const gate = recovery;
+    const geocode: PipelineGeocode =
+      gate.queryType === "city"
+        ? { city: candidate }
+        : { ...gate.geocode, address: candidate };
+    try {
+      if (gate.queryType === "city") setCity(candidate.formattedAddress);
+      else setStartAddress(candidate.formattedAddress);
+      setRecovery(null);
+      setError(null);
+      await continuePipeline(gate.parsed, {
+        overrideTimeGate: gate.overrideTimeGate,
+        geocode,
+      });
+    } finally {
+      endOperation(operation);
+    }
+  }
+
   // ── time-gate actions (batch 4b) ──────────────────────────────────────
   // "Still want it": the user read the window and confirmed — re-run the
   // pipeline with the band gate bypassed for this one run. Whatever the
@@ -1154,9 +1253,10 @@ export default function Home() {
     const operation = beginOperation();
     if (!operation) return;
     const parsed = recovery.parsed;
+    const geocode = recovery.geocode;
     try {
       setRecovery(null);
-      await continuePipeline(parsed, { overrideTimeGate: true });
+      await continuePipeline(parsed, { overrideTimeGate: true, geocode });
     } finally {
       endOperation(operation);
     }
@@ -1181,7 +1281,7 @@ export default function Home() {
       time_window: timeWindowForWhenAnswer("now"),
     };
     setRecovery(null);
-    setClarify({ questions: [kindQuestion()], parsed });
+    setClarify({ questions: [kindQuestion()], parsed, geocode: recovery.geocode });
     setClarifyKind("");
     setClarifyDistribution("");
     setClarifyWhen(null);
@@ -1835,7 +1935,37 @@ export default function Home() {
   // override the inferred-time gate, or change direction — never a
   // dead-end refusal string
   const recoveryBlock =
-    recovery && recovery.mode === "time-gate" ? (
+    recovery && recovery.mode === "geocode" ? (
+      <div
+        className={"clarify recover recover--gate" + (itinerary ? " clarify--stage" : "")}
+        role="group"
+        aria-label={
+          recovery.queryType === "city"
+            ? "Choose the city you meant"
+            : "Choose your starting address"
+        }
+      >
+        <div className="clarify__q">
+          <div className="clarify__label recover__reason">{recovery.message}</div>
+          <div className="clarify__chips recover__geocodechoices">
+            {recovery.candidates.map((candidate) => (
+              <button
+                key={
+                  candidate.placeId ??
+                  `${candidate.formattedAddress}:${candidate.location.latitude}:${candidate.location.longitude}`
+                }
+                className="chipbtn recover__geocode"
+                disabled={busy}
+                aria-label={`Use ${candidate.formattedAddress}`}
+                onClick={() => chooseGeocodeCandidate(candidate)}
+              >
+                {candidate.formattedAddress}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    ) : recovery && recovery.mode === "time-gate" ? (
       <div className={"clarify recover recover--gate" + (itinerary ? " clarify--stage" : "")}>
         <div className="clarify__q">
           <div className="clarify__label recover__reason">

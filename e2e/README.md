@@ -5,9 +5,10 @@
 **Mock (default).** The npm harness starts one hidden dev server on **:3100**
 with `E2E_MOCK=1`, runs Playwright against it, and tears down only the process
 trees it created — the pipeline data sources (Groq parse/select/interpret,
-Places search, Routes legs, Weather) return deterministic fixtures from
+Geocoding results, Places search, Routes legs, Weather) return deterministic fixtures from
 `app/api/_mock/fixtures.ts`. No quota burned; a live server on :3000 is
-never touched. The objective filter, scheduling, floor guards, and the
+never touched. Geocoding's real type/component/ambiguity validator, the
+objective filter, scheduling, floor guards, and the
 swap/reroute engines still run for real over the fixture data.
 
 **Live.** Occasional real-world checks against the actual APIs on :3000
@@ -28,6 +29,8 @@ projection without burning Maps quota. `maps-resilience.spec.ts` intercepts
 the Maps script locally to prove both provider-signalled invalid-key fallback
 and blocked-script recovery through Retry and a real component remount. Fonts
 are served from the application bundle; no Google Fonts request is required.
+The same harness proves an `unknown` travel estimate creates no confident
+straight map polyline.
 
 ## Fixtures worth knowing (for scenario tests)
 
@@ -106,10 +109,15 @@ All of the above are pinned exact-text in `failloud.spec.ts`.
   stop cards render with names/times, runs the desync check.
 - `maps-resilience.spec.ts` (@mock) — provider-signalled invalid browser Maps
   key, usable fallback pins, successful bounded Retry after a blocked script,
-  and remount after a cached transport rejection. Its provider responses are
-  local stubs; no Google request runs.
+  remount after a cached transport rejection, and no invented line for an
+  uncertain travel estimate. Its provider responses are local stubs; no
+  Google request runs.
+- `geocode.spec.ts` (@mock) — city and starting-address ambiguity pause before
+  venue search, show formatted candidates, pass resolved city context to the
+  address request, and resume without repeating the chosen query.
 - `fixtures.spec.ts` (@mock) — guards the seam: deterministic picks,
-  fixture transit line, canned weather.
+  fixture transit line, canned weather, and a visible/readable accessible
+  caution on every walking leg.
 - `failloud.spec.ts` (@mock) — every bad-input message pinned exact-text
   (impossible times, contradictions incl. dietary-vs-venue, gibberish,
   weather net, unmet constraint + the positive vegan pick).

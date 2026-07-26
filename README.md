@@ -80,8 +80,10 @@ install, no keys, nothing to set up. **This is the main way to use it.**
   steakhouse"), or unparseable input gets a specific reason and a suggested fix — never an
   empty map. When a hard constraint has no real match, it says so instead of suggesting a
   venue and telling you to "check with them".
-- **When something blocks a stop, you get a real choice**, not a dead end. One panel, three
+- **When something blocks a stop, you get a real choice**, not a dead end. One panel, four
   situations:
+  - **A city or starting address has multiple matches** → choose the formatted address before
+    any venue search runs; the planner never silently takes the provider's first result.
   - **A category came back empty** ("the only ramen nearby is permanently closed") → the
     honest reason, plus an offer to look further out or put something else in that slot.
   - **The hour looks wrong** and you never named one ("it's 10:54 PM — late for a typical park
@@ -93,7 +95,20 @@ install, no keys, nothing to set up. **This is the main way to use it.**
 - **A walk is only offered when a walk makes sense.** A short or genuinely-faster walk beats
   transit; a 75-minute walk is never presented over a comparable transit ride — unless transit
   there is effectively broken (walking at least twice as fast), which is exactly when you'd
-  want to know.
+  want to know. Hops under 250 m straight-line skip the transit request entirely. If Routes
+  cannot price either mode, the planner shows an explicitly uncertain estimate (1.35× detour
+  allowance plus a 20%, minimum-five-minute margin), draws no invented route line, and labels
+  every real walking route with the required caution.
+
+**Places request/cost boundary.** A normal named category uses one complete Text Search because
+hours, status, rating, price, card copy, and structured constraint evidence are all consumed
+before a safe choice exists. Late-night mode is bounded at two variants per distinct category;
+the general pool uses five queries; public input is capped at eight categories, so one search
+attempt makes at most 16 provider calls. Identical query+type work is shared only within that
+attempt (for example, overlapping `bar` / `late night bar` work went from four calls to two).
+Full Places payloads are deliberately not cached across attempts: provider policy restricts
+storage of Places content, and opening hours must remain fresh. Splitting discovery from
+selected-place enrichment would add a Details request without a fact-safe cheaper shortlist.
 
 ---
 
@@ -110,7 +125,7 @@ cd <repo>/itinerary
 npm install
 ```
 
-**Add your keys.** Copy the template and fill in the five values:
+**Add your keys.** Copy the template and fill in the six values:
 
 ```bash
 cp .env.example .env
@@ -119,7 +134,8 @@ cp .env.example .env
 ```bash
 # .env
 GROQ_API_KEY=...                    # LLM: parse prompt, pick venues, interpret swaps
-GOOGLE_PLACES_API_KEY=...           # venue search AND city/address geocoding (Places API — New)
+GOOGLE_PLACES_API_KEY=...           # venue search (Places API — New)
+GOOGLE_GEOCODING_API_KEY=...        # city/address resolution (Geocoding API)
 GOOGLE_ROUTES_API_KEY=...           # transit / walk legs (Routes API)
 GOOGLE_WEATHER_API_KEY=...          # hourly forecast (Weather API)
 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=... # browser map tiles (Maps JavaScript API)
@@ -128,11 +144,11 @@ NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=... # browser map tiles (Maps JavaScript API)
 Where to get them:
 
 - **Groq** — free key at <https://console.groq.com> (uses `llama-3.3-70b-versatile`).
-- **The four Google keys** — [Google Cloud Console](https://console.cloud.google.com) →
-  enable **Places API (New)**, **Routes API**, **Weather API**, and **Maps JavaScript API**,
-  then create keys under *APIs & Services → Credentials*. One key can serve all four, or use
-  separate keys — the variable names above are what the code reads. There is **no Geocoding
-  API key**: `/api/geocode` reuses the Places key via Text Search.
+- **The five Google keys** — [Google Cloud Console](https://console.cloud.google.com) →
+  enable **Places API (New)**, **Geocoding API**, **Routes API**, **Weather API**, and
+  **Maps JavaScript API**, then create keys under *APIs & Services → Credentials*. The code
+  reads a dedicated `GOOGLE_GEOCODING_API_KEY`; in production, use a separately
+  API-restricted server key for each Google service.
 - **Maps key referrer restriction** — the Maps key is the only one exposed to the browser.
   Restrict it (Cloud Console → the key → *Application restrictions → Websites*) to
   `http://localhost:3000/*` for local use.

@@ -5,6 +5,7 @@ import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 import { formatStopTime } from "./lib/timeLabels";
 import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
 import { createRetryableLoader } from "./lib/retryableLoader";
+import { displayableRouteMode } from "./lib/mapRoutePolicy";
 
 // Printed-cartography map: warm-paper Google styling (inline JSON, so no
 // Cloud map id), ink-navy route lines, and an HTML overlay layer for the
@@ -197,12 +198,14 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
         }
 
         for (const seg of segs) {
+          const mode = displayableRouteMode(seg.mode);
+          if (!mode) continue;
           const path = seg.encoded
             ? geometry.encoding.decodePath(seg.encoded)
             : [seg.from, seg.to];
           const color = seg.live ? LIVE : INK;
           const line =
-            seg.mode === "transit"
+            mode === "transit"
               ? new maps.Polyline({
                   map,
                   path,

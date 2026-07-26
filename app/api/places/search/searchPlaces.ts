@@ -3,8 +3,10 @@
 import { DropEntry, ParsedPrompt, Place } from "./filter";
 import { isParkLike } from "../../../lib/categoryTraits";
 import {
+  badRequest,
   finiteNumber,
   isRecord,
+  REQUEST_LIMITS,
   validLatitude,
   validLongitude,
 } from "../../_shared/http";
@@ -17,22 +19,48 @@ import {
 
 const SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText";
 
-const FIELD_MASK = [
-  "places.displayName",
-  "places.id",
-  "places.location",
-  "places.rating",
-  "places.priceLevel",
-  "places.currentOpeningHours",
-  "places.businessStatus",
-  "places.editorialSummary",
-  "places.servesVegetarianFood",
-  "places.outdoorSeating",
-  "places.liveMusic",
-  "places.goodForChildren",
-  "places.allowsDogs",
-  "places.accessibilityOptions",
-].join(",");
+/**
+ * Every requested Places field has a code-side consumer. In particular, a
+ * cheap ID-only discovery pass cannot choose a safe shortlist: hours, status,
+ * rating and price are the deterministic filter, while the feature booleans
+ * are the only evidence hard constraints may trust. `editorialSummary` is the
+ * stop-card description. Dropping any of these facts before shortlisting
+ * changes product correctness; asking for them in a later Details pass adds
+ * calls without a fact-based way to choose which candidates to enrich.
+ *
+ * Keep the purpose groups exported so tests make a field-mask expansion (and
+ * its provider-cost impact) measurable instead of hiding it in a string.
+ */
+export const SEARCH_FIELD_GROUPS = {
+  identityAndRouting: [
+    "places.displayName",
+    "places.id",
+    "places.location",
+  ],
+  objectiveFilter: [
+    "places.rating",
+    "places.priceLevel",
+    "places.currentOpeningHours",
+    "places.businessStatus",
+  ],
+  productOutput: ["places.editorialSummary"],
+  structuredConstraintEvidence: [
+    "places.servesVegetarianFood",
+    "places.outdoorSeating",
+    "places.liveMusic",
+    "places.goodForChildren",
+    "places.allowsDogs",
+    "places.accessibilityOptions",
+  ],
+} as const;
+
+export const SEARCH_FIELD_MASK_FIELDS = Object.values(SEARCH_FIELD_GROUPS).flat();
+export const SEARCH_FIELD_MASK = SEARCH_FIELD_MASK_FIELDS.join(",");
+
+/** Public request schemas allow at most eight categories. A late-night plan
+ * runs two variants per distinct category, so one searchPools call is bounded
+ * at sixteen provider calls (the general pool uses five). */
+export const MAX_PROVIDER_CALLS_PER_SEARCH = REQUEST_LIMITS.categories * 2;
 
 // e.g. aesthetic="lively night out", category="bar", location="Ossington",
 // city="Toronto" → "lively night out bar Ossington Toronto".
@@ -85,7 +113,7 @@ async function searchText(
     headers: {
       "Content-Type": "application/json",
       "X-Goog-Api-Key": apiKey,
-      "X-Goog-FieldMask": FIELD_MASK,
+      "X-Goog-FieldMask": SEARCH_FIELD_MASK,
     },
     body: JSON.stringify({ textQuery, ...(includedType ? { includedType } : {}) }),
     cache: "no-store",
@@ -117,6 +145,41 @@ async function searchText(
     }
     return candidate as unknown as Place;
   });
+}
+
+function normalizedSearchKey(textQuery: string, includedType?: string): string {
+  // buildQuery embeds aesthetic, constraints, category, neighbourhood and
+  // city. includedType is separate provider behavior and therefore part of
+  // the key. lateNight changes the query set itself.
+  const query = textQuery.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+  const type = includedType?.normalize("NFKC").trim().toLowerCase() ?? "";
+  return `${type}\u0000${query}`;
+}
+
+/**
+ * Deduplicate identical provider work only inside one searchPools call.
+ *
+ * Do not promote this to a module/global TTL cache: full Places payloads
+ * include provider content that must not be persisted across requests, and
+ * opening hours need to be fetched afresh for each planning/recovery attempt.
+ * The request schema plus MAX_PROVIDER_CALLS_PER_SEARCH bounds this Map. A
+ * rejected promise is evicted immediately and a later attempt must call the
+ * provider again.
+ */
+function requestScopedSearch(apiKey: string) {
+  const inFlight = new Map<string, Promise<Place[]>>();
+  return (textQuery: string, includedType?: string): Promise<Place[]> => {
+    const key = normalizedSearchKey(textQuery, includedType);
+    const existing = inFlight.get(key);
+    if (existing) return existing;
+
+    const pending = searchText(apiKey, textQuery, includedType);
+    inFlight.set(key, pending);
+    void pending.catch(() => {
+      if (inFlight.get(key) === pending) inFlight.delete(key);
+    });
+    return pending;
+  };
 }
 
 // A vague prompt ("not sure what to do") has no category, so the general
@@ -186,6 +249,18 @@ export async function searchPools(
       )
     ),
   ];
+  if (categories.length > REQUEST_LIMITS.categories) {
+    badRequest(
+      `Venue search accepts at most ${REQUEST_LIMITS.categories} distinct categories.`
+    );
+  }
+
+  // Before: a normal named-category request made N calls, late-night made
+  // 2N, and the five-query general pool made five, even when two variants
+  // were byte-equivalent. After: those are hard upper bounds, with identical
+  // query+type work shared only during this invocation. A later planning or
+  // recovery attempt always fetches fresh provider data.
+  const search = requestScopedSearch(apiKey);
 
   // allSettled, not all: one category's transient failure (rate limit,
   // timeout) used to reject the whole search and throw away every OTHER
@@ -205,7 +280,7 @@ export async function searchPools(
 
   if (categories.length === 0) {
     const settled = await Promise.allSettled(
-      GENERAL_QUERIES.map((q) => searchText(apiKey, buildQuery(parsed, q)))
+      GENERAL_QUERIES.map((q) => search(buildQuery(parsed, q)))
     );
     const ok = settled.filter(
       (r): r is PromiseFulfilledResult<Place[]> => r.status === "fulfilled"
@@ -219,16 +294,18 @@ export async function searchPools(
   }
 
   // at a late target hour, pair each category query with its "late night"
-  // variant; the primary query goes first so its results win the dedupe
+  // variant; the primary query goes first so its results win the dedupe.
+  // A category that already says "late night" needs no doubled
+  // "late night late night …" sibling.
   const queriesFor = (category: string): string[] =>
-    opts.lateNight
+    opts.lateNight && !/\blate[\s-]+night\b/i.test(category)
       ? [buildQuery(parsed, category), buildQuery(parsed, `late night ${category}`)]
       : [buildQuery(parsed, category)];
 
   const settled = await Promise.allSettled(
     categories.map(async (category) => {
       const variants = await Promise.allSettled(
-        queriesFor(category).map((q) => searchText(apiKey, q, includedTypeFor(category)))
+        queriesFor(category).map((q) => search(q, includedTypeFor(category)))
       );
       const successful = variants.filter(
         (result): result is PromiseFulfilledResult<Place[]> =>

@@ -448,10 +448,9 @@ button { font-family: var(--grot); cursor: pointer; }
   position: absolute; top: 66px; left: 50%; transform: translateX(-50%);
   z-index: 18; display: flex; align-items: stretch; gap: 9px;
   max-width: 96vw; overflow-x: auto; padding: 4px 6px 8px;
-  opacity: 0.58; transition: opacity 0.25s ease;
+  opacity: 1;
   scrollbar-width: thin;
 }
-.lstrip:hover, .lstrip:focus-within { opacity: 1; }
 /* when a transient banner shows at the top, drop the strip below it */
 .stage--banner .lstrip { top: 118px; }
 .lstrip::-webkit-scrollbar { height: 6px; }
@@ -559,6 +558,10 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__legline { font-family: var(--grot); font-size: 12px; font-weight: 500; color: var(--ink); line-height: 1.25; }
 .lstrip__legmeta { font-family: var(--grot); font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
 .lstrip__legtimes { font-family: var(--grot); font-size: 10.5px; color: var(--ink-faint); margin-top: 3px; }
+.lstrip__walkwarning {
+  font-family: var(--grot); font-size: 11px; font-weight: 500; line-height: 1.35;
+  color: var(--ink); margin-top: 6px;
+}
 
 /* ─── Weather chip — ambient, tucked in a corner ─── */
 .weather {

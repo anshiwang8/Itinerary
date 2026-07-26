@@ -39,7 +39,8 @@ stale.
 | Variable | Value / purpose |
 | --- | --- |
 | `GROQ_API_KEY` | Groq (parse / select / swap interpret) — server-side only |
-| `GOOGLE_PLACES_API_KEY` | Places Text Search (venue search + `/api/geocode` city/address lookup — no separate Geocoding API key) — server-side only |
+| `GOOGLE_PLACES_API_KEY` | Places Text Search (venue search) — server-side only |
+| `GOOGLE_GEOCODING_API_KEY` | Geocoding API (typed city and starting-address resolution) — server-side only |
 | `GOOGLE_ROUTES_API_KEY` | Routes computeRoutes — server-side only |
 | `GOOGLE_WEATHER_API_KEY` | Weather hourly forecast — server-side only |
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Maps JS (browser-side by design — see referrer note) |
@@ -47,7 +48,7 @@ stale.
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | injected automatically when you connect Upstash Redis / Vercel KV storage (the `UPSTASH_REDIS_REST_URL`/`_TOKEN` names work too) |
 
 Only the Maps key is ever exposed to the browser; your mentor never sees
-the other four — they live inside the serverless functions. Never put
+the other five — they live inside the serverless functions. Never put
 `NEXT_PUBLIC_` on anything else.
 
 **Maps key referrer restriction (do this or the map breaks / the key leaks):**
@@ -57,6 +58,25 @@ Application restrictions → Websites: add your deployed domain, e.g.
 also want preview deployments to work — it's broader). Keep your
 `http://localhost:3000/*` entry for dev. The server-side keys should stay
 API-restricted to their one service each (existing policy).
+
+## Provider call envelope
+
+- Places Text Search deliberately keeps one complete field mask, including
+  Enterprise + Atmosphere fields: deterministic hours/status/rating/price
+  filters, stop-card copy, and structured hard-constraint evidence all need
+  those facts before selection. A normal category costs one call, late-night
+  mode at most two calls per distinct category, the general pool five, and a
+  public request at most 16. Request-local identical query+type work is
+  deduplicated; separate attempts always refetch current hours.
+- Do not add a cross-request cache of full Places payloads. Current Places
+  policy generally prohibits storing that content beyond documented
+  exceptions, and stale opening hours would make the plan factually unsafe.
+  Place IDs remain the safe long-lived identifier.
+- Geocoding uses one typed city request plus one optional address request.
+  Ambiguous matches pause before Places search and resume from the selected
+  candidate without repeating that geocode.
+- Routes normally requests transit and walking once per leg. A defensibly
+  short hop (under 250 m straight-line) requests walking only.
 
 ## Deploy steps
 

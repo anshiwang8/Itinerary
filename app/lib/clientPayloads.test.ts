@@ -55,18 +55,38 @@ const unknownLeg = {
   encodedPolyline: null,
 };
 
+const torontoGeocode = {
+  label: "Toronto, ON, Canada",
+  formattedAddress: "Toronto, ON, Canada",
+  location: { latitude: 43.65, longitude: -79.38 },
+  timeZone: "America/Toronto",
+  locality: "Toronto",
+  administrativeArea: "Ontario",
+  country: "Canada",
+  countryCode: "CA",
+  resultTypes: ["locality", "political"],
+  bounds: {
+    southwest: { latitude: 43.58, longitude: -79.64 },
+    northeast: { latitude: 43.86, longitude: -79.11 },
+  },
+  placeId: "toronto",
+};
+
 const cases: Array<[string, () => void]> = [
   [
     "accepts the bounded success shapes used by every planning stage",
     () => {
-      assert.deepStrictEqual(
-        parseGeocodePayload({
-          label: "Toronto",
-          location: { latitude: 43.65, longitude: -79.38 },
-          timeZone: "America/Toronto",
-        }).location,
-        { latitude: 43.65, longitude: -79.38 }
-      );
+      const geocode = parseGeocodePayload({
+        outcome: "resolved",
+        queryType: "city",
+        ...torontoGeocode,
+      });
+      assert.strictEqual(geocode.outcome, "resolved");
+      if (geocode.outcome !== "resolved") return;
+      assert.deepStrictEqual(geocode.location, {
+        latitude: 43.65,
+        longitude: -79.38,
+      });
       assert.strictEqual(
         parsePlacesPayload({
           dinner: [{ id: "dinner-1" }],
@@ -89,6 +109,46 @@ const cases: Array<[string, () => void]> = [
         7
       );
       assert.strictEqual(parseCreatePayload({ id: "plan-1", version: 1 }).id, "plan-1");
+    },
+  ],
+  [
+    "geocode validation preserves explicit ambiguity and rejects malformed candidates",
+    () => {
+      const outcome = parseGeocodePayload({
+        outcome: "ambiguous",
+        queryType: "city",
+        code: "geocode_ambiguous",
+        message: "Choose the city you meant.",
+        candidates: [
+          torontoGeocode,
+          {
+            ...torontoGeocode,
+            label: "Toronto, NSW, Australia",
+            formattedAddress: "Toronto, NSW, Australia",
+            location: { latitude: -33.01, longitude: 151.59 },
+            timeZone: "Australia/Sydney",
+            administrativeArea: "New South Wales",
+            country: "Australia",
+            countryCode: "AU",
+            placeId: "toronto-au",
+          },
+        ],
+      });
+      assert.strictEqual(outcome.outcome, "ambiguous");
+      if (outcome.outcome !== "ambiguous") return;
+      assert.strictEqual(outcome.candidates[1].countryCode, "AU");
+      assert.throws(() =>
+        parseGeocodePayload({
+          outcome: "ambiguous",
+          queryType: "city",
+          code: "geocode_ambiguous",
+          message: "Choose.",
+          candidates: [
+            torontoGeocode,
+            { ...torontoGeocode, location: { latitude: 200, longitude: 0 } },
+          ],
+        })
+      );
     },
   ],
   [

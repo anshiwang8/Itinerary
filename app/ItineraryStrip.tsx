@@ -126,8 +126,14 @@ function BubbleStack({ segments }: { segments: BubbleSegment[] }) {
 function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
   const isTransit = leg.mode === "transit";
   const segments = isTransit ? leg.segments ?? [] : [];
+  const legLabel =
+    leg.mode === "transit"
+      ? "transit leg"
+      : leg.mode === "walk"
+        ? "walking leg"
+        : "travel estimate";
   return (
-    <div className="lstrip__leg" aria-label={isTransit ? "transit leg" : "walking leg"}>
+    <div className="lstrip__leg" aria-label={legLabel}>
       {segments.length > 0 ? (
         <BubbleStack segments={segments} />
       ) : (
@@ -164,6 +170,14 @@ function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
         <>
           <div className="lstrip__legline">walk</div>
           <div className="lstrip__legmeta">{leg.totalMinutes} min</div>
+          <div
+            className="lstrip__walkwarning"
+            role="note"
+            aria-label="Walking route caution: Walking routes are in beta and may miss sidewalks or pedestrian paths. Use caution."
+          >
+            Walking routes are in beta and may miss sidewalks or pedestrian
+            paths. Use caution.
+          </div>
         </>
       )}
     </div>

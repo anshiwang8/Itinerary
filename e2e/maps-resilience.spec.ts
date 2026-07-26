@@ -56,6 +56,9 @@ const MAPS_STUB = String.raw`
   }
 
   class Polyline {
+    constructor() {
+      window.__mapsPolylineCount = (window.__mapsPolylineCount || 0) + 1;
+    }
     setMap() {}
   }
 
@@ -169,6 +172,34 @@ test("@mock invalid Maps key auth failure keeps fallback pins usable", async ({
   await expect(page.locator(".chip").first()).toHaveClass(/chip--selected/);
   expect(provider.attempts()).toBe(1);
   expect(provider.keys).toEqual(["e2e-invalid-browser-key"]);
+});
+
+test("@mock an uncertain travel estimate does not draw a solid map route", async ({
+  page,
+}) => {
+  await page.route(MAPS_SCRIPT, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/javascript",
+      body: MAPS_STUB,
+    })
+  );
+  await page.goto("/test-harness/maps");
+
+  await expect(page.locator(".mapwrap")).toHaveAttribute(
+    "data-map-state",
+    "ready"
+  );
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as Window & {
+            __mapsPolylineCount?: number;
+          }
+        ).__mapsPolylineCount ?? 0
+    )
+  ).toBe(0);
 });
 
 test("@mock blocked Maps script keeps fallback pins usable and Retry recovers", async ({

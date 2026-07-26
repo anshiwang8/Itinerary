@@ -1,7 +1,16 @@
 // buildQuery unit tests — constraints must shape the search query.
 // Run with: npx tsx app/api/places/search/searchPlaces.test.ts
 import assert from "node:assert";
-import { buildQuery, GENERAL_QUERIES, includedTypeFor, searchPools } from "./searchPlaces";
+import {
+  buildQuery,
+  GENERAL_QUERIES,
+  includedTypeFor,
+  MAX_PROVIDER_CALLS_PER_SEARCH,
+  SEARCH_FIELD_GROUPS,
+  SEARCH_FIELD_MASK,
+  SEARCH_FIELD_MASK_FIELDS,
+  searchPools,
+} from "./searchPlaces";
 import { DropEntry, ParsedPrompt } from "./filter";
 import { isOutdoorCategory } from "../../../lib/categoryTraits";
 import { resolveCategory } from "../../schedule/durations";
@@ -25,6 +34,273 @@ function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
 // pools are keyed by category, so the duplicate would just overwrite the
 // first (code-audit 2026-07-18 §7.1). Slot bookkeeping lives in select.
 const searchCases: Array<[string, () => Promise<void>]> = [
+  [
+    "M17 FIELD MASK + CALL BASELINE: one complete search call preserves every required fact",
+    async () => {
+      let calls = 0;
+      let sentMask = "";
+      const completePlace = {
+        id: "complete",
+        displayName: { text: "Complete Place" },
+        location: { latitude: 43.65, longitude: -79.4 },
+        rating: 4.6,
+        priceLevel: "PRICE_LEVEL_MODERATE",
+        currentOpeningHours: {
+          periods: [
+            {
+              open: { day: 1, hour: 9, minute: 0 },
+              close: { day: 1, hour: 21, minute: 0 },
+            },
+          ],
+        },
+        businessStatus: "OPERATIONAL",
+        editorialSummary: { text: "The description rendered on the stop card." },
+        servesVegetarianFood: true,
+        outdoorSeating: true,
+        liveMusic: true,
+        goodForChildren: true,
+        allowsDogs: true,
+        accessibilityOptions: {
+          wheelchairAccessibleEntrance: true,
+        },
+      };
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          calls++;
+          sentMask = new Headers(init?.headers).get("X-Goog-FieldMask") ?? "";
+          return new Response(JSON.stringify({ places: [completePlace] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const pools = await searchPools("k", mkParsed());
+        assert.strictEqual(
+          calls,
+          1,
+          "ordinary discovery remains one complete provider call, not discovery plus enrichment"
+        );
+        assert.strictEqual(sentMask, SEARCH_FIELD_MASK);
+        assert.deepStrictEqual(pools.lunch, [completePlace]);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
+    "M17 REQUEST-SCOPE DEDUPE: overlapping late-night variants cost only two unique calls",
+    async () => {
+      const queries: string[] = [];
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          const query = JSON.parse(String(init?.body)).textQuery as string;
+          queries.push(query);
+          return new Response(
+            JSON.stringify({ places: [{ id: `p${queries.length}` }] }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }
+          );
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        await searchPools(
+          "k",
+          mkParsed({ category_signals: ["bar", "late night bar"] }),
+          undefined,
+          undefined,
+          { lateNight: true }
+        );
+        assert.deepStrictEqual(queries, [
+          "bar Ossington Toronto",
+          "late night bar Ossington Toronto",
+        ]);
+        assert.strictEqual(
+          queries.filter((query) => query === "late night bar Ossington Toronto").length,
+          1,
+          "the query shared by both category variants must reach Places once"
+        );
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
+    "M17 FRESHNESS: identical later attempts refetch opening hours instead of caching Places content",
+    async () => {
+      let calls = 0;
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          calls++;
+          return new Response(
+            JSON.stringify({
+              places: [
+                {
+                  id: "fresh-hours",
+                  currentOpeningHours: {
+                    periods: [
+                      {
+                        open: { day: 1, hour: calls === 1 ? 9 : 10, minute: 0 },
+                        close: { day: 1, hour: 22, minute: 0 },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const first = await searchPools("k", mkParsed());
+        const second = await searchPools("k", mkParsed());
+        assert.strictEqual(calls, 2, "full Places payloads must not cross request boundaries");
+        assert.strictEqual(
+          first.lunch[0].currentOpeningHours?.periods?.[0]?.open?.hour,
+          9
+        );
+        assert.strictEqual(
+          second.lunch[0].currentOpeningHours?.periods?.[0]?.open?.hour,
+          10
+        );
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
+    "M17 ISOLATION: city, category, and late-night mode produce independent provider work",
+    async () => {
+      const queries: string[] = [];
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          const query = JSON.parse(String(init?.body)).textQuery as string;
+          queries.push(query);
+          return new Response(JSON.stringify({ places: [{ id: `p${queries.length}` }] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        await searchPools("k", mkParsed({ city: "Toronto", category_signals: ["lunch"] }));
+        await searchPools("k", mkParsed({ city: "Vancouver", category_signals: ["lunch"] }));
+        await searchPools("k", mkParsed({ city: "Toronto", category_signals: ["dinner"] }));
+        await searchPools(
+          "k",
+          mkParsed({ city: "Toronto", category_signals: ["lunch"] }),
+          undefined,
+          undefined,
+          { lateNight: true }
+        );
+        assert.deepStrictEqual(queries, [
+          "lunch Ossington Toronto",
+          "lunch Ossington Vancouver",
+          "dinner Ossington Toronto",
+          "lunch Ossington Toronto",
+          "late night lunch Ossington Toronto",
+        ]);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
+    "M17 FAILURE POLICY: a failed search is not cached into the next attempt",
+    async () => {
+      let calls = 0;
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          calls++;
+          return calls === 1
+            ? new Response(JSON.stringify({ error: { message: "temporary" } }), {
+                status: 503,
+                headers: { "Content-Type": "application/json" },
+              })
+            : new Response(JSON.stringify({ places: [{ id: "recovered" }] }), {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        await assert.rejects(() => searchPools("k", mkParsed()), /places_rejected_request/);
+        const recovered = await searchPools("k", mkParsed());
+        assert.strictEqual(calls, 2);
+        assert.deepStrictEqual(recovered.lunch.map((place) => place.id), ["recovered"]);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
+    "M17 CALL CEILING: eight categories cost at most 8 daytime or 16 late-night calls",
+    async () => {
+      let calls = 0;
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          calls++;
+          return new Response(JSON.stringify({ places: [{ id: `p${calls}` }] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const categories = Array.from({ length: 8 }, (_, index) => `category-${index + 1}`);
+        await searchPools("k", mkParsed({ category_signals: categories }));
+        assert.strictEqual(calls, 8);
+
+        calls = 0;
+        await searchPools(
+          "k",
+          mkParsed({ category_signals: categories }),
+          undefined,
+          undefined,
+          { lateNight: true }
+        );
+        assert.strictEqual(MAX_PROVIDER_CALLS_PER_SEARCH, 16);
+        assert.strictEqual(calls, 16);
+
+        calls = 0;
+        await searchPools("k", mkParsed({ category_signals: [] }));
+        assert.strictEqual(calls, 5, "the general pool stays at its five-query bound");
+
+        calls = 0;
+        await assert.rejects(
+          () =>
+            searchPools(
+              "k",
+              mkParsed({
+                category_signals: [...categories, "category-9"],
+              })
+            ),
+          (error: unknown) =>
+            error instanceof Error &&
+            "publicMessage" in error &&
+            String(error.publicMessage).includes("at most 8 distinct categories")
+        );
+        assert.strictEqual(calls, 0, "the bound is enforced before upstream work");
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
   [
     "targetTime (§1.7): a single-slot re-search is filtered at the PLAN's instant",
     async () => {
@@ -255,6 +531,57 @@ const searchCases: Array<[string, () => Promise<void>]> = [
 ];
 
 const cases: Array<[string, () => void]> = [
+  [
+    "M17 FIELD MASK CONTRACT: every high-cost field has an explicit correctness consumer",
+    () => {
+      assert.deepStrictEqual(SEARCH_FIELD_GROUPS, {
+        identityAndRouting: [
+          "places.displayName",
+          "places.id",
+          "places.location",
+        ],
+        objectiveFilter: [
+          "places.rating",
+          "places.priceLevel",
+          "places.currentOpeningHours",
+          "places.businessStatus",
+        ],
+        productOutput: ["places.editorialSummary"],
+        structuredConstraintEvidence: [
+          "places.servesVegetarianFood",
+          "places.outdoorSeating",
+          "places.liveMusic",
+          "places.goodForChildren",
+          "places.allowsDogs",
+          "places.accessibilityOptions",
+        ],
+      });
+      assert.strictEqual(
+        new Set(SEARCH_FIELD_MASK_FIELDS).size,
+        SEARCH_FIELD_MASK_FIELDS.length,
+        "field mask must not contain duplicate billable fields"
+      );
+      assert.strictEqual(
+        SEARCH_FIELD_MASK,
+        [
+          "places.displayName",
+          "places.id",
+          "places.location",
+          "places.rating",
+          "places.priceLevel",
+          "places.currentOpeningHours",
+          "places.businessStatus",
+          "places.editorialSummary",
+          "places.servesVegetarianFood",
+          "places.outdoorSeating",
+          "places.liveMusic",
+          "places.goodForChildren",
+          "places.allowsDogs",
+          "places.accessibilityOptions",
+        ].join(",")
+      );
+    },
+  ],
   [
     "vegan constraint lands in the query",
     () => {

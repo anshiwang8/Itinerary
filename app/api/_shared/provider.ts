@@ -1,12 +1,19 @@
 import { ApiError, isRecord } from "./http";
 
-export type ProviderName = "groq" | "places" | "routes" | "weather" | "redis";
+export type ProviderName =
+  | "groq"
+  | "places"
+  | "routes"
+  | "weather"
+  | "geocoding"
+  | "redis";
 
 export const PROVIDER_TIMEOUT_MS: Record<ProviderName, number> = {
   groq: 20_000,
   places: 10_000,
   routes: 10_000,
   weather: 8_000,
+  geocoding: 10_000,
   redis: 5_000,
 };
 

@@ -17,12 +17,27 @@ export const TRANSIT_MARGIN_MIN = 5;
 // label and no margin.
 export const SHORT_LEG_WALK_METERS = 400;
 
+// A crow-flies hop must be comfortably below the route-based walk
+// threshold before we omit TRANSIT. That lower bound leaves room for an
+// ordinary street-grid detour while avoiding a provider call whose result
+// would only be discarded as a walk.
+export const TRANSIT_SKIP_HAVERSINE_METERS = 250;
+
 // The walk-competitive relabel only applies to walks people actually
 // take. Beyond this, "walk 75 / transit 72" must stay TRANSIT — nobody
 // prefers an hour-plus walk to a similar transit ride — unless walking
 // beats transit outright (at least twice as fast), i.e. transit there is
 // effectively broken.
 export const MAX_WALK_LABEL_MIN = 30;
+
+// When Routes cannot price either mode, crow-flies distance is evidence
+// about proximity, not a routable path. Inflate it for street-network
+// detours, then add a separate uncertainty allowance. The leg remains
+// mode "unknown" so callers never present this fallback as a real route.
+export const FALLBACK_WALK_DETOUR_FACTOR = 1.35;
+export const FALLBACK_WALK_UNCERTAINTY_RATIO = 0.2;
+export const FALLBACK_WALK_MIN_UNCERTAINTY_MIN = 5;
+const FALLBACK_WALK_SPEED_KMH = 5;
 
 const FIELD_MASK = [
   "routes.duration",
@@ -215,7 +230,8 @@ function parseRoute(
  *     there is effectively broken, any length.
  * Walk-labeled legs use the WALK route's own numbers and geometry when
  * available (falling back to the transit route's on short hops without
- * walk data). Transit unusable → walk route. Neither → "unknown", 0 min.
+ * walk data). Transit unusable → walk route. If neither mode is usable,
+ * getSingleLeg keeps mode "unknown" and adds a conservative estimate.
  */
 export function buildLeg(
   fromIndex: number,
@@ -342,8 +358,12 @@ export async function getSingleLeg(
   departureTime?: string,
   excludeTransit = false
 ): Promise<TravelLeg> {
+  const straightLineMeters = haversineMeters(origin, destination);
+  const skipTransit =
+    excludeTransit ||
+    straightLineMeters < TRANSIT_SKIP_HAVERSINE_METERS;
   const [transitRes, walkRes] = await Promise.all([
-    excludeTransit
+    skipTransit
       ? Promise.resolve(null)
       : computeRoute(apiKey, origin, destination, "TRANSIT", departureTime),
     computeRoute(apiKey, origin, destination, "WALK", departureTime),
@@ -353,24 +373,37 @@ export async function getSingleLeg(
   // rendered as "this takes zero minutes", which schedules the next stop
   // the instant this one ends, across any distance — a WRONG time, not a
   // missing one (code-audit 2026-07-18 §6.2). Fall back to a conservative
-  // straight-line walking estimate (5 km/h over the crow-flies distance,
-  // which under-states real walking routes) and keep mode "unknown" so the
-  // UI can say the number is an estimate rather than a promise.
+  // straight-line walking estimate, inflated for street-network detours
+  // and then padded for uncertainty. Keep mode "unknown" so the UI says
+  // this is an estimate rather than a route or promise.
   if (leg.mode === "unknown") {
-    const meters = haversineMeters(origin, destination);
-    const estimate = Math.max(1, Math.ceil((meters / 1000 / 5) * 60));
-    return { ...leg, rawMinutes: estimate, totalMinutes: estimate, distanceMeters: meters };
+    const detouredMinutes = Math.max(
+      1,
+      Math.ceil(
+        (straightLineMeters / 1000 / FALLBACK_WALK_SPEED_KMH) *
+          60 *
+          FALLBACK_WALK_DETOUR_FACTOR
+      )
+    );
+    const uncertaintyMinutes = Math.max(
+      FALLBACK_WALK_MIN_UNCERTAINTY_MIN,
+      Math.ceil(detouredMinutes * FALLBACK_WALK_UNCERTAINTY_RATIO)
+    );
+    return {
+      ...leg,
+      rawMinutes: detouredMinutes,
+      marginMinutes: uncertaintyMinutes,
+      totalMinutes: detouredMinutes + uncertaintyMinutes,
+      distanceMeters: straightLineMeters,
+    };
   }
   return leg;
 }
 
 /**
  * Fetch consecutive-pair travel legs for the ordered stop coordinates.
- * Two computeRoutes calls per leg (TRANSIT + WALK), all in parallel.
- * Cost note: fine at demo scale.
- * TODO: skip the TRANSIT call when haversine distance <
- * SHORT_LEG_WALK_METERS — the short-leg relabel would win anyway, and
- * it halves calls on dense itineraries.
+ * Most legs use TRANSIT + WALK; defensibly short crow-flies hops request
+ * WALK only because transit would be discarded by the short-leg rule.
  */
 export async function getTravelLegs(
   apiKey: string,

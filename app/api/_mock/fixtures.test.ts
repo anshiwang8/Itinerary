@@ -4,7 +4,8 @@
 // scenarios exercising these categories stay honest).
 // Run with: npx tsx app/api/_mock/fixtures.test.ts
 import assert from "node:assert";
-import { mockGeocode, mockParse } from "./fixtures";
+import { resolveGeocodeResponse } from "../geocode/geocode";
+import { mockGeocodingResponse, mockParse } from "./fixtures";
 
 const cases: Array<[string, () => void]> = [
   [
@@ -28,13 +29,33 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
-    "mockGeocode is deterministic: any query → fixture home coords",
+    "mock geocoding swaps provider data while the real validator resolves it",
     () => {
-      const a = mockGeocode("Vancouver");
-      const b = mockGeocode("800 Robson St, Vancouver");
-      assert.deepStrictEqual(a.location, { latitude: 43.6547, longitude: -79.3862 });
-      assert.deepStrictEqual(b.location, a.location);
-      assert.strictEqual(a.label, "Vancouver (fixture)");
+      const cityRequest = { query: "Vancouver", kind: "city" } as const;
+      const city = resolveGeocodeResponse(
+        mockGeocodingResponse(cityRequest),
+        cityRequest
+      );
+      assert.strictEqual(city.outcome, "resolved");
+      if (city.outcome !== "resolved") return;
+      assert.deepStrictEqual(city.location, {
+        latitude: 43.6547,
+        longitude: -79.3862,
+      });
+      assert.strictEqual(city.label, "Vancouver (fixture)");
+
+      const addressRequest = {
+        query: "800 Robson St",
+        kind: "address",
+        cityContext: city,
+      } as const;
+      const address = resolveGeocodeResponse(
+        mockGeocodingResponse(addressRequest),
+        addressRequest
+      );
+      assert.strictEqual(address.outcome, "resolved");
+      if (address.outcome !== "resolved") return;
+      assert.deepStrictEqual(address.location, city.location);
     },
   ],
   [

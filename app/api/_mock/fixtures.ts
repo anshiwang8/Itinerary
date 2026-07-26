@@ -2,7 +2,7 @@
 // only when the server runs with E2E_MOCK=1. A SEAM, not a rewrite: the
 // objective filter, scheduling, floor guards, and resettle ladder all run
 // for real; only the DATA SOURCES (Groq parse/select/interpret, Places
-// search, Routes legs, Weather) are swapped — same discipline as
+// search, Geocoding results, Routes legs, Weather) are swapped — same discipline as
 // isUsableAt. Real routes stay the default.
 //
 // The pools are deliberately varied so real scenarios are exercisable:
@@ -13,6 +13,7 @@
 //  - three named categories (dinner / drinks / dessert) + a generated
 //    generic pool for anything else
 import type { ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
+import type { GeocodeRequest } from "../geocode/geocode";
 // only the hours TYPE is needed now — the fixture layer no longer does any
 // openness reasoning of its own (see the availability-seam note below)
 import type { CurrentOpeningHours } from "../places/search/hours";
@@ -689,20 +690,60 @@ export function mockTravelLegs(points: LatLng[]): TravelLeg[] {
   return points.slice(0, -1).map((from, i) => mockLeg(i, from, points[i + 1]));
 }
 
-// ── geocode: deterministic — every query resolves to the classic fixture
-// home (Chestnut Residence coords) so mock travel legs and the home card
-// stay byte-stable regardless of what city/address a scenario types. ──
-export function mockGeocode(query: string): {
-  label: string;
-  location: { latitude: number; longitude: number };
-  timeZone: string;
-} {
-  // fixed Chestnut coords → America/Toronto, keeping mock plans on one
-  // deterministic zone (byte-stable legs + Toronto-rendered labels)
+/** Provider-shaped Geocoding API data. The route feeds this through the
+ * same type/component/context validation as a live response; mock mode
+ * replaces only the network data source. */
+export function mockGeocodingResponse(request: GeocodeRequest): Record<string, unknown> {
+  const locality =
+    request.kind === "address"
+      ? (request.cityContext?.locality ?? "Toronto")
+      : request.query;
+  const formattedAddress = `${request.query} (fixture)`;
+  const addressComponents =
+    request.kind === "address"
+      ? [
+          { long_name: "89", short_name: "89", types: ["street_number"] },
+          { long_name: "Chestnut Street", short_name: "Chestnut St", types: ["route"] },
+          { long_name: locality, short_name: locality, types: ["locality", "political"] },
+          {
+            long_name: request.cityContext?.administrativeArea ?? "Ontario",
+            short_name: request.cityContext?.administrativeArea ?? "ON",
+            types: ["administrative_area_level_1", "political"],
+          },
+          {
+            long_name: request.cityContext?.country ?? "Canada",
+            short_name: request.cityContext?.countryCode ?? "CA",
+            types: ["country", "political"],
+          },
+        ]
+      : [
+          { long_name: locality, short_name: locality, types: ["locality", "political"] },
+          {
+            long_name: "Ontario",
+            short_name: "ON",
+            types: ["administrative_area_level_1", "political"],
+          },
+          { long_name: "Canada", short_name: "CA", types: ["country", "political"] },
+        ];
+
   return {
-    label: `${query} (fixture)`,
-    location: { latitude: 43.6547, longitude: -79.3862 },
-    timeZone: "America/Toronto",
+    status: "OK",
+    results: [
+      {
+        formatted_address: formattedAddress,
+        place_id: `fixture-${request.kind}`,
+        types: [request.kind === "city" ? "locality" : "street_address", "political"],
+        address_components: addressComponents,
+        geometry: {
+          location: { lat: 43.6547, lng: -79.3862 },
+          location_type: request.kind === "city" ? "APPROXIMATE" : "ROOFTOP",
+          viewport: {
+            southwest: { lat: 43.58, lng: -79.64 },
+            northeast: { lat: 43.86, lng: -79.11 },
+          },
+        },
+      },
+    ],
   };
 }
 
