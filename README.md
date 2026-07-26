@@ -170,6 +170,7 @@ Not needed for local dev — listed so the full set is in one place.
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | `app/api/itinerary/store.ts` | Redis REST endpoint (Vercel KV / Upstash). **Set → Redis is the single source of truth for stored plans; unset → an in-memory Map.** Required in production: on serverless each request can land on a different instance, so an in-memory plan would 404 between the POST that stores it and the GET that reads it. |
 | `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | `app/api/itinerary/store.ts` | Accepted as aliases for the pair above. |
 | `VERCEL` | `app/api/itinerary/store.ts` | Set by the platform. On Vercel **without** KV configured, the store refuses loudly instead of serving silent 404s. |
+| `NEXT_PUBLIC_ENABLE_DEV_CONTROLS` | `app/page.tsx` | Optional build-time flag. Production hides the time/disruption simulator unless this is exactly `true`; local development keeps it available. Rebuild after changing it. |
 | `E2E_MOCK` | `app/api/_mock/fixtures.ts` | `=1` swaps the pipeline's **data sources** (Groq, Places, Routes, Weather, geocode) for deterministic fixtures. Playwright sets it on its own server; never set it for real use. |
 | `TZ` | `app/api/places/search/route.ts` (log line only) | Printed in the `[schedule-resolve]` server log. Scheduling is per-plan zone-aware and no longer driven by server `TZ` — see the caveat in `CLAUDE.md`. |
 
@@ -218,8 +219,10 @@ this is the short version.
   geolocation, and a prompt that spans two cities is planned in the city you entered.
 - **No reservations or real-time availability.** "Is it open" is opening-hours data only;
   there's no OpenTable/Resy check behind it.
-- **Transit disruptions are simulated.** The reroute engine is real; the trigger is a dev
-  button, because GTFS-realtime isn't wired up yet. There's no rideshare fallback.
+- **Transit disruptions are simulated.** The reroute engine is real; the trigger is a
+  development control because GTFS-realtime isn't wired up yet. Production hides that
+  control by default; set `NEXT_PUBLIC_ENABLE_DEV_CONTROLS=true` at build time only for
+  an intentional demo deployment. There's no rideshare fallback.
 - **Movie runtimes are a placeholder** (a 2-hour assumption) — real showtimes need an
   external source.
 - **Rerouting and swaps skip the weather gate.** Only the initial plan checks the forecast.

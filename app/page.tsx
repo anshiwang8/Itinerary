@@ -62,8 +62,18 @@ import {
   provisionalArrivals,
   usedIdsOutsideRow,
 } from "./lib/recoverySlots";
+import { shouldShowDevControls } from "./lib/devControls";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
-import ItineraryStrip, { StripHome, StripStop } from "./ItineraryStrip";
+import ItineraryStrip, {
+  StripFocusRequest,
+  StripHome,
+  StripStop,
+} from "./ItineraryStrip";
+
+const SHOW_DEV_CONTROLS = shouldShowDevControls(
+  process.env.NODE_ENV,
+  process.env.NEXT_PUBLIC_ENABLE_DEV_CONTROLS
+);
 
 interface Place {
   id: string;
@@ -258,6 +268,9 @@ export default function Home() {
   const [mapStops, setMapStops] = useState<MapStop[]>([]);
   const [itinerary, setItinerary] = useState<Itinerary | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [stripFocusRequest, setStripFocusRequest] =
+    useState<StripFocusRequest | null>(null);
+  const stripFocusNonce = useRef(0);
   const [weatherBlocks, setWeatherBlocks] = useState<WeatherBlock[]>([]);
 
   const [simNow, setSimNow] = useState("");
@@ -333,7 +346,7 @@ export default function Home() {
         empties: EmptyRow[];
         replaceText: Record<string, string>;
         busy: boolean;
-        note: string | null;
+        note: { kind: "status" | "error"; text: string } | null;
       }
     | {
         mode: "time-gate";
@@ -372,6 +385,10 @@ export default function Home() {
   const endOperation = (token: symbol) => {
     if (activeOperation.current === token) activeOperation.current = null;
   };
+  const requestStripFocus = (stopId: string) => {
+    stripFocusNonce.current += 1;
+    setStripFocusRequest({ stopId, nonce: stripFocusNonce.current });
+  };
 
   async function runPipeline() {
     const q = prompt.trim();
@@ -382,6 +399,7 @@ export default function Home() {
     setBanner(null);
     setChangedIds(new Set());
     setOldStarts({});
+    setStripFocusRequest(null);
     setSwapError(null);
     setClarify(null);
     setRecovery(null);
@@ -1174,19 +1192,26 @@ export default function Home() {
         setRecovery({
           ...recovery,
           busy: false,
-          note: onlyUsed
-            ? `${narrowedSlotReason(searchCategory, opts.dropLocation ? null : ctx.parseData.location)} Try a different kind of stop?`
-            : weatherReason
-            ? `${weatherReason.charAt(0).toUpperCase()}${weatherReason.slice(1)} — ${searchCategory} does not fit this slot right now. Try another?`
-            : opts.dropLocation
-            ? `Still no ${searchCategory} city-wide — tell me what you'd like there instead?`
-            : `${stillReason} Try another?`,
+          note: {
+            kind: "status",
+            text: onlyUsed
+              ? `${narrowedSlotReason(searchCategory, opts.dropLocation ? null : ctx.parseData.location)} Try a different kind of stop?`
+              : weatherReason
+                ? `${weatherReason.charAt(0).toUpperCase()}${weatherReason.slice(1)} — ${searchCategory} does not fit this slot right now. Try another?`
+                : opts.dropLocation
+                  ? `Still no ${searchCategory} city-wide — tell me what you'd like there instead?`
+                  : `${stillReason} Try another?`,
+          },
         });
       }
     } catch (err) {
       setRecovery((r) =>
         r && r.mode === "empty"
-          ? { ...r, busy: false, note: clientErrorMessage(err) }
+          ? {
+              ...r,
+              busy: false,
+              note: { kind: "error", text: clientErrorMessage(err) },
+            }
           : r
       );
     } finally {
@@ -1503,10 +1528,13 @@ export default function Home() {
     const broken = timed[disruptLeg]?.travelToNext;
     const legName =
       broken?.transit?.lineName ?? (broken?.mode === "transit" ? "The transit leg" : "That leg");
+    let focusTargetId =
+      timed[disruptLeg + 1]?.id ?? timed[disruptLeg]?.id ?? selected;
 
     const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
     let mutationApplied = false;
     setError(null);
+    setBanner(null);
     setLoadingText("Replanning the route…");
     try {
       const data = await fetchJson(
@@ -1548,7 +1576,9 @@ export default function Home() {
       // and settled time are the hero of the moment
       const firstChanged = data.changed[0];
       if (firstChanged) {
-        setSelected(updated.stops[firstChanged.stopIndex]?.id ?? null);
+        const changedId = updated.stops[firstChanged.stopIndex]?.id ?? null;
+        setSelected(changedId);
+        focusTargetId = changedId ?? focusTargetId;
       }
 
       // the banner shows the instant the new chain actually departs from —
@@ -1572,6 +1602,12 @@ export default function Home() {
         try {
           const latest = await readItinerary(itinerary.id, nowISO ?? "");
           applyItinerary(latest);
+          const checkStop =
+            latest.stops.filter((stop) => stop.start_time)[disruptLeg + 1] ?? null;
+          if (checkStop?.id) {
+            setSelected(checkStop.id);
+            focusTargetId = checkStop.id;
+          }
           setError(
             `The reroute response was interrupted, so the latest saved plan was refreshed. Check the route before retrying. (${detail})`
           );
@@ -1590,6 +1626,7 @@ export default function Home() {
     } finally {
       setLoadingText(null);
       endOperation(operation);
+      if (focusTargetId) requestStripFocus(focusTargetId);
     }
   }
 
@@ -1605,9 +1642,12 @@ export default function Home() {
     if (stopIndex < 0) return;
     const operation = beginOperation();
     if (!operation) return;
+    let focusTargetId = itinerary.stops[stopIndex]?.id ?? selected;
 
     setSwapping(true);
     setSwapError(null);
+    setError(null);
+    setBanner(null);
     const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
     let mutationApplied = false;
     // pre-swap starts (by id) so downstream shifts can strike-through
@@ -1655,6 +1695,7 @@ export default function Home() {
       setChangedIds(ids);
       setOldStarts(olds);
       setSelected(swapped.id ?? null);
+      focusTargetId = swapped.id ?? focusTargetId;
       setSwapText("");
       setBannerFlat(false);
       // time/duration reasons are self-contained ("Moved dinner to 7:29 PM",
@@ -1671,7 +1712,9 @@ export default function Home() {
         try {
           const latest = await readItinerary(itinerary.id, nowISO ?? "");
           applyItinerary(latest);
-          setSelected(latest.stops[stopIndex]?.id ?? null);
+          const refreshedId = latest.stops[stopIndex]?.id ?? null;
+          setSelected(refreshedId);
+          focusTargetId = refreshedId ?? focusTargetId;
           setSwapError(
             `The swap response was interrupted, so the latest saved plan was refreshed. Check this stop before retrying. (${detail})`
           );
@@ -1690,6 +1733,7 @@ export default function Home() {
     } finally {
       setSwapping(false);
       endOperation(operation);
+      if (focusTargetId) requestStripFocus(focusTargetId);
     }
   }
 
@@ -1816,104 +1860,133 @@ export default function Home() {
   // 1–2 targeted questions before search — inline, minimal, skippable
   const clarifyBlock = clarify && (
     <div className={"clarify" + (itinerary ? " clarify--stage" : "")}>
-      {clarify.questions.map((qq) => (
-        <div key={qq.id === "narrow" ? `narrow:${qq.category}` : qq.id} className="clarify__q">
-          <div className="clarify__label">{qq.question}</div>
-          <div className="clarify__chips">
-            {qq.options.map((o) => (
-              <button
-                key={o}
-                className={
-                  "chipbtn " +
-                  ((qq.id === "when"
+      {clarify.questions.map((qq, questionIndex) => {
+        const questionKey =
+          qq.id === "narrow" ? `narrow:${qq.category}` : qq.id;
+        const questionLabelId = `clarify-question-${questionIndex}`;
+        return (
+          <div
+            key={questionKey}
+            className="clarify__q"
+            role="group"
+            aria-labelledby={questionLabelId}
+          >
+            <div id={questionLabelId} className="clarify__label">
+              {qq.question}
+            </div>
+            <div className="clarify__chips">
+              {qq.options.map((o) => {
+                const pressed =
+                  qq.id === "when"
                     ? clarifyWhen === o
                     : qq.id === "kind"
-                    ? clarifyKind === o
-                    : qq.id === "distribution"
-                    ? clarifyDistribution === o
-                    : qq.id === "narrow"
-                    ? clarifyNarrow[qq.category ?? ""] === o
-                    : clarifyVibe === o)
-                    ? "chipbtn--on"
-                    : "")
-                }
-                disabled={busy}
-                onClick={() =>
-                  qq.id === "when"
-                    ? setClarifyWhen(o)
-                    : qq.id === "kind"
-                    ? setClarifyKind(o)
-                    : qq.id === "distribution"
-                    ? setClarifyDistribution(o)
-                    : qq.id === "narrow"
-                    ? setClarifyNarrow((m) => ({ ...m, [qq.category ?? ""]: o }))
-                    : setClarifyVibe(o)
-                }
-              >
-                {o}
-              </button>
-            ))}
-            {qq.id === "when" && clarifyWhen === "pick a time" && (
-              <input
-                className="clarify__input"
-                value={clarifyTime}
-                disabled={busy}
-                onChange={(e) => setClarifyTime(e.target.value)}
-                placeholder="7pm"
-                aria-label="Pick a time"
-                autoFocus
-              />
-            )}
-            {qq.id === "narrow" && (
-              <input
-                className="clarify__input"
-                value={clarifyNarrow[qq.category ?? ""] ?? ""}
-                disabled={busy}
-                onChange={(e) =>
-                  setClarifyNarrow((m) => ({ ...m, [qq.category ?? ""]: e.target.value }))
-                }
-                placeholder="or type one…"
-                aria-label={qq.question}
-              />
-            )}
-            {qq.id === "kind" && (
-              <input
-                className="clarify__input"
-                value={clarifyKind}
-                disabled={busy}
-                onChange={(e) => setClarifyKind(e.target.value)}
-                placeholder="or type one… (bowling, live music)"
-                aria-label="What kind of thing"
-              />
-            )}
-            {qq.id === "distribution" && (
-              <input
-                className="clarify__input"
-                value={clarifyDistribution}
-                disabled={busy}
-                onChange={(e) => setClarifyDistribution(e.target.value)}
-                placeholder={qq.options[0] ?? "2 dinner + 1 drinks"}
-                aria-label="How to split the stops"
-              />
-            )}
-            {qq.id === "vibe" && (
-              <input
-                className="clarify__input"
-                value={clarifyVibe}
-                disabled={busy}
-                onChange={(e) => setClarifyVibe(e.target.value)}
-                placeholder="or type one…"
-                aria-label="Describe the vibe"
-              />
-            )}
+                      ? clarifyKind === o
+                      : qq.id === "distribution"
+                        ? clarifyDistribution === o
+                        : qq.id === "narrow"
+                          ? clarifyNarrow[qq.category ?? ""] === o
+                          : clarifyVibe === o;
+                return (
+                  <button
+                    key={o}
+                    type="button"
+                    className={`chipbtn ${pressed ? "chipbtn--on" : ""}`}
+                    aria-pressed={pressed}
+                    disabled={busy}
+                    onClick={() =>
+                      qq.id === "when"
+                        ? setClarifyWhen(o)
+                        : qq.id === "kind"
+                          ? setClarifyKind(o)
+                          : qq.id === "distribution"
+                            ? setClarifyDistribution(o)
+                            : qq.id === "narrow"
+                              ? setClarifyNarrow((m) => ({
+                                  ...m,
+                                  [qq.category ?? ""]: o,
+                                }))
+                              : setClarifyVibe(o)
+                    }
+                  >
+                    {o}
+                  </button>
+                );
+              })}
+              {qq.id === "when" && clarifyWhen === "pick a time" && (
+                <input
+                  className="clarify__input"
+                  value={clarifyTime}
+                  disabled={busy}
+                  onChange={(e) => setClarifyTime(e.target.value)}
+                  placeholder="7pm"
+                  aria-label="Pick a time"
+                  autoFocus
+                />
+              )}
+              {qq.id === "narrow" && (
+                <input
+                  className="clarify__input"
+                  value={clarifyNarrow[qq.category ?? ""] ?? ""}
+                  disabled={busy}
+                  onChange={(e) =>
+                    setClarifyNarrow((m) => ({
+                      ...m,
+                      [qq.category ?? ""]: e.target.value,
+                    }))
+                  }
+                  placeholder="or type one…"
+                  aria-label={qq.question}
+                />
+              )}
+              {qq.id === "kind" && (
+                <input
+                  className="clarify__input"
+                  value={clarifyKind}
+                  disabled={busy}
+                  onChange={(e) => setClarifyKind(e.target.value)}
+                  placeholder="or type one… (bowling, live music)"
+                  aria-label="What kind of thing"
+                />
+              )}
+              {qq.id === "distribution" && (
+                <input
+                  className="clarify__input"
+                  value={clarifyDistribution}
+                  disabled={busy}
+                  onChange={(e) => setClarifyDistribution(e.target.value)}
+                  placeholder={qq.options[0] ?? "2 dinner + 1 drinks"}
+                  aria-label="How to split the stops"
+                />
+              )}
+              {qq.id === "vibe" && (
+                <input
+                  className="clarify__input"
+                  value={clarifyVibe}
+                  disabled={busy}
+                  onChange={(e) => setClarifyVibe(e.target.value)}
+                  placeholder="or type one…"
+                  aria-label="Describe the vibe"
+                />
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
       <div className="clarify__actions">
-        <button className="clarify__go" disabled={busy} onClick={() => submitClarify(false)}>
+        <button
+          type="button"
+          className="clarify__go"
+          disabled={busy}
+          onClick={() => submitClarify(false)}
+        >
           Go
         </button>
-        <button className="clarify__skip" disabled={busy} onClick={() => submitClarify(true)}>
+        <button
+          type="button"
+          className="clarify__skip"
+          disabled={busy}
+          onClick={() => submitClarify(true)}
+        >
           Skip — just plan it
         </button>
       </div>
@@ -2002,6 +2075,11 @@ export default function Home() {
       </div>
     ) : recovery && (
     <div className={"clarify recover" + (itinerary ? " clarify--stage" : "")}>
+      {recovery.busy && (
+        <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          Finding another place for this stop…
+        </div>
+      )}
       {recovery.empties.map((e) => (
         <div key={rowKey(e)} className="clarify__q">
           <div className="clarify__label recover__reason">{e.reason}</div>
@@ -2051,7 +2129,15 @@ export default function Home() {
           </div>
         </div>
       ))}
-      {recovery.note && <div className="clarify__label recover__note">{recovery.note}</div>}
+      {recovery.note && (
+        <div
+          className="clarify__label recover__note"
+          role={recovery.note.kind === "error" ? "alert" : "status"}
+          aria-live={recovery.note.kind === "status" ? "polite" : undefined}
+        >
+          {recovery.note.text}
+        </div>
+      )}
       {/* "Plan without it" only makes sense when something ELSE was
           actually picked — an all-empty panel (post-override) has nothing
           to plan around, so recovering or redirecting are the options */}
@@ -2071,14 +2157,20 @@ export default function Home() {
       <main className="empty">
         {/* decorative sky layers — the horizon curve and reflection band
             live in CSS (.empty::before/::after); this is the wordmark glow */}
-        <div className="empty__glow" />
-        <div className="empty__mark">Itinerary</div>
+        <div className="empty__glow" aria-hidden="true" />
+        <div className="empty__mark" aria-hidden="true">Itinerary</div>
         <h1 className="empty__title">Itinerary</h1>
         <div className="empty__sub">life moves simpler.</div>
         {/* ONE pill, three labelled sections. Exactly the same three inputs,
             state, validation and submit trigger as before — only the
             presentation changed from three separate controls to one. */}
-        <div className="prompt">
+        <form
+          className="prompt"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void runPipeline();
+          }}
+        >
           <div className="prompt__sec prompt__sec--search">
             <label className="prompt__label" htmlFor="q-search">
               Search
@@ -2089,9 +2181,6 @@ export default function Home() {
               disabled={busy}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") runPipeline();
-              }}
               placeholder="ramen then a quiet bar in Ossington"
               aria-label="Describe your evening"
               autoFocus
@@ -2107,9 +2196,6 @@ export default function Home() {
               disabled={busy}
               value={city}
               onChange={(e) => setCity(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") runPipeline();
-              }}
               placeholder="City"
               aria-label="City"
             />
@@ -2124,16 +2210,13 @@ export default function Home() {
               disabled={busy}
               value={startAddress}
               onChange={(e) => setStartAddress(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") runPipeline();
-              }}
               placeholder="optional — city centre"
               aria-label="Starting address"
             />
           </div>
           <button
+            type="submit"
             className="prompt__go"
-            onClick={runPipeline}
             disabled={busy || !prompt.trim() || !city.trim()}
             aria-label={busy ? loadingText ?? "Planning" : "Plan it"}
             title={busy ? loadingText ?? "Planning" : "Plan it"}
@@ -2143,11 +2226,20 @@ export default function Home() {
               <path d="M20 20l-3.5-3.5" />
             </svg>
           </button>
-        </div>
-        {busy && loadingText && <div className="empty__status">{loadingText}</div>}
+        </form>
+        {busy && loadingText && (
+          <div
+            className="empty__status"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {loadingText}
+          </div>
+        )}
         {clarifyBlock}
         {recoveryBlock}
-        {error && <div className="empty__err">{error}</div>}
+        {error && <div className="empty__err" role="alert">{error}</div>}
       </main>
     );
   }
@@ -2155,6 +2247,7 @@ export default function Home() {
   // ── map stage ──
   return (
     <main className={"stage" + (banner ? " stage--banner" : "")}>
+      <h1 className="sr-only">Your itinerary</h1>
       <ItineraryMap stops={styledStops} home={mapHome} selected={selected} timeZone={displayZone} onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))} />
 
       {wxNow && (
@@ -2171,45 +2264,64 @@ export default function Home() {
         selected={selected}
         timeZone={displayZone}
         onSelect={(c) => setSelected(c)}
+        focusRequest={stripFocusRequest}
+        onFocusHandled={(nonce) =>
+          setStripFocusRequest((current) =>
+            current?.nonce === nonce ? null : current
+          )
+        }
         swap={{
           text: swapText,
           onText: setSwapText,
           onSubmit: doSwap,
-          submitting: swapping || busy,
+          submitting: swapping,
+          disabled: busy,
           error: swapError,
           canSwap,
         }}
       />
 
-      <div className="topbar">
+      <form
+        className="topbar"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void runPipeline();
+        }}
+      >
         <span className="topbar__mark">Itinerary</span>
-        <span className="topbar__rule" />
+        <span className="topbar__rule" aria-hidden="true" />
         <input
           className="topbar__input"
           disabled={busy}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") runPipeline();
-          }}
           aria-label="Describe your evening"
         />
-        <button className="topbar__go" onClick={runPipeline} disabled={busy || !prompt.trim()}>
+        <button type="submit" className="topbar__go" disabled={busy || !prompt.trim()}>
           {busy ? "…" : "Replan"}
         </button>
-      </div>
+      </form>
 
-      {loadingText && <div className="loading">{loadingText}</div>}
+      {loadingText && (
+        <div className="loading" role="status" aria-live="polite" aria-atomic="true">
+          {loadingText}
+        </div>
+      )}
 
       {clarifyBlock}
       {recoveryBlock}
 
       {banner && (
-        <div className={"banner banner--show" + (bannerFlat ? " banner--flat" : "")} role="status">
+        <div
+          className={"banner banner--show" + (bannerFlat ? " banner--flat" : "")}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
           {banner}
         </div>
       )}
-      {error && !banner && <div className="stage__err">{error}</div>}
+      {error && <div className="stage__err" role="alert">{error}</div>}
 
       {weatherBlocks.length > 0 && (
         <div style={{ position: "absolute", bottom: 70, left: 16, zIndex: 19, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2233,34 +2345,45 @@ export default function Home() {
         </div>
       )}
 
-      {/* discreet dev strip — time + disruption simulators for the demo */}
-      {devOpen ? (
-        <div className="dev">
+      {/* Development-only time + disruption simulators. Production gets no
+          control unless the explicit public build-time flag opts in. */}
+      {SHOW_DEV_CONTROLS && (devOpen ? (
+        <div className="dev" role="region" aria-label="Development controls">
           <div className="dev__title">
             <span>Dev</span>
-            <button className="ghost" style={{ marginLeft: "auto", padding: "2px 7px" }} onClick={() => setDevOpen(false)}>
+            <button
+              type="button"
+              className="ghost"
+              style={{ marginLeft: "auto", padding: "2px 7px" }}
+              aria-label="Hide development controls"
+              onClick={() => setDevOpen(false)}
+            >
               hide
             </button>
           </div>
           <div className="dev__row">
-            <label>time</label>
+            <label htmlFor="dev-time">time</label>
             <input
+              id="dev-time"
               type="datetime-local"
               disabled={busy}
               value={simNow}
               onChange={(e) => void updateSimulationTime(e.target.value)}
             />
             <button
+              type="button"
               className="ghost"
               disabled={busy}
+              aria-label="Use real time"
               onClick={() => void updateSimulationTime("")}
             >
               real
             </button>
           </div>
           <div className="dev__row">
-            <label>leg</label>
+            <label htmlFor="dev-leg">leg</label>
             <select
+              id="dev-leg"
               value={disruptLeg}
               disabled={busy}
               onChange={(e) => setDisruptLeg(Number(e.target.value))}
@@ -2271,14 +2394,21 @@ export default function Home() {
                 </option>
               ))}
             </select>
-            <button disabled={busy} onClick={fireDisruption}>cancel</button>
+            <button type="button" disabled={busy} onClick={fireDisruption}>
+              cancel
+            </button>
           </div>
         </div>
       ) : (
-        <button className="dev dev__collapsed" onClick={() => setDevOpen(true)}>
+        <button
+          type="button"
+          className="dev dev__collapsed"
+          aria-label="Show development controls"
+          onClick={() => setDevOpen(true)}
+        >
           Dev
         </button>
-      )}
+      ))}
     </main>
   );
 }

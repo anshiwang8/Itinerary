@@ -248,7 +248,7 @@ test.describe("@mock duplicate categories", () => {
     await expect(cards.nth(0).locator(".lstrip__swap")).toHaveCount(0);
     // and the "why here" reason belongs to the second card too
     await expect(cards.nth(1).locator(".lstrip__reason")).toBeVisible();
-    await expect(cards.nth(0).locator(".lstrip__reason")).toHaveCount(0);
+    await expect(cards.nth(0).locator(".lstrip__reason")).toBeHidden();
   });
 });
 

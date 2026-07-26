@@ -44,12 +44,14 @@ stale.
 | `GOOGLE_ROUTES_API_KEY` | Routes computeRoutes — server-side only |
 | `GOOGLE_WEATHER_API_KEY` | Weather hourly forecast — server-side only |
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Maps JS (browser-side by design — see referrer note) |
+| `NEXT_PUBLIC_ENABLE_DEV_CONTROLS` | Optional build-time public flag. Leave unset/`false` to hide time travel and disruption simulation in production; set exactly `true` only for an intentional demo, then rebuild. |
 | `TZ` | `America/Toronto` — recommended; see the note above for what it does and does NOT do now |
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | injected automatically when you connect Upstash Redis / Vercel KV storage (the `UPSTASH_REDIS_REST_URL`/`_TOKEN` names work too) |
 
-Only the Maps key is ever exposed to the browser; your mentor never sees
-the other five — they live inside the serverless functions. Never put
-`NEXT_PUBLIC_` on anything else.
+Of the service credentials, only the Maps key is ever exposed to the browser;
+the other five live inside the serverless functions. The optional development
+control flag is public but contains no secret. Never put `NEXT_PUBLIC_` on any
+server credential.
 
 **Maps key referrer restriction (do this or the map breaks / the key leaks):**
 Google Cloud Console → APIs & Services → Credentials → the Maps JS key →
@@ -103,9 +105,12 @@ store — not warm-instance luck:
 1. Plan `dinner and drinks in Ossington` → strip + map render (create →
    read already spans two functions).
 2. Click the dinner card → swap `cheaper` → banner + venue/price change.
-3. Dev strip (bottom corner) → set `time` to mid-dinner → the stop shows
-   **now** (status + lock ratchet persisted).
-4. `cancel` the leg → "…cancelled. Replanned from …" reflow.
+3. On an intentional demo build with
+   `NEXT_PUBLIC_ENABLE_DEV_CONTROLS=true`, use the bottom-corner strip to set
+   `time` to mid-dinner → the stop shows **now** (status + lock ratchet
+   persisted).
+4. In that same demo build, `cancel` the leg → "…cancelled. Replanned from …"
+   reflow.
 5. Fail-loud sanity: plan `brunch at 3am` → the honest message, not an
    empty map.
 6. Wait ~10 minutes (functions go cold), then swap or time-travel the SAME
@@ -115,10 +120,10 @@ Any `No itinerary with id …` 404 during this = the KV store isn't
 connected; a missing-KV deploy fails loudly at plan time with a message
 pointing at this file.
 
-Notes: the dev strip (time sim + disruption trigger) ships in the UI on
-purpose — it's the demo control. Your mentor's usage spends your Groq /
-Google quota; both have free tiers, but set Google Cloud quota caps if
-you're worried.
+Notes: production omits the dev strip by default. Enabling it is a public
+build-time choice and requires a rebuild/redeploy; leave it off for ordinary
+deployments. Usage still spends Groq / Google quota, so keep provider quota
+caps and alerts configured.
 
 ## Security and quota go-live checklist
 

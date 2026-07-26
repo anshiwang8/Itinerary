@@ -124,6 +124,15 @@ test("@mock an ambiguous city pauses before search and resumes from the explicit
   await expect(page.locator(".lstrip__name--home")).toContainText(
     "London, ON, Canada"
   );
+  const cityMap = page.locator(".map");
+  await expect(cityMap).toHaveAccessibleName(/London, ON, Canada/);
+  await expect(cityMap).not.toHaveAccessibleName(/Ossington/i);
+  const cityHomeTag = page.locator(".mk--home .mk__tag");
+  await expect(cityHomeTag).toBeVisible();
+  await expect(cityHomeTag).toContainText(
+    /^leave London, ON, Canada centre · /
+  );
+  await expect(cityHomeTag).not.toContainText("Start ·");
   expect(cityCalls).toBe(1);
   expect(placesCalls).toBe(1);
 });
@@ -198,4 +207,15 @@ test("@mock an ambiguous address receives city context and preserves the selecte
   await expect(page.locator(".lstrip__name--home")).toContainText(
     "100 Queen St E, Toronto, ON, Canada"
   );
+  const addressMap = page.locator(".map");
+  await expect(addressMap).toHaveAccessibleName(
+    /100 Queen St E, Toronto, ON, Canada/
+  );
+  await expect(addressMap).not.toHaveAccessibleName(/Ossington/i);
+  const addressHomeTag = page.locator(".mk--home .mk__tag");
+  await expect(addressHomeTag).toBeVisible();
+  await expect(addressHomeTag).toContainText(
+    /^leave 100 Queen St E, Toronto, ON, Canada · /
+  );
+  await expect(addressHomeTag).not.toContainText("Start ·");
 });

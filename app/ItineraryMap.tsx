@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 import { formatStopTime } from "./lib/timeLabels";
+import { originDisplayLabel } from "./lib/locationLabels";
 import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
 import { createRetryableLoader } from "./lib/retryableLoader";
 import { displayableRouteMode } from "./lib/mapRoutePolicy";
@@ -103,6 +104,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   const [, setTick] = useState(0);
   const [mapState, setMapState] = useState<"loading" | "ready" | "failed">("loading");
   const [retryCount, setRetryCount] = useState(0);
+  const [dismissedRetry, setDismissedRetry] = useState<number | null>(null);
 
   // one-time map + projection probe
   useEffect(() => {
@@ -281,6 +283,18 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   };
   const midPx = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) =>
     px((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
+  const chipX = (x: number | string): number | string => {
+    const width = mapDivRef.current?.clientWidth ?? 0;
+    if (width <= 0) return x;
+    const projected =
+      typeof x === "number" ? x : (Number.parseFloat(x) / 100) * width;
+    if (!Number.isFinite(projected)) return x;
+    // CSS caps chips at 240px with a 12px viewport gutter. On very narrow
+    // screens the two gutters meet in the centre, which is still preferable
+    // to placing an interactive target outside the viewport.
+    const edge = Math.min(132, width / 2);
+    return Math.max(edge, Math.min(width - edge, projected));
+  };
 
   // transit leg labels pinned to each leg's midpoint (home leg + inter-stop)
   const legLabels: { key: string; x: number | string; y: number | string; text: string; segs: BubbleSegment[] }[] = [];
@@ -303,9 +317,12 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
         role="img"
         aria-label={`Map of your outing${home?.label ? ` from ${home.label}` : ""}`}
       />
-      {mapState === "failed" && (
+      {mapState === "failed" && dismissedRetry !== retryCount && (
         <div className="mapfallback" role="alert">
-          <span>The live map is unavailable. Your itinerary and venue pins are still usable.</span>
+          <span>
+            The live map is unavailable. Your itinerary and venue pins are still
+            usable.
+          </span>
           {retryCount < MAX_MAP_RETRIES && (
             <button
               type="button"
@@ -315,6 +332,14 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
               Retry map
             </button>
           )}
+          <button
+            type="button"
+            className="mapfallback__dismiss"
+            aria-label="Dismiss map warning"
+            onClick={() => setDismissedRetry(retryCount)}
+          >
+            <span aria-hidden="true">×</span>
+          </button>
         </div>
       )}
       <div className="ov-layer">
@@ -356,7 +381,11 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
                     <path d="M12 3 3 10v11h6v-6h6v6h6V10z" />
                   </svg>
                 </div>
-                {home.leaveBy && <div className="mk__tag">leave {home.label.replace(/^Home · /, "")} · {home.leaveBy}</div>}
+                {home.leaveBy && (
+                  <div className="mk__tag">
+                    leave {originDisplayLabel(home.label)} · {home.leaveBy}
+                  </div>
+                )}
               </div>
             );
           })()}
@@ -384,6 +413,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
                 <div className="mk__dot" />
               </div>
               <button
+                type="button"
                 className={
                   "chip" +
                   (isSel ? " chip--selected" : "") +
@@ -391,7 +421,13 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
                   (s.status === "completed" ? " chip--done" : "") +
                   (s.changed ? " chip--changed" : "")
                 }
-                style={{ left: p.x, top: p.y, zIndex: isSel ? 9 : s.changed ? 8 : undefined }}
+                style={{
+                  left: chipX(p.x),
+                  top: p.y,
+                  zIndex: isSel ? 9 : s.changed ? 8 : undefined,
+                }}
+                aria-label={`Show stop ${i + 1}: ${s.name}`}
+                aria-pressed={isSel}
                 onClick={() => onSelect(s.id)}
               >
                 <span className="chip__num">{i + 1}</span>

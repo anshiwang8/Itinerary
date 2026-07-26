@@ -10,16 +10,16 @@
   --card: #FFFFFF;         /* card surface — white, as in the mockups */
   --card-2: #F5FAFD;       /* faint alt surface */
   --ink: #1E3A4C;          /* dark navy/slate — headlines and body */
-  --ink-soft: rgba(30, 58, 76, 0.62);
-  --ink-faint: rgba(30, 58, 76, 0.38);
+  --ink-soft: rgba(30, 58, 76, 0.78);
+  --ink-faint: rgba(30, 58, 76, 0.72);
   --rule: rgba(30, 58, 76, 0.13);
   --rule-strong: rgba(30, 58, 76, 0.26);
 
   /* mid-teal accent: icon badges, small-caps labels, buttons, focus */
-  --accent: #5BB3CC;
-  --accent-deep: #3E9AB5;
+  --accent: #2A7890;
+  --accent-deep: #1E6075;
   --accent-soft: rgba(91, 179, 204, 0.15);
-  --label: #4E9FBA;        /* small-caps letter-spaced labels */
+  --label: #2A7890;        /* small-caps letter-spaced labels */
 
   /* hero sky: pale at the horizon, deepening toward the foot of the page */
   --hero-top: #F2F9FC;
@@ -61,7 +61,7 @@ body {
 }
 
 button { font-family: var(--grot); cursor: pointer; }
-:focus-visible { outline: 3px solid var(--live); outline-offset: 2px; border-radius: 2px; }
+:focus-visible { outline: 3px solid var(--accent-deep); outline-offset: 2px; border-radius: 2px; }
 
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -165,7 +165,7 @@ button { font-family: var(--grot); cursor: pointer; }
    the prompt proper; city/start keep their own `.where__input` class. */
 .prompt__input,
 .prompt__sec .where__input {
-  width: 100%; border: none; background: transparent; outline: none;
+  width: 100%; min-height: 44px; border: none; background: transparent;
   font-family: var(--grot); font-size: 15px; color: var(--ink); padding: 0;
   flex: none; border-radius: 0; min-width: 0;
 }
@@ -217,7 +217,7 @@ button { font-family: var(--grot); cursor: pointer; }
   background-size: 48px 48px;
 }
 .mapfallback {
-  position: absolute; top: 72px; left: 50%; z-index: 12;
+  position: absolute; bottom: 72px; left: 50%; z-index: 12;
   transform: translateX(-50%);
   display: flex; align-items: center; gap: 10px;
   max-width: min(460px, calc(100vw - 32px));
@@ -227,9 +227,14 @@ button { font-family: var(--grot); cursor: pointer; }
   box-shadow: var(--shadow-card); font-size: 12px;
 }
 .mapfallback__retry {
-  flex: none; min-height: 36px; padding: 7px 11px;
+  flex: none; min-width: 44px; min-height: 44px; padding: 7px 11px;
   border: 1px solid var(--accent); border-radius: 8px;
   background: var(--card); color: var(--ink); font-weight: 600;
+}
+.mapfallback__dismiss {
+  flex: none; width: 44px; height: 44px; padding: 0;
+  border: 1px solid var(--rule-strong); border-radius: 8px;
+  background: var(--card); color: var(--ink); font-size: 22px; line-height: 1;
 }
 
 .ov-layer { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
@@ -262,12 +267,17 @@ button { font-family: var(--grot); cursor: pointer; }
   position: absolute; transform: translate(-50%, -132%); z-index: 6;
   pointer-events: auto; cursor: pointer;
   background: var(--card); border: 1px solid var(--rule); border-radius: 12px;
-  padding: 6px 12px; white-space: nowrap;
+  min-height: 44px; max-width: min(240px, calc(100vw - 24px));
+  padding: 6px 12px; white-space: nowrap; overflow: hidden;
   box-shadow: var(--shadow-card);
   transition: left 0.55s ease, top 0.55s ease, opacity 0.45s ease, border-color 0.4s ease;
 }
 .chip__num { font-family: var(--grot); font-size: 11px; font-weight: 500; color: var(--ink-soft); margin-right: 7px; }
-.chip__name { font-family: var(--disp); font-weight: 500; font-size: 15px; letter-spacing: -0.005em; }
+.chip__name {
+  display: inline-block; max-width: 15ch; overflow: hidden;
+  text-overflow: ellipsis; vertical-align: middle;
+  font-family: var(--disp); font-weight: 500; font-size: 15px; letter-spacing: -0.005em;
+}
 .chip__time { font-family: var(--grot); font-size: 12px; color: var(--ink-soft); margin-left: 6px; }
 /* the selected stop's pin chip. ItineraryMap has always applied this class
    (and its own comment says the chip is "highlighted when selected"), but
@@ -278,7 +288,7 @@ button { font-family: var(--grot); cursor: pointer; }
   box-shadow: var(--shadow-lift);
 }
 .chip--live { border-color: var(--live); border-width: 1.5px; }
-.chip--done { opacity: 0.6; }
+.chip--done { background: var(--card-2); border-color: var(--rule-strong); }
 .chip--changed { border-color: var(--live); border-width: 1.5px; }
 
 /* NOTE: the .ecard* rules below are currently DEAD — the expanded editorial
@@ -344,13 +354,14 @@ button { font-family: var(--grot); cursor: pointer; }
 .topbar__mark { font-family: var(--disp); font-weight: 600; font-size: 16px; letter-spacing: -0.01em; }
 .topbar__rule { width: 1px; height: 22px; background: var(--rule); }
 .topbar__input {
-  flex: 1; border: none; background: transparent; outline: none;
+  flex: 1; min-height: 44px; border: none; background: transparent;
   font-family: var(--grot); font-size: 14px; color: var(--ink); min-width: 0;
 }
 .topbar__input::placeholder { color: var(--ink-faint); }
 .topbar__go {
   border: none; background: var(--accent); color: #FFFFFF;
   font-family: var(--grot); font-weight: 600; font-size: 13px;
+  min-width: 44px; min-height: 44px;
   padding: 8px 17px; border-radius: 999px; white-space: nowrap;
   transition: background 0.18s ease;
 }
@@ -358,7 +369,7 @@ button { font-family: var(--grot); cursor: pointer; }
 .topbar__go[disabled] { opacity: 0.5; cursor: default; }
 
 .banner {
-  position: absolute; top: 66px; left: 50%; transform: translateX(-50%) translateY(-6px);
+  position: absolute; top: 82px; left: 50%; transform: translateX(-50%) translateY(-6px);
   z-index: 20; width: min(560px, 92vw);
   background: var(--card); border: 1px solid var(--rule); border-left: 3px solid var(--live);
   border-radius: 0 14px 14px 0; padding: 12px 17px;
@@ -371,7 +382,7 @@ button { font-family: var(--grot); cursor: pointer; }
 .banner--flat { border-left-color: var(--ink-soft); }
 
 .stage__err {
-  position: absolute; top: 66px; left: 50%; transform: translateX(-50%);
+  position: absolute; top: 82px; left: 50%; transform: translateX(-50%);
   z-index: 21; width: min(560px, 92vw);
   background: var(--card); border: 1px solid var(--rule); border-left: 3px solid var(--accent);
   border-radius: 0 14px 14px 0; padding: 12px 17px;
@@ -386,7 +397,7 @@ button { font-family: var(--grot); cursor: pointer; }
 .wherebar { display: flex; gap: 8px; width: min(520px, 92vw); margin-bottom: 10px; }
 .where__input {
   flex: 0 0 150px; min-width: 0; border: 1px solid var(--rule); border-radius: 8px;
-  background: var(--card); padding: 9px 12px; outline: none;
+  min-height: 44px; background: var(--card); padding: 9px 12px;
   font-family: var(--grot); font-size: 14px; color: var(--ink);
 }
 .where__input--addr { flex: 1 1 auto; }
@@ -401,7 +412,7 @@ button { font-family: var(--grot); cursor: pointer; }
   box-shadow: var(--shadow-card);
 }
 .clarify--stage {
-  position: absolute; top: 66px; left: 50%; transform: translateX(-50%); z-index: 21;
+  position: absolute; top: 82px; left: 50%; transform: translateX(-50%); z-index: 21;
   margin-top: 0;
 }
 .clarify__q + .clarify__q { margin-top: 10px; }
@@ -412,6 +423,7 @@ button { font-family: var(--grot); cursor: pointer; }
 .clarify__chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .chipbtn {
   border: 1px solid var(--rule); background: var(--paper); color: var(--ink);
+  min-width: 44px; min-height: 44px;
   border-radius: 999px; padding: 6px 14px; font-family: var(--grot); font-size: 13px;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
@@ -420,17 +432,19 @@ button { font-family: var(--grot); cursor: pointer; }
 .clarify__input {
   border: 1px solid var(--rule); border-radius: 8px; background: var(--paper);
   padding: 5px 9px; font-family: var(--grot); font-size: 13px; color: var(--ink);
-  outline: none; min-width: 110px;
+  min-width: 110px; min-height: 44px;
 }
 .clarify__input:focus { border-color: var(--accent); }
 .clarify__actions { display: flex; gap: 8px; margin-top: 12px; }
 .clarify__go {
   border: none; background: var(--accent); color: #FFFFFF;
+  min-width: 44px; min-height: 44px;
   font-family: var(--grot); font-weight: 600; font-size: 13px; padding: 7px 20px; border-radius: 999px;
 }
 .clarify__go:hover { background: var(--accent-deep); }
 .clarify__skip {
   border: 1px solid var(--rule); background: transparent; color: var(--ink-soft);
+  min-width: 44px; min-height: 44px;
   font-family: var(--grot); font-size: 13px; padding: 7px 14px; border-radius: 999px;
 }
 .clarify__skip:hover { border-color: var(--accent); color: var(--ink); }
@@ -445,14 +459,14 @@ button { font-family: var(--grot); cursor: pointer; }
 
 /* ─── Itinerary strip — the primary surface, under the search bar ─── */
 .lstrip {
-  position: absolute; top: 66px; left: 50%; transform: translateX(-50%);
+  position: absolute; top: 82px; left: 50%; transform: translateX(-50%);
   z-index: 18; display: flex; align-items: stretch; gap: 9px;
   max-width: 96vw; overflow-x: auto; padding: 4px 6px 8px;
   opacity: 1;
   scrollbar-width: thin;
 }
 /* when a transient banner shows at the top, drop the strip below it */
-.stage--banner .lstrip { top: 118px; }
+.stage--banner .lstrip { top: 140px; }
 .lstrip::-webkit-scrollbar { height: 6px; }
 .lstrip::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 3px; }
 
@@ -467,9 +481,16 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__name--home { font-size: 17px; }
 
 .lstrip__stop {
-  width: 182px; cursor: pointer; font-family: var(--grot);
+  width: 182px; font-family: var(--grot);
   transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.3s ease;
 }
+.lstrip__select {
+  display: block; width: 100%; min-height: 44px; border: 0; padding: 0;
+  background: transparent; color: inherit; text-align: left;
+}
+.lstrip__select .lstrip__name,
+.lstrip__select .lstrip__be,
+.lstrip__select .lstrip__desc { display: block; }
 .lstrip__stophead { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
 /* the mockup's rounded-square accent badge. Ours carries the stop NUMBER
    rather than a generic glyph — same visual language, more information. */
@@ -515,12 +536,12 @@ button { font-family: var(--grot); cursor: pointer; }
   display: block;
   font-family: var(--grot); font-size: 9.5px; font-weight: 600;
   letter-spacing: 0.14em; text-transform: uppercase;
-  color: var(--ink-soft); opacity: 0.7; margin-bottom: 3px;
+  color: var(--ink-soft); margin-bottom: 3px;
 }
 .lstrip__stop--sel { border-color: var(--accent); box-shadow: var(--shadow-lift); width: 218px; }
 .lstrip__stop--live { border-color: var(--live); border-width: 1.5px; }
 .lstrip__stop--changed { border-color: var(--live); border-width: 1.5px; }
-.lstrip__stop--done { opacity: 0.6; }
+.lstrip__stop--done { background: var(--card-2); }
 
 /* inline swap prompt, revealed under the selected card */
 .lstrip__swap { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--rule); }
@@ -528,13 +549,14 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__swaprow { display: flex; gap: 6px; align-items: stretch; }
 .lstrip__swapinput {
   flex: 1; min-width: 0; border: 1px solid var(--rule); border-radius: 8px;
-  background: var(--paper); padding: 6px 9px; outline: none;
+  min-height: 44px; background: var(--paper); padding: 6px 9px;
   font-family: var(--grot); font-size: 13px; color: var(--ink);
 }
 .lstrip__swapinput:focus { border-color: var(--accent); }
 .lstrip__swapinput::placeholder { color: var(--ink-faint); }
 .lstrip__swapgo {
   border: none; background: var(--accent); color: #FFFFFF;
+  min-width: 44px; min-height: 44px;
   font-family: var(--grot); font-weight: 600; font-size: 12px;
   padding: 0 14px; border-radius: 9px; white-space: nowrap;
 }
@@ -565,7 +587,7 @@ button { font-family: var(--grot); cursor: pointer; }
 
 /* ─── Weather chip — ambient, tucked in a corner ─── */
 .weather {
-  position: absolute; top: 16px; left: 16px; z-index: 17;
+  position: absolute; bottom: 16px; left: 16px; z-index: 17;
   display: flex; align-items: center; gap: 8px;
   background: var(--card); border: 1px solid var(--rule); border-radius: 999px;
   padding: 6px 14px 6px 11px; box-shadow: var(--shadow-card);
@@ -589,12 +611,13 @@ button { font-family: var(--grot); cursor: pointer; }
 .swapbar__label { font-family: var(--grot); font-size: 13px; color: var(--ink-soft); white-space: nowrap; }
 .swapbar__label b { color: var(--ink); font-weight: 500; }
 .swapbar__input {
-  flex: 1; min-width: 120px; border: none; background: transparent; outline: none;
+  flex: 1; min-width: 120px; min-height: 44px; border: none; background: transparent;
   font-family: var(--grot); font-size: 14px; color: var(--ink);
 }
 .swapbar__input::placeholder { color: var(--ink-faint); }
 .swapbar__go {
   border: none; background: var(--accent); color: #FFFFFF;
+  min-width: 44px; min-height: 44px;
   font-family: var(--grot); font-weight: 600; font-size: 13px;
   padding: 8px 17px; border-radius: 999px; white-space: nowrap;
   transition: background 0.18s ease;
@@ -615,26 +638,60 @@ button { font-family: var(--grot); cursor: pointer; }
 .dev__row:last-child { margin-bottom: 0; }
 .dev label { color: #b3cdd8; font-size: 11px; white-space: nowrap; }
 .dev input[type="datetime-local"], .dev select {
-  flex: 1; min-width: 0; background: #12303f; color: #E8F3F8;
+  flex: 1; min-width: 0; min-height: 44px; background: #12303f; color: #E8F3F8;
   border: 1px solid #2f5468; border-radius: 7px; padding: 4px 6px;
   font-family: var(--grot); font-size: 11px;
 }
 .dev button {
-  background: var(--live); color: var(--ink); border: none; border-radius: 6px;
+  background: var(--accent); color: #FFFFFF; border: none; border-radius: 6px;
+  min-width: 44px; min-height: 44px;
   padding: 5px 10px; font-family: var(--grot); font-weight: 500; font-size: 11px;
 }
 .dev button.ghost { background: transparent; color: #b3cdd8; border: 1px solid #2f5468; }
 .dev__collapsed { width: auto; padding: 8px 11px; cursor: pointer; }
 
 @media (max-width: 560px) {
+  .empty {
+    justify-content: flex-start; overflow-y: auto;
+    padding: clamp(24px, 7vh, 52px) 12px 24px;
+  }
+  .empty__title { font-size: clamp(42px, 16vw, 64px); }
+  .empty__mark { display: none; }
+  .prompt {
+    width: min(100%, 390px); flex-direction: column; align-items: stretch;
+    border-radius: 24px; padding: 6px 6px 64px; margin-top: 22px;
+  }
+  .prompt__sec,
+  .prompt__sec--search {
+    flex: none; width: 100%; padding: 10px 18px;
+  }
+  .prompt__sec + .prompt__sec::before {
+    left: 18px; right: 18px; top: 0; bottom: auto;
+    width: auto; height: 1px;
+  }
+  .prompt__go {
+    top: auto; right: 8px; bottom: 8px; transform: none;
+  }
+  .prompt__go:active { transform: scale(0.96); }
   .topbar { top: 10px; padding: 7px 7px 7px 12px; }
   .topbar__mark { display: none; }
-  .banner, .stage__err { top: 58px; }
-  .dev { left: 14px; right: 14px; width: auto; }
+  .banner, .stage__err, .clarify--stage { top: 76px; }
+  .dev:not(.dev__collapsed) { left: 14px; right: 14px; width: auto; }
+  .dev__collapsed { left: auto; right: 14px; width: auto; }
   .swapbar { bottom: 14px; top: auto; }
-  .lstrip { top: 58px; max-width: 100vw; }
-  .stage--banner .lstrip { top: 112px; }
-  .weather { top: 12px; left: 12px; padding: 5px 10px 5px 8px; }
+  .lstrip { top: 76px; max-width: 100vw; }
+  .stage--banner .lstrip { top: 136px; }
+  .weather { left: 12px; bottom: 14px; padding: 5px 10px 5px 8px; }
+  .stage:has(.dev:not(.dev__collapsed)) .weather { bottom: 190px; }
+  .mapfallback {
+    gap: 8px; padding: 8px 10px 8px 12px; text-align: left;
+  }
+  .mapfallback__retry { width: auto; }
+  .stage:has(.dev:not(.dev__collapsed)) .mapfallback { bottom: 236px; }
+}
+
+@media (min-width: 561px) and (max-width: 900px) {
+  .stage:has(.dev:not(.dev__collapsed)) .mapfallback { bottom: 190px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

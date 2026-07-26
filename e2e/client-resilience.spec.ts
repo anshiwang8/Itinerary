@@ -309,6 +309,9 @@ test.describe("@mock mutation transport", () => {
     );
     await expect(page.locator(".loading")).toHaveCount(0);
     await expect(page.locator(".topbar__go")).toBeEnabled();
+    await expect(
+      stripCard(page, "Ten O'Clock Curfew").locator(".lstrip__select")
+    ).toBeFocused();
   });
 
   test("reroute follow-up 500 clears busy and warns that the view is stale @mock", async ({
@@ -346,6 +349,9 @@ test.describe("@mock mutation transport", () => {
     );
     await expect(page.locator(".loading")).toHaveCount(0);
     await expect(page.locator(".topbar__go")).toBeEnabled();
+    await expect(
+      stripCard(page, "Ten O'Clock Curfew").locator(".lstrip__select")
+    ).toBeFocused();
   });
 
   test("a committed reroute with an interrupted response reads back saved state @mock", async ({
@@ -399,6 +405,10 @@ test.describe("@mock mutation transport", () => {
     await expect(
       page.locator(".dev").getByRole("button", { name: "cancel" })
     ).toBeEnabled();
+    await expect(
+      page.locator(".lstrip__stop").nth(1).locator(".lstrip__select"),
+      "the interrupted-response readback must focus its refreshed downstream stop"
+    ).toBeFocused();
   });
 
   test("swap rejection clears the inline busy state @mock", async ({ page }) => {
@@ -414,6 +424,9 @@ test.describe("@mock mutation transport", () => {
       { timeout: 30_000 }
     );
     await expect(page.locator(".lstrip__swapgo")).toBeEnabled();
+    await expect(
+      stripCard(page, "Velvet Fig").locator(".lstrip__select")
+    ).toBeFocused();
   });
 
   test("swap follow-up 500 clears busy and reports possible stale state @mock", async ({
@@ -448,6 +461,9 @@ test.describe("@mock mutation transport", () => {
       { timeout: 45_000 }
     );
     await expect(page.locator(".lstrip__swapgo")).toBeEnabled();
+    await expect(
+      stripCard(page, "Velvet Fig").locator(".lstrip__select")
+    ).toBeFocused();
   });
 
   test("a committed swap with an interrupted response reads back saved state @mock", async ({
@@ -494,6 +510,10 @@ test.describe("@mock mutation transport", () => {
     await expect.poll(() => readBacks).toBeGreaterThan(0);
     await expect(page.locator(".lstrip__swapgo")).toBeEnabled();
     await expect(page.locator(".topbar__go")).toBeEnabled();
+    await expect(
+      stripCard(page, "The Corner Table").locator(".lstrip__select"),
+      "the interrupted-response readback must focus the refreshed replacement id"
+    ).toBeFocused();
   });
 });
 

@@ -1,8 +1,10 @@
 "use client";
 
+import { Fragment, useEffect, useId, useRef } from "react";
 import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 import { resolveCategory } from "./api/schedule/durations";
 import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
+import { originDisplayLabel } from "./lib/locationLabels";
 
 // Horizontal itinerary strip — the primary surface, sitting just under
 // the search bar. Reads left to right like a transit-app trip view:
@@ -133,7 +135,7 @@ function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
         ? "walking leg"
         : "travel estimate";
   return (
-    <div className="lstrip__leg" aria-label={legLabel}>
+    <div className="lstrip__leg" role="listitem" aria-label={legLabel}>
       {segments.length > 0 ? (
         <BubbleStack segments={segments} />
       ) : (
@@ -189,8 +191,14 @@ export interface SwapInline {
   onText: (v: string) => void;
   onSubmit: () => void;
   submitting: boolean;
+  disabled: boolean;
   error: string | null;
   canSwap: boolean;
+}
+
+export interface StripFocusRequest {
+  stopId: string;
+  nonce: number;
 }
 
 function StopCard({
@@ -200,6 +208,8 @@ function StopCard({
   onSelect,
   swap,
   timeZone,
+  focusRequest,
+  onFocusHandled,
 }: {
   stop: StripStop;
   index: number;
@@ -207,7 +217,14 @@ function StopCard({
   onSelect: () => void;
   swap?: SwapInline | null;
   timeZone: string;
+  focusRequest?: StripFocusRequest | null;
+  onFocusHandled?: (nonce: number) => void;
 }) {
+  const selectRef = useRef<HTMLButtonElement>(null);
+  const handledFocusNonce = useRef<number | null>(null);
+  const detailsId = useId();
+  const swapInputId = useId();
+  const swapErrorId = useId();
   const price = stop.price ? PRICE_LABEL[stop.price] ?? null : null;
   const cls =
     "lstrip__stop" +
@@ -215,92 +232,149 @@ function StopCard({
     (stop.status === "active" ? " lstrip__stop--live" : "") +
     (stop.status === "completed" ? " lstrip__stop--done" : "") +
     (stop.changed ? " lstrip__stop--changed" : "");
+
+  useEffect(() => {
+    if (
+      !focusRequest ||
+      focusRequest.stopId !== stop.id ||
+      handledFocusNonce.current === focusRequest.nonce
+    ) {
+      return;
+    }
+
+    const button = selectRef.current;
+    if (!button) return;
+    button.scrollIntoView({ block: "nearest", inline: "center" });
+    button.focus({ preventScroll: true });
+    if (document.activeElement !== button) return;
+
+    handledFocusNonce.current = focusRequest.nonce;
+    onFocusHandled?.(focusRequest.nonce);
+  }, [focusRequest, onFocusHandled, stop.id]);
+
   return (
-    <div
-      className={cls}
-      role="button"
-      tabIndex={0}
-      aria-pressed={selected}
-      onClick={onSelect}
-      onKeyDown={(e) => {
-        // only keys aimed at the card itself — the inline swap input lives
-        // inside this "button", and preventDefault here would eat its spaces
-        if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
-    >
-      <div className="lstrip__stophead">
-        <span className="lstrip__num">{index + 1}</span>
-        <span className="eyebrow">{stop.category}</span>
-        {stop.status === "active" && <span className="lstrip__now">now</span>}
-      </div>
-      <div className="lstrip__name">{stop.name}</div>
-      {stop.start && stop.end && (
-        <div className="lstrip__be">
-          {stop.changed && stop.oldStart ? (
+    <div className={cls} role="listitem">
+      <button
+        ref={selectRef}
+        type="button"
+        className="lstrip__select"
+        aria-expanded={selected}
+        aria-controls={detailsId}
+        onClick={onSelect}
+      >
+        <span className="sr-only">View stop {index + 1}: </span>
+        <span className="lstrip__stophead">
+          <span className="lstrip__num" aria-hidden="true">
+            {index + 1}
+          </span>
+          <span className="eyebrow">{stop.category}</span>
+          {stop.status === "active" && <span className="lstrip__now">now</span>}
+        </span>
+        <span className="lstrip__name">{stop.name}</span>
+        {stop.start && stop.end && (
+          <span className="lstrip__be">
+            {stop.changed && stop.oldStart ? (
+              <>
+                <span className="old-time">{formatStopTime(stop.oldStart, new Date(), timeZone)}</span>
+                <span className="new-time">{formatStopTime(stop.start, new Date(), timeZone)}</span>
+              </>
+            ) : (
+              <>be here {formatStopRange(stop.start, stop.end, new Date(), timeZone)}</>
+            )}
+          </span>
+        )}
+        <span className="lstrip__facts">
+          {stop.rating != null && (
             <>
-              <span className="old-time">{formatStopTime(stop.oldStart, new Date(), timeZone)}</span>
-              <span className="new-time">{formatStopTime(stop.start, new Date(), timeZone)}</span>
+              <Stars rating={stop.rating} />
+              <span className="lstrip__rating">{stop.rating.toFixed(1)}</span>
             </>
-          ) : (
-            <>be here {formatStopRange(stop.start, stop.end, new Date(), timeZone)}</>
           )}
-        </div>
-      )}
-      <div className="lstrip__facts">
-        {stop.rating != null && (
-          <>
-            <Stars rating={stop.rating} />
-            <span className="lstrip__rating">{stop.rating.toFixed(1)}</span>
-          </>
+          {price && <span className="lstrip__price">{price}</span>}
+          {/* parks with no price data are free — say so instead of a blank
+              (keep-on-missing elsewhere: unknown price on a venue stays silent) */}
+          {!price && resolveCategory(stop.category) === "park" && (
+            <span className="lstrip__price">Free</span>
+          )}
+        </span>
+        {stop.description && <span className="lstrip__desc">{stop.description}</span>}
+      </button>
+      <div id={detailsId} hidden={!selected}>
+        {/* the reason is PICK JUSTIFICATION, never a description — labeled so
+            that on venues with no Places editorial (desc line absent) the
+            Groq-written reason can't read as a factual description */}
+        {stop.reason && (
+          <div className="lstrip__reason">
+            <span className="lstrip__why">why here</span>
+            {stop.reason}
+          </div>
         )}
-        {price && <span className="lstrip__price">{price}</span>}
-        {/* parks with no price data are free — say so instead of a blank
-            (keep-on-missing elsewhere: unknown price on a venue stays silent) */}
-        {!price && resolveCategory(stop.category) === "park" && (
-          <span className="lstrip__price">Free</span>
+        {swap?.canSwap && (
+          <form
+            className="lstrip__swap"
+            aria-label={`Change ${stop.name}`}
+            aria-busy={swap.submitting}
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!swap.disabled && swap.text.trim()) swap.onSubmit();
+            }}
+          >
+            <span
+              className="sr-only"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              {swap.submitting ? `Updating ${stop.name}…` : ""}
+            </span>
+            <label
+              className="lstrip__swaplabel"
+              htmlFor={swapInputId}
+            >
+              Not quite right?
+            </label>
+            <div className="lstrip__swaprow">
+              <input
+                id={swapInputId}
+                className="lstrip__swapinput"
+                value={swap.text}
+                disabled={swap.disabled}
+                onChange={(e) => swap.onText(e.target.value)}
+                placeholder="cheaper, an hour earlier, a patio…"
+                aria-invalid={swap.error ? true : undefined}
+                aria-describedby={swap.error ? swapErrorId : undefined}
+              />
+              <button
+                type="submit"
+                className="lstrip__swapgo"
+                disabled={swap.disabled || !swap.text.trim()}
+                aria-label={`Swap ${stop.name}`}
+              >
+                {swap.submitting ? "…" : "Swap"}
+              </button>
+            </div>
+            {swap.error && (
+              <div id={swapErrorId} className="lstrip__swaperr" role="alert">
+                {swap.error}
+              </div>
+            )}
+          </form>
         )}
       </div>
-      {stop.description && <div className="lstrip__desc">{stop.description}</div>}
-      {/* the reason is PICK JUSTIFICATION, never a description — labeled so
-          that on venues with no Places editorial (desc line absent) the
-          Groq-written reason can't read as a factual description */}
-      {selected && stop.reason && (
-        <div className="lstrip__reason">
-          <span className="lstrip__why">why here</span>
-          {stop.reason}
-        </div>
-      )}
-      {selected && swap?.canSwap && (
-        <div className="lstrip__swap" onClick={(e) => e.stopPropagation()}>
-          <div className="lstrip__swaplabel">Not quite right?</div>
-          <div className="lstrip__swaprow">
-            <input
-              className="lstrip__swapinput"
-              value={swap.text}
-              onChange={(e) => swap.onText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") swap.onSubmit();
-              }}
-              placeholder="cheaper, an hour earlier, a patio…"
-              aria-label={`Tell me what to change about ${stop.name}`}
-            />
-            <button
-              className="lstrip__swapgo"
-              onClick={swap.onSubmit}
-              disabled={swap.submitting || !swap.text.trim()}
-            >
-              {swap.submitting ? "…" : "Swap"}
-            </button>
-          </div>
-          {swap.error && <div className="lstrip__swaperr">{swap.error}</div>}
-        </div>
-      )}
     </div>
   );
+}
+
+export interface ItineraryStripProps {
+  home?: StripHome | null;
+  stops: StripStop[];
+  selected: string | null;
+  /** selects by VENUE ID — a category is not a stop identity (§7.2) */
+  onSelect: (stopId: string) => void;
+  swap?: SwapInline | null;
+  timeZone?: string;
+  focusRequest?: StripFocusRequest | null;
+  onFocusHandled?: (nonce: number) => void;
 }
 
 export default function ItineraryStrip({
@@ -310,15 +384,9 @@ export default function ItineraryStrip({
   onSelect,
   swap,
   timeZone = "America/Toronto",
-}: {
-  home?: StripHome | null;
-  stops: StripStop[];
-  selected: string | null;
-  /** selects by VENUE ID — a category is not a stop identity (§7.2) */
-  onSelect: (stopId: string) => void;
-  swap?: SwapInline | null;
-  timeZone?: string;
-}) {
+  focusRequest,
+  onFocusHandled,
+}: ItineraryStripProps) {
   if (stops.length === 0) return null;
   return (
     <div className="lstrip" role="list" aria-label="Your evening, stop by stop">
@@ -330,13 +398,15 @@ export default function ItineraryStrip({
             </svg>
             <span className="eyebrow">home</span>
           </div>
-          <div className="lstrip__name lstrip__name--home">{home.label.replace(/^Home · /, "")}</div>
+          <div className="lstrip__name lstrip__name--home">
+            {originDisplayLabel(home.label)}
+          </div>
           {home.leaveBy && <div className="lstrip__be">leave by {home.leaveBy}</div>}
         </div>
       )}
       {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} />}
       {stops.map((s, i) => (
-        <div key={s.id} className="lstrip__pair" role="listitem" style={{ display: "contents" }}>
+        <Fragment key={s.id}>
           <StopCard
             stop={s}
             index={i}
@@ -344,9 +414,11 @@ export default function ItineraryStrip({
             onSelect={() => onSelect(s.id)}
             swap={selected === s.id ? swap : null}
             timeZone={timeZone}
+            focusRequest={focusRequest}
+            onFocusHandled={onFocusHandled}
           />
           {s.legToNext && <LegCard leg={s.legToNext} timeZone={timeZone} />}
-        </div>
+        </Fragment>
       ))}
     </div>
   );

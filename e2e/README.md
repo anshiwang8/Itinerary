@@ -28,7 +28,9 @@ component therefore renders venue chips on its deterministic fallback
 projection without burning Maps quota. `maps-resilience.spec.ts` intercepts
 the Maps script locally to prove both provider-signalled invalid-key fallback
 and blocked-script recovery through Retry and a real component remount. Fonts
-are served from the application bundle; no Google Fonts request is required.
+are served from the application bundle; accessibility coverage waits for both
+families, verifies them through `document.fonts`, and asserts zero requests to
+Google Fonts hosts.
 The same harness proves an `unknown` travel estimate creates no confident
 straight map polyline.
 
@@ -118,6 +120,13 @@ All of the above are pinned exact-text in `failloud.spec.ts`.
 - `fixtures.spec.ts` (@mock) — guards the seam: deterministic picks,
   fixture transit line, canned weather, and a visible/readable accessible
   caution on every walking leg.
+- `mobile.spec.ts` (@mock) — rendered geometry and screenshots at 320, 375,
+  390, and 768 px: editable non-overlapping landing inputs, horizontal mobile
+  dividers, 44 px targets, no page-level overflow/chrome collision, intentional
+  strip scrolling, and viewport-contained map chips.
+- `accessibility.spec.ts` (@mock) — axe A/AA scans, keyboard-only stop/swap
+  operation, native non-nested semantics, live/error regions, focus restoration
+  after swaps/reroutes, and locally bundled font verification.
 - `failloud.spec.ts` (@mock) — every bad-input message pinned exact-text
   (impossible times, contradictions incl. dietary-vs-venue, gibberish,
   weather net, unmet constraint + the positive vegan pick).
