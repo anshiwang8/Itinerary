@@ -3,6 +3,7 @@ import type { Selection } from "../api/select/selectVenues";
 import type { TravelLeg, TransitSummary } from "../api/schedule/travel";
 import type { CurrentOpeningHours } from "../api/places/search/hours";
 import type { DropEntry, ParsedPrompt, Place } from "../api/places/search/filter";
+import type { PlanIntent } from "../api/parse/planner";
 import type {
   GeocodeBounds,
   GeocodeCandidate,
@@ -338,6 +339,73 @@ export function parseParsedPayload(value: unknown): ParsedPrompt {
     throw new Error("invalid parsed prompt");
   }
   return parsed as unknown as ParsedPrompt;
+}
+
+/**
+ * The PLANNER envelope: `{ plan, parsed }`. The server has already run the
+ * plan through its own validator, so this is the client-boundary runtime
+ * check every other payload gets — shape only, no re-litigating bounds.
+ */
+export function parsePlanPayload(value: unknown): {
+  plan: PlanIntent;
+  parsed: ParsedPrompt;
+} {
+  const data = record(value);
+  const parsed = parseParsedPayload(data.parsed);
+  const plan = record(data.plan);
+
+  if (
+    !Array.isArray(plan.activities) ||
+    plan.activities.length === 0 ||
+    !plan.activities.every((entry) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+      const a = entry as JsonRecord;
+      return (
+        typeof a.slot === "number" &&
+        Number.isInteger(a.slot) &&
+        typeof a.intent === "string" &&
+        typeof a.searchQuery === "string" &&
+        a.searchQuery.trim() !== "" &&
+        typeof a.estimatedMinutes === "number" &&
+        Number.isFinite(a.estimatedMinutes) &&
+        typeof a.confident === "boolean"
+      );
+    })
+  ) {
+    throw new Error("invalid plan activities");
+  }
+
+  const timeIntent = record(plan.timeIntent);
+  if (
+    !nullableString(timeIntent.startISO) ||
+    !nullableString(timeIntent.endISO) ||
+    typeof timeIntent.label !== "string" ||
+    !["explicit", "relative", "unspecified"].includes(String(timeIntent.kind))
+  ) {
+    throw new Error("invalid plan timeIntent");
+  }
+
+  if (
+    !Array.isArray(plan.questions) ||
+    !plan.questions.every((entry) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+      const q = entry as JsonRecord;
+      return (
+        typeof q.id === "string" &&
+        q.id !== "" &&
+        typeof q.question === "string" &&
+        q.question !== "" &&
+        strings(q.options) &&
+        (q.appliesToSlot === null ||
+          (typeof q.appliesToSlot === "number" && Number.isInteger(q.appliesToSlot)))
+      );
+    })
+  ) {
+    throw new Error("invalid plan questions");
+  }
+
+  record(plan.context);
+  return { plan: plan as unknown as PlanIntent, parsed };
 }
 
 export function parseGeocodePayload(value: unknown): GeocodeOutcome {

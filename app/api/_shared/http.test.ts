@@ -171,7 +171,9 @@ const cases: Array<[string, () => Promise<void>]> = [
         "x-forwarded-for": "198.51.100.25",
       });
       const ctx = requestContext(request, "parse");
-      for (let i = 0; i < 60; i++) enforceRateLimit(ctx, 60);
+      // /api/parse allows 120: one PLAN can cost two calls to it (the
+      // proposal, then the answered second pass). Fill the real bucket.
+      for (let i = 0; i < 120; i++) enforceRateLimit(ctx, 120);
 
       const realFetch = globalThis.fetch;
       let providerCalls = 0;

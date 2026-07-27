@@ -5,13 +5,8 @@
 // America/Toronto). "now", "today", "which hour" and the ISO output are
 // all computed in THAT zone via app/lib/zoneTime — never the server's
 // wall clock. Toronto plans are byte-identical to the pre-Phase-5 code.
-import {
-  CurrentOpeningHours,
-  parseClockTime,
-  parseTargetTime,
-} from "../places/search/hours";
+import { CurrentOpeningHours, parseClockTime } from "../places/search/hours";
 import { getDuration } from "./durations";
-import { isParkLike } from "../../lib/categoryTraits";
 import { TravelLeg } from "./travel";
 import {
   DEFAULT_ZONE,

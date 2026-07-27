@@ -51,6 +51,54 @@ export function parsePromptBody(value: unknown): string {
   return boundedString(value.prompt, "prompt", REQUEST_LIMITS.promptChars);
 }
 
+/** One answered clarifying question, echoed back for the second planner pass. */
+export interface PlannerAnswerInput {
+  question: string;
+  answer: string;
+}
+
+export interface PlannerRequest {
+  prompt: string;
+  /** the plan's resolved IANA zone — the planner reasons about "tonight"
+   *  against the PLAN's clock, so the client geocodes before it parses */
+  timeZone?: string;
+  /** the client's current instant. The planner is the first stage that needs
+   *  to know what "now" is, and the app already resolves start times from the
+   *  browser clock (page.tsx passes `new Date()` into every resolver) — so
+   *  accepting it here matches the existing trust model rather than widening
+   *  it, and keeps the e2e clock-freeze seam working. Defaults to the
+   *  server clock when absent. */
+  nowISO?: string;
+  city?: string;
+  answers?: PlannerAnswerInput[];
+}
+
+export function parsePlannerBody(value: unknown): PlannerRequest {
+  if (!isRecord(value)) badRequest("Request body must be a JSON object.");
+  const request: PlannerRequest = {
+    prompt: boundedString(value.prompt, "prompt", REQUEST_LIMITS.promptChars),
+  };
+  const timeZone = parseOptionalTimeZone(value.timeZone);
+  if (timeZone) request.timeZone = timeZone;
+  const nowISO = parseOptionalInstant(value.nowISO, "nowISO");
+  if (nowISO) request.nowISO = nowISO;
+  const city = optionalString(value.city, "city");
+  if (city) request.city = city;
+  if (value.answers !== undefined) {
+    if (!Array.isArray(value.answers) || value.answers.length > REQUEST_LIMITS.categories) {
+      badRequest(`\`answers\` must be an array with at most ${REQUEST_LIMITS.categories} entries.`);
+    }
+    request.answers = value.answers.map((entry, index) => {
+      if (!isRecord(entry)) badRequest(`\`answers[${index}]\` must be an object.`);
+      return {
+        question: boundedString(entry.question, `answers[${index}].question`),
+        answer: boundedString(entry.answer, `answers[${index}].answer`, REQUEST_LIMITS.refinementChars),
+      };
+    });
+  }
+  return request;
+}
+
 export function parseRefinement(value: unknown): string {
   return boundedString(value, "refinement", REQUEST_LIMITS.refinementChars);
 }

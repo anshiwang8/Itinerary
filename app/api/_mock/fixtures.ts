@@ -19,6 +19,12 @@ import type { GeocodeRequest } from "../geocode/geocode";
 import type { CurrentOpeningHours } from "../places/search/hours";
 import type { LatLng, TravelLeg } from "../schedule/travel";
 import type { Selection, SelectModelCall } from "../select/selectVenues";
+import { GENERAL_CATEGORY, isGeneralCategory } from "../places/search/searchPlaces";
+import {
+  instantAtWallClock,
+  nextFullHourInZone,
+  toZonedISO,
+} from "../../lib/zoneTime";
 import { parseBudget } from "../../lib/budget";
 import {
   normalizeConstraints,
@@ -292,14 +298,228 @@ export function mockPools(categories: string[], parsed?: ParsedPrompt): Record<s
     parsed?.location && parsed.location.trim() && parsed.location.trim().toLowerCase() !== "unspecified"
   );
   if (cats.length === 0) return { general: genericPool("general") };
-  return Object.fromEntries(cats.map((c) => [c, poolFor(c, hasNeighbourhood)]));
+  return Object.fromEntries(
+    cats.map((c) => [
+      c,
+      // production expands the NAMED general category into the same broad
+      // union the categoryless path uses; the fixture mirrors that by
+      // serving the "general" pool for it, so a vague plan keeps its
+      // recognizable Fixture General venues
+      isGeneralCategory(c) ? genericPool("general") : poolFor(c, hasNeighbourhood),
+    ])
+  );
 }
 
-// ── parse: keyword scan, deterministic, schema-complete. Nothing
-// recognized → the all-unspecified signature (what the real model returns
-// for nonsense), so the unparseable guard is exercisable in mock mode. ──
-export function mockParse(prompt: string): ParsedPrompt {
+// ── planner: keyword scan → the PLANNER contract, deterministic. The
+// fixture stands in for the MODEL only; the response it returns still goes
+// through the production validator (findPlanProblems → coerce → floors) in
+// the parse route, exactly like a live Groq answer would. Nothing
+// recognized → one general activity plus the broad questions, which is what
+// the real planner returns for a vague prompt.
+//
+// It also has to carry the JUDGMENT the retired rule tables used to make —
+// which activities are too generic to search well, and what hour an
+// unstated "dinner" implies. Those judgments are the model's job now, so
+// they live in the fixture model, never back in production code.
+
+/** Which searchQueries are still too vague, and the question that pins each
+ *  down. Lifted from the retired clarify.ts GENERIC_RULES: same product
+ *  behaviour, now sourced from the "model" rather than a code table. */
+const MOCK_VAGUE_RULES: Array<{
+  id: string;
+  generic: RegExp;
+  specific: RegExp;
+  question: string;
+  options: string[];
+  /** how the answer folds back: a cuisine MODIFIES ("Italian" + "dinner"),
+   *  an activity/venue type REPLACES ("cocktail bar") */
+  mode: "prefix" | "replace";
+}> = [
+  {
+    id: "food-type",
+    generic: /^(restaurants?|dinner|lunch|food|meal)$/i,
+    specific:
+      /italian|japanese|mexican|chinese|thai|indian|korean|vietnamese|french|greek|mediterranean|american|bbq|barbecue|seafood|sushi|ramen|pizza|taco|burger|noodle|pho|steak|dumpling|shawarma|curry|pasta|izakaya|brunch|breakfast|fast food|vegan|vegetarian/i,
+    question: "What are you craving?",
+    options: [
+      "Italian", "Japanese", "Mexican", "Chinese", "Thai", "Indian", "Mediterranean", "BBQ",
+    ],
+    mode: "prefix",
+  },
+  {
+    id: "kind",
+    generic: /^(things to do|something to do|entertainment|activity|activities)$/i,
+    specific:
+      /arcade|bowling|mini ?golf|escape room|movie|cinema|museum|galler|comedy|live music|karaoke|axe|climbing|skating/i,
+    question: "What kind of thing?",
+    options: ["food", "drinks", "something to do", "outdoors"],
+    mode: "replace",
+  },
+  {
+    id: "bar-type",
+    generic: /^(bars?|drinks?)$/i,
+    specific: /cocktail|sports bar|dive|wine|brewery|rooftop|speakeasy|pub|club|izakaya/i,
+    question: "What kind of bar?",
+    options: [
+      "cocktail bar", "sports bar", "dive bar", "wine bar", "brewery", "rooftop bar",
+    ],
+    mode: "replace",
+  },
+];
+
+/** "food" / "drinks" / "outdoors" → a searchable place kind, the same map
+ *  the retired categoriesForKindAnswer used. Free text passes through. */
+function mockKindAnswer(answer: string): string {
+  const a = answer.trim().toLowerCase();
+  if (a === "food") return "restaurant";
+  if (a === "drinks") return "bar";
+  if (a === "outdoors") return "park";
+  if (a === "something to do") return GENERAL_CATEGORY;
+  return answer.trim();
+}
+
+/** Rough dwell per activity — the model's estimate, not a lookup the
+ *  scheduler owns. Production clamps whatever comes back to 15-360. */
+const MOCK_MINUTES: Array<[RegExp, number]> = [
+  [/coffee|caf[eé]/i, 45],
+  [/dessert|ice ?cream|gelato|bao/i, 40],
+  [/park|walk|beach|garden/i, 45],
+  [/galler|museum/i, 90],
+  [/bar|drink|pub|cocktail/i, 70],
+  [/dinner|restaurant|sushi|ramen|dumpling|steak|brunch|lunch|food/i, 105],
+];
+function mockMinutes(query: string): number {
+  return MOCK_MINUTES.find(([pattern]) => pattern.test(query))?.[1] ?? 90;
+}
+
+/** The hour an activity IMPLIES when the user stated no time. This is the
+ *  semantic judgment CATEGORY_START_DEFAULTS used to hardcode in the
+ *  scheduler — the planner makes it now, so the fixture makes it here.
+ *  Earliest implied hour across the activities wins, like the old anchor. */
+const MOCK_IMPLIED_HOUR: Array<[RegExp, { hour: number; minute: number }]> = [
+  [/breakfast/i, { hour: 9, minute: 0 }],
+  [/brunch/i, { hour: 10, minute: 30 }],
+  [/coffee|caf[eé]/i, { hour: 10, minute: 0 }],
+  [/lunch/i, { hour: 12, minute: 0 }],
+  [/park|walk|beach|garden/i, { hour: 14, minute: 0 }],
+  [/galler|museum/i, { hour: 14, minute: 0 }],
+  [/dessert/i, { hour: 20, minute: 0 }],
+  [/bar|drink|pub|cocktail/i, { hour: 20, minute: 0 }],
+  [/dinner|restaurant|sushi|ramen|dumpling|steak|food|eat/i, { hour: 19, minute: 0 }],
+];
+function mockImpliedTime(queries: string[]): { hour: number; minute: number } | null {
+  let best: { hour: number; minute: number } | null = null;
+  for (const query of queries) {
+    const hit = MOCK_IMPLIED_HOUR.find(([pattern]) => pattern.test(query))?.[1];
+    if (!hit) continue;
+    if (!best || hit.hour * 60 + hit.minute < best.hour * 60 + best.minute) best = hit;
+  }
+  return best;
+}
+
+interface MockTime {
+  startISO: string | null;
+  endISO: string | null;
+  kind: "explicit" | "relative" | "unspecified";
+  label: string;
+}
+
+/** Clock-time resolution for the fixture model. Meridiem wins; a bare hour
+ *  reads as afternoon/evening on an outing planner (1-11 → +12), the same
+ *  convention the swap engine's parseTimeExpr uses. */
+function mockClock(hour: number, minute: number, ap: string | undefined): { hour: number; minute: number } {
+  let h = hour;
+  if (ap === "pm" && h < 12) h += 12;
+  else if (ap === "am" && h === 12) h = 0;
+  else if (!ap && h >= 1 && h <= 11) h += 12;
+  return { hour: h % 24, minute };
+}
+
+function mockTime(p: string, queries: string[], now: Date, timeZone: string): MockTime {
+  const dayOffset = /\btomorrow\b/.test(p) ? 1 : 0;
+  const at = (hour: number, minute: number, roll: boolean) =>
+    toZonedISO(instantAtWallClock(now, timeZone, hour, minute, dayOffset, roll), timeZone);
+
+  // a stated RANGE ("3-8pm", "from 3 to 8") — start and end together
+  const range = p.match(
+    /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|–|—|to|until|till)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/
+  );
+  if (range) {
+    const endAp = range[6];
+    // "3-8pm": the trailing meridiem governs both ends
+    const start = mockClock(Number(range[1]), Number(range[2] ?? 0), range[3] ?? endAp);
+    const end = mockClock(Number(range[4]), Number(range[5] ?? 0), endAp);
+    return {
+      startISO: at(start.hour, start.minute, dayOffset === 0),
+      endISO: at(end.hour, end.minute, dayOffset === 0),
+      kind: "explicit",
+      label: range[0],
+    };
+  }
+
+  const clock = p.match(/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
+  if (clock) {
+    const t = mockClock(Number(clock[1]), Number(clock[2] ?? 0), clock[3]);
+    return {
+      startISO: at(t.hour, t.minute, dayOffset === 0),
+      endISO: null,
+      kind: "explicit",
+      label: clock[0].trim(),
+    };
+  }
+  if (/\bmidnight\b/.test(p)) {
+    return { startISO: at(0, 0, true), endISO: null, kind: "relative", label: "midnight" };
+  }
+
+  const dayPart: Array<[RegExp, { hour: number; label: string }]> = [
+    [/tonight/, { hour: 20, label: "tonight" }],
+    [/evening/, { hour: 19, label: "evening" }],
+    [/afternoon/, { hour: 14, label: "afternoon" }],
+    [/morning/, { hour: 10, label: "morning" }],
+    [/\bnight\b/, { hour: 20, label: "night" }],
+  ];
+  for (const [pattern, part] of dayPart) {
+    if (pattern.test(p)) {
+      return {
+        startISO: at(part.hour, 0, dayOffset === 0),
+        endISO: null,
+        kind: "relative",
+        label: dayOffset ? `tomorrow ${part.label}` : part.label,
+      };
+    }
+  }
+
+  // no stated time: the ACTIVITIES imply one ("dinner" means evening)
+  const implied = mockImpliedTime(queries);
+  if (implied) {
+    return {
+      startISO: at(implied.hour, implied.minute, dayOffset === 0),
+      endISO: null,
+      kind: "relative",
+      label: dayOffset ? "tomorrow" : "unspecified",
+    };
+  }
+  if (dayOffset === 1) {
+    return { startISO: at(11, 0, false), endISO: null, kind: "relative", label: "tomorrow" };
+  }
+  return { startISO: null, endISO: null, kind: "unspecified", label: "unspecified" };
+}
+
+export interface MockPlannerAnswer {
+  question: string;
+  answer: string;
+}
+
+export function mockPlan(
+  prompt: string,
+  now: Date,
+  timeZone: string,
+  answers: MockPlannerAnswer[] = []
+): Record<string, unknown> {
   const p = prompt.toLowerCase();
+  // Deliberate malformed-output trigger: proves the production retry and
+  // deterministic fallback in mock e2e without a live model.
+  if (/fixture-badplan/.test(p)) return { activities: "not an array" };
   const signals: string[] = [];
   if (/brunch/.test(p)) signals.push("brunch");
   if (/steak/.test(p)) signals.push("steakhouse");
@@ -344,39 +564,26 @@ export function mockParse(prompt: string): ParsedPrompt {
     signals.push("park walk");
   }
 
-  const clock = p.match(/\d{1,2}(?::\d{2})?\s*(?:am|pm)/);
-  const qualifier = p.match(
-    /\b(?:today|tomorrow|next\s+(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)|sunday|monday|tuesday|wednesday|thursday|friday|saturday|\d{4}-\d{1,2}-\d{1,2}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:,\s*\d{4})?)\b/
-  );
-  const dayPart = /tonight/.test(p)
-    ? "tonight"
-    : /evening/.test(p)
-    ? "evening"
-    : /afternoon/.test(p)
-    ? "afternoon"
-    : /morning/.test(p)
-    ? "morning"
-    : null;
-  const time_window =
-    [qualifier?.[0], clock?.[0] ?? dayPart].filter(Boolean).join(", ") ||
-    "unspecified";
-
+  // A stated COUNT wins: the planner emits exactly that many activities,
+  // repeating the stated kind or falling back to the general one. There is
+  // no stop_count on the wire any more — the activity LIST is the answer.
   const countWords: Record<string, number> = {
-    one: 1,
-    two: 2,
-    three: 3,
-    four: 4,
-    five: 5,
-    six: 6,
-    seven: 7,
-    eight: 8,
+    one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
   };
   const countMatch = p.match(
-    /\b(one|two|three|four|five|six|seven|eight|\d+)\s+(?:stops?|places?|coffee shops?|caf[eé]s?|bars?)\b/
+    /\b(one|two|three|four|five|six|seven|eight|\d+)\s+(?:stops?|places?|activit(?:y|ies)|things?|coffee shops?|caf[eé]s?|bars?)\b/
   );
-  const stop_count = countMatch
-    ? countWords[countMatch[1]] ?? Number(countMatch[1])
-    : null;
+  const stated = countMatch ? countWords[countMatch[1]] ?? Number(countMatch[1]) : null;
+  const count = stated && stated >= 1 && stated <= 8 ? stated : null;
+
+  let queries = signals.length > 0 ? signals : [GENERAL_CATEGORY];
+  if (count) {
+    // repeat the single stated kind, or pad the general one out to the count
+    queries =
+      queries.length === count
+        ? queries
+        : Array.from({ length: count }, (_, i) => queries[Math.min(i, queries.length - 1)]);
+  }
 
   const constraints: string[] = [];
   if (/patio/.test(p)) constraints.push("patio");
@@ -393,16 +600,129 @@ export function mockParse(prompt: string): ParsedPrompt {
     numericBudget?.[0] ??
     symbolicBudget?.[1] ??
     (/\b(?:cheap|budget)\b/.test(p) ? "cheap" : null);
+  let aesthetic = /fancy|upscale|fine dining/.test(p) ? "fancy" : "unspecified";
+
+  // ── which activities are still too vague, and the one question each ──
+  const vagueRuleFor = (query: string) =>
+    MOCK_VAGUE_RULES.find(
+      (rule) =>
+        rule.generic.test(query.trim()) &&
+        !rule.specific.test(`${query} ${constraints.join(" ")}`)
+    ) ?? null;
+
+  let time = mockTime(p, queries, now, timeZone);
+
+  // ── fold the answers in (the SECOND planner pass) ──
+  // One answer resolves every slot sharing that searchQuery — the same rule
+  // the validator uses for question coverage.
+  for (const { question, answer } of answers) {
+    const text = (answer ?? "").trim();
+    if (!text) continue;
+    if (question === "When?") {
+      const a = text.toLowerCase();
+      const resolved =
+        a === "now"
+          ? { hour: -1, minute: 0 }
+          : a === "this afternoon"
+          ? { hour: 14, minute: 0 }
+          : a === "this evening"
+          ? { hour: 19, minute: 0 }
+          : null;
+      time = resolved
+        ? resolved.hour < 0
+          ? {
+              startISO: toZonedISO(nextFullHourInZone(now, timeZone), timeZone),
+              endISO: null,
+              kind: "relative",
+              label: "now",
+            }
+          : {
+              startISO: toZonedISO(
+                instantAtWallClock(now, timeZone, resolved.hour, resolved.minute, 0, true),
+                timeZone
+              ),
+              endISO: null,
+              kind: "relative",
+              label: a,
+            }
+        : mockTime(text.toLowerCase(), queries, now, timeZone);
+      continue;
+    }
+    if (/vibe/i.test(question)) {
+      aesthetic = text;
+      continue;
+    }
+    const rule = MOCK_VAGUE_RULES.find((r) => r.question === question);
+    if (!rule) continue;
+    queries = queries.map((query) =>
+      vagueRuleFor(query)?.id === rule.id
+        ? rule.mode === "prefix"
+          ? `${text} ${query}`
+          : rule.id === "kind"
+          ? mockKindAnswer(text)
+          : text
+        : query
+    );
+    // an answered time-implied activity can move the anchor ("food" → 7 PM)
+    if (time.kind === "unspecified") time = mockTime(p, queries, now, timeZone);
+  }
+
+  const activities = queries.map((query, slot) => ({
+    slot,
+    intent: query,
+    searchQuery: query,
+    estimatedMinutes: mockMinutes(query),
+    // ONE round: on the second pass the plan is final, so nothing is left
+    // "unconfident" even if the answer landed on a still-broad kind
+    // ("drinks" → "bar"). Re-asking would be a second round.
+    confident: answers.length > 0 || vagueRuleFor(query) === null,
+  }));
+
+  const questions: Array<Record<string, unknown>> = [];
+  if (answers.length === 0) {
+    const asked = new Set<string>();
+    activities.forEach((activity) => {
+      const rule = vagueRuleFor(activity.searchQuery);
+      if (!rule || asked.has(rule.id)) return;
+      asked.add(rule.id);
+      questions.push({
+        id: rule.id,
+        question: rule.question,
+        options: rule.options,
+        appliesToSlot: activity.slot,
+      });
+    });
+    if (time.kind === "unspecified") {
+      questions.push({
+        id: "when",
+        question: "When?",
+        options: ["now", "this afternoon", "this evening", "pick a time"],
+        appliesToSlot: null,
+      });
+    }
+    // the vibe question rides along ONLY when something else is already
+    // being asked — a fully specified request gets no questions at all
+    if (questions.length > 0 && aesthetic === "unspecified" && constraints.length === 0) {
+      questions.push({
+        id: "vibe",
+        question: "What kind of vibe are you going for?",
+        options: ["cozy", "lively", "quiet"],
+        appliesToSlot: null,
+      });
+    }
+  }
 
   return {
-    time_window,
-    stop_count,
-    aesthetic: /fancy|upscale|fine dining/.test(p) ? "fancy" : "unspecified",
-    category_signals: signals,
-    group_context: "unspecified",
-    budget,
-    constraints,
-    location: "Ossington",
+    activities,
+    timeIntent: time,
+    questions,
+    context: {
+      aesthetic,
+      groupContext: "unspecified",
+      budget,
+      constraints,
+      location: "Ossington",
+    },
   };
 }
 

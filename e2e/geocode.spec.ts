@@ -106,8 +106,10 @@ test("@mock an ambiguous city pauses before search and resumes from the explicit
   await page.getByLabel("Describe your evening").fill("dinner and drinks at 7pm");
   await page.getByLabel("City").fill("London");
   await page.getByRole("button", { name: "Plan it" }).click();
-  await dismissClarifyIfShown(page);
-
+  // REORDERED 2026-07-27 (planner): the geocode now runs BEFORE the parse,
+  // because the planner has to be told which clock "tonight" means. So the
+  // ambiguity panel is the FIRST thing shown, and any clarify round comes
+  // after the choice — the dismissal moved down accordingly.
   await expect(
     page.getByRole("group", { name: "Choose the city you meant" })
   ).toBeVisible();
@@ -120,6 +122,7 @@ test("@mock an ambiguous city pauses before search and resumes from the explicit
   expect(placesCalls).toBe(0);
 
   await page.getByRole("button", { name: "Use London, ON, Canada" }).click();
+  await dismissClarifyIfShown(page);
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 90_000 });
   await expect(page.locator(".lstrip__name--home")).toContainText(
     "London, ON, Canada"
@@ -187,8 +190,6 @@ test("@mock an ambiguous address receives city context and preserves the selecte
   await page.getByLabel("Describe your evening").fill("dinner and drinks at 7pm");
   await page.getByLabel("Starting address").fill("100 Queen Street");
   await page.getByRole("button", { name: "Plan it" }).click();
-  await dismissClarifyIfShown(page);
-
   await expect(
     page.getByRole("group", { name: "Choose your starting address" })
   ).toBeVisible();
@@ -203,6 +204,7 @@ test("@mock an ambiguous address receives city context and preserves the selecte
       name: "Use 100 Queen St E, Toronto, ON, Canada",
     })
     .click();
+  await dismissClarifyIfShown(page);
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 90_000 });
   await expect(page.locator(".lstrip__name--home")).toContainText(
     "100 Queen St E, Toronto, ON, Canada"

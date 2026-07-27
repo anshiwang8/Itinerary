@@ -59,8 +59,15 @@ export const SEARCH_FIELD_MASK = SEARCH_FIELD_MASK_FIELDS.join(",");
 
 /** Public request schemas allow at most eight categories. A late-night plan
  * runs two variants per distinct category, so one searchPools call is bounded
- * at sixteen provider calls (the general pool uses five). */
+ * at sixteen provider calls (the general pool uses five). The NAMED general
+ * category (GENERAL_CATEGORY) also expands to that five-query union in place
+ * of its own two variants, so the worst case is seven named late-night
+ * categories plus one general union: nineteen. Request-scoped dedupe usually
+ * makes it fewer — the union's "bar" and "late night food" queries collide
+ * with any named bar/food category in the same attempt. */
 export const MAX_PROVIDER_CALLS_PER_SEARCH = REQUEST_LIMITS.categories * 2;
+export const MAX_PROVIDER_CALLS_WITH_GENERAL_POOL =
+  (REQUEST_LIMITS.categories - 1) * 2 + 5;
 
 // e.g. aesthetic="lively night out", category="bar", location="Ossington",
 // city="Toronto" → "lively night out bar Ossington Toronto".
@@ -200,6 +207,21 @@ export const GENERAL_QUERIES = [
   "entertainment",
 ];
 
+/**
+ * The NAMED vague category. Before the planner, a vague prompt reached here
+ * as an EMPTY category list and the general union was keyed "general". The
+ * planner always emits at least one activity, so an unresolved "something
+ * to do" now arrives as this literal searchQuery — and it must still get
+ * the union, not a single "things to do" text search (that skews hard to
+ * daytime attractions, which is the whole reason GENERAL_QUERIES exists).
+ * The empty-list path below is unchanged for reroute/recovery callers.
+ */
+export const GENERAL_CATEGORY = "things to do";
+
+export function isGeneralCategory(category: string): boolean {
+  return category.trim().toLowerCase() === GENERAL_CATEGORY;
+}
+
 /** Merge pools, first occurrence wins (queries overlap on popular venues). */
 function dedupeById(places: Place[]): Place[] {
   const seen = new Set<string>();
@@ -297,8 +319,13 @@ export async function searchPools(
   // variant; the primary query goes first so its results win the dedupe.
   // A category that already says "late night" needs no doubled
   // "late night late night …" sibling.
+  // The named vague category expands to the same day-and-night union the
+  // categoryless path uses; anything else keeps its one query (plus the
+  // late-night sibling). The union is already broad, so it never doubles.
   const queriesFor = (category: string): string[] =>
-    opts.lateNight && !/\blate[\s-]+night\b/i.test(category)
+    isGeneralCategory(category)
+      ? GENERAL_QUERIES.map((q) => buildQuery(parsed, q))
+      : opts.lateNight && !/\blate[\s-]+night\b/i.test(category)
       ? [buildQuery(parsed, category), buildQuery(parsed, `late night ${category}`)]
       : [buildQuery(parsed, category)];
 

@@ -298,7 +298,9 @@ test("planning progress is polite and a failed request becomes an accessible ale
   await page.getByRole("button", { name: "Plan it" }).click();
   await parseSeen;
   try {
-    await expect(page.getByRole("status")).toHaveText("Reading your evening…");
+    // the planner step announces itself as "Shaping your day…" (the
+    // parse became a planner on 2026-07-27)
+    await expect(page.getByRole("status")).toHaveText("Shaping your day…");
   } finally {
     releaseParse();
   }

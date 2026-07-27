@@ -130,9 +130,11 @@ test("vague-but-sincere prompt: clarify shows, answering lands a general itinera
   await expect(clarify).toContainText("When?");
   await expect(clarify).toContainText("vibe");
 
-  // answer "later today" (deterministic evening anchor at any run hour),
-  // leave kind/vibe blank — Go continues on the general pool
-  await clarify.getByRole("button", { name: "later today" }).click();
+  // answer "this evening" (deterministic evening anchor at any run hour),
+  // leave kind/vibe blank — Go continues on the general pool. The WHEN
+  // options changed with the planner: now / this afternoon / this evening
+  // / pick a time.
+  await clarify.getByRole("button", { name: "this evening" }).click();
   await clarify.getByRole("button", { name: "Go", exact: true }).click();
 
   // the general "things to do" pool serves the itinerary — a real plan,
@@ -142,7 +144,15 @@ test("vague-but-sincere prompt: clarify shows, answering lands a general itinera
   await expectStripMatchesPin(page, "Fixture General One");
 });
 
-test("an exact stop count cannot bypass kind clarification and produces every stop @mock", async ({ page }) => {
+// REWRITTEN 2026-07-27 (planner). This used to assert that BOTH escape
+// hatches (Skip and a blank Go) were REFUSED until the user named a kind —
+// a mandatory gate that came from stop_count needing a distribution before
+// planSlots could resolve. The planner emits the activity list directly, so
+// there is no unresolved count to gate on, and refusing to plan for someone
+// who declined to answer is exactly the behaviour this whole change exists
+// to remove. Skipping now produces a real three-stop plan; answering steers
+// it. Both are pinned below.
+test("an exact stop count produces every stop, whether or not the kind is answered @mock", async ({ page }) => {
   await page.goto("/");
   await page.locator(".prompt__input").fill("exactly three places at 7pm");
   await page.locator(".prompt__go").click();
@@ -151,21 +161,26 @@ test("an exact stop count cannot bypass kind clarification and produces every st
   await expect(clarify).toBeVisible({ timeout: 30_000 });
   await expect(clarify).toContainText("What kind of thing?");
 
-  // Both escape hatches must refuse to bypass the required kind answer:
-  // the accessible label is intentionally "Skip — just plan it".
+  // SKIPPING still plans — three stops from the general pool
   await clarify.locator(".clarify__skip").click();
-  await expect(clarify).toBeVisible();
-  await clarify.getByRole("button", { name: "Go", exact: true }).click();
-  await expect(clarify).toBeVisible();
+  await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+  const skipped = await page.locator(".lstrip__stop .lstrip__name").allInnerTexts();
+  expect(skipped).toHaveLength(3);
+  expect(new Set(skipped).size).toBe(3);
+  for (const name of skipped) await expectStripMatchesPin(page, name);
 
+  // and ANSWERING produces three stops too, of the kind that was chosen
+  await page.locator(".topbar__input").fill("exactly three places at 7pm");
+  await page.locator(".topbar__go").click();
+  await expect(clarify).toBeVisible({ timeout: 30_000 });
   await clarify.getByRole("button", { name: "something to do", exact: true }).click();
   await clarify.getByRole("button", { name: "Go", exact: true }).click();
 
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
-  const names = await page.locator(".lstrip__stop .lstrip__name").allInnerTexts();
-  expect(names).toHaveLength(3);
-  expect(new Set(names).size).toBe(3);
-  for (const name of names) await expectStripMatchesPin(page, name);
+  const answered = await page.locator(".lstrip__stop .lstrip__name").allInnerTexts();
+  expect(answered).toHaveLength(3);
+  expect(new Set(answered).size).toBe(3);
+  for (const name of answered) await expectStripMatchesPin(page, name);
 });
 
 test("clarify: the KIND answer steers the plan, and repeated answers don't leak @mock", async ({ page }) => {
@@ -177,7 +192,7 @@ test("clarify: the KIND answer steers the plan, and repeated answers don't leak 
   const clarify = page.locator(".clarify");
   await expect(clarify).toBeVisible({ timeout: 30_000 });
   await clarify.getByRole("button", { name: "drinks", exact: true }).click();
-  await clarify.getByRole("button", { name: "later today" }).click();
+  await clarify.getByRole("button", { name: "this evening" }).click();
   await clarify.getByRole("button", { name: "Go", exact: true }).click();
 
   // "drinks" → the bar pool, NOT the general fixture pool
@@ -194,7 +209,7 @@ test("clarify: the KIND answer steers the plan, and repeated answers don't leak 
   // the kind question is asked AGAIN → the parse is vague again, not "bar"
   await expect(clarify).toContainText("What kind of thing?");
   await clarify.getByRole("button", { name: "outdoors", exact: true }).click();
-  await clarify.getByRole("button", { name: "later today" }).click();
+  await clarify.getByRole("button", { name: "this evening" }).click();
   await clarify.getByRole("button", { name: "Go", exact: true }).click();
   // now a park plan — the previous "drinks" answer left no trace
   await expect(page.locator(".lstrip__stop .eyebrow").first()).toHaveText(/park/i);

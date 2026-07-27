@@ -1,12 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import {
-  buildSchedule,
-  resolveStartTime,
-  resolveStartTimeChecked,
-  ScheduledStop,
-} from "./api/schedule/schedule";
+import { buildSchedule, ScheduledStop } from "./api/schedule/schedule";
 import { TravelLeg } from "./api/schedule/travel";
 import { HOME, splitHomeLeg } from "./api/schedule/home";
 import { Itinerary } from "./api/itinerary/store";
@@ -26,18 +21,11 @@ import {
   widenOfferLabel,
 } from "./lib/planGuards";
 import {
-  applyNarrowAnswer,
-  categoriesForKindAnswer,
-  ClarifyQuestion,
-  clarifyQuestions,
-  kindQuestion,
-  timeWindowForWhenAnswer,
-} from "./lib/clarify";
-import {
-  finalizeRequestedSlots,
-  resolveRequestedSlots,
-  slotsFromDistributionAnswer,
-} from "./lib/planSlots";
+  planStartInstant,
+  type PlanIntent,
+  type PlannerAnswer,
+  type PlannerQuestion,
+} from "./api/parse/planner";
 import type { Selection } from "./api/select/selectVenues";
 import type { DropEntry, ParsedPrompt } from "./api/places/search/filter";
 import type { GeocodeCandidate } from "./api/geocode/geocode";
@@ -47,8 +35,8 @@ import {
   parseCreatePayload,
   parseGeocodePayload,
   parseItineraryPayload,
-  parseParsedPayload,
   parsePlacesPayload,
+  parsePlanPayload,
   parseReroutePayload,
   parseSelectionsPayload,
   parseSwapPayload,
@@ -109,14 +97,30 @@ interface PipelineGeocode {
   address?: GeocodeCandidate;
 }
 
-interface ContinueOptions {
-  geocode?: PipelineGeocode;
+/**
+ * The plan's resolved PLACE context. The geocode now runs BEFORE the parse,
+ * because the planner reasons about "tonight" against the plan's own clock
+ * and therefore has to be told the zone — which only the geocode knows.
+ * Carrying the chosen candidates lets a paused pipeline resume without
+ * re-issuing an ambiguous query.
+ */
+interface ResolvedPlace {
+  planZone: string;
+  hp: { label: string; location: { latitude: number; longitude: number } };
+  /** the formatted city, which rides on parsed.city into every Places query */
+  cityLabel: string;
+  geocode: PipelineGeocode;
 }
 
 // everything the tail of the pipeline needs to build + store a plan —
 // captured so a partial-failure recovery can pause and resume without
 // re-deriving geocode/zone/weather/pools
 interface PlanCtx {
+  /** the PLANNER's proposal — the activity set, its per-activity duration
+   * estimates, and the time intent whose window code validates after the
+   * real travel legs are known. `parseData` below is its projection onto
+   * the currency the rest of the pipeline speaks. */
+  plan: PlanIntent;
   /** the parse, plus the two fields the APP injects after it (city, home)
    * — both already optional on ParsedPrompt. This object is mutated in
    * place and threaded through the whole client pipeline, so it was the
@@ -296,21 +300,22 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [loadingText, setLoadingText] = useState<string | null>(null);
 
-  // lightweight clarifying questions (rule-based, pre-search)
+  // ONE round of clarifying questions, AUTHORED BY THE PLANNER. The old
+  // rule table in clarify.ts (GENERIC_RULES / kindQuestion / when-vibe-
+  // distribution) is gone: deciding what is worth asking about a request is
+  // a semantic judgment, and a fixed table could never generalise past the
+  // shapes someone had already thought of. Answers go back to the planner
+  // for a second pass; skipping still plans.
   const [clarify, setClarify] = useState<{
-    questions: ClarifyQuestion[];
-    parsed: ParsedPrompt;
-    geocode?: PipelineGeocode;
+    questions: PlannerQuestion[];
+    /** the original prompt — the second planner pass re-reads it alongside
+     *  the answers, rather than the client patching a parse in place */
+    prompt: string;
+    place: ResolvedPlace;
   } | null>(null);
-  const [clarifyWhen, setClarifyWhen] = useState<string | null>(null);
-  const [clarifyTime, setClarifyTime] = useState("");
-  const [clarifyVibe, setClarifyVibe] = useState("");
-  const [clarifyKind, setClarifyKind] = useState("");
-  const [clarifyDistribution, setClarifyDistribution] = useState("");
-  // narrowing answers for GENERIC categories ("restaurant" -> "Italian"),
-  // keyed by the category each narrow question targets — there can be
-  // several in one clarify round ("dinner and drinks" is two)
-  const [clarifyNarrow, setClarifyNarrow] = useState<Record<string, string>>({});
+  /** answers keyed by question id; the free-text box and the chips write to
+   *  the same slot, so typing simply overrides a tapped chip */
+  const [clarifyAnswers, setClarifyAnswers] = useState<Record<string, string>>({});
 
   // The interactive-recovery panel — one component, three triggers:
   //  - "geocode": a city or starting address has multiple factual matches
@@ -331,7 +336,9 @@ export default function Home() {
   const [recovery, setRecovery] = useState<
     | {
         mode: "geocode";
-        parsed: ParsedPrompt;
+        /** the raw prompt, not a parse: the geocode now runs BEFORE the
+         *  planner call, so there is no parse yet when this pauses */
+        prompt: string;
         queryType: "city" | "address";
         message: string;
         candidates: GeocodeCandidate[];
@@ -398,56 +405,22 @@ export default function Home() {
     // stale weather from a different city or time.
     setWeather(null);
     setWeatherBlocks([]);
-    // THE fail-loud surface: every degenerate/impossible/contradictory
-    // input lands here with a reason + a suggested fix — never an empty
-    // map, never a borrowed error from the wrong branch.
-    const fail = (reason: string) => {
-      setError(reason);
-      setLoadingText(null);
-    };
     try {
       // nonsense never reaches the LLM ("." / "asdfghjkl")
       const degenerate = degeneratePromptReason(q);
-      if (degenerate) return fail(degenerate);
-
-      setLoadingText("Reading your evening…");
-      const parseData = await fetchJson<ParsedPrompt>("/api/parse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: q }),
-        parse: parseParsedPayload,
-      });
-      // the city is app-supplied input, never LLM-inferred — it rides on
-      // the parse so swap/reroute re-searches inherit it from the store
-      parseData.city = city.trim();
-      setParsedObj(parseData);
-
-      // parse extracted nothing AND the prompt is degenerate → "couldn't
-      // understand"; a sincere-but-vague prompt falls through to the
-      // general "things to do" pool instead of a rejection
-      const unparseable = emptyParseReason(parseData, q);
-      if (unparseable) return fail(unparseable);
-
-      // "cheap fancy dinner" — contradictory, not impossible: say so
-      const contradiction = contradictionReason(q, parseData);
-      if (contradiction) return fail(contradiction);
-
-      // thin prompt → 1–2 targeted questions before spending search calls;
-      // answering or skipping continues with the (possibly updated) parse
-      const questions = clarifyQuestions(parseData);
-      if (questions.length > 0) {
-        setClarify({ questions, parsed: parseData });
-        setClarifyWhen(null);
-        setClarifyTime("");
-        setClarifyVibe("");
-        setClarifyKind("");
-        setClarifyDistribution("");
-        setClarifyNarrow({});
+      if (degenerate) {
+        setError(degenerate);
         setLoadingText(null);
         return;
       }
-
-      await continuePipeline(parseData);
+      // GEOCODE FIRST (reordered for the planner). The planner resolves
+      // "tonight" / "in an hour" against a real clock, so it has to be told
+      // WHICH clock — and only the geocode knows the plan's zone. Before
+      // this, parse ran first and knew nothing about now, which is exactly
+      // why every relative-time decision had to be hardcoded downstream.
+      const place = await resolvePlace(q, {});
+      if (!place) return; // paused on ambiguity, or already failed loud
+      await planFrom(q, place);
     } catch (err) {
       setError(clientErrorMessage(err));
     } finally {
@@ -456,185 +429,202 @@ export default function Home() {
     }
   }
 
-  // clarify answered or skipped → resume the pipeline with final parse
-  async function submitClarify(skip: boolean) {
-    if (!clarify) return;
-    const operation = beginOperation();
-    if (!operation) return;
-    try {
-      let updated: ParsedPrompt = { ...clarify.parsed };
-      const distribution = clarify.questions.find((question) => question.id === "distribution");
-      if (!skip) {
-        const whenAns = clarifyWhen === "pick a time" ? clarifyTime.trim() : clarifyWhen ?? "";
-        if (whenAns) updated.time_window = timeWindowForWhenAnswer(whenAns);
-        if (clarifyVibe.trim()) updated.aesthetic = clarifyVibe.trim();
-      // the KIND answer narrows an ultra-vague prompt to a real category;
-      // an uncounted "something to do" keeps the general pool, while a
-      // counted request materializes one broad kind so it can expand to
-      // exactly the requested number of slots.
-      if (clarifyKind.trim()) {
-        const beforeKind = resolveRequestedSlots(updated);
-        const cats = categoriesForKindAnswer(clarifyKind, {
-          materializeGeneral: beforeKind.kind === "needs-kind",
+  /**
+   * Resolve the city (and optional starting address) to coordinates + a
+   * timezone. Returns null when the pipeline PAUSED on an ambiguous result
+   * (the geocode recovery panel is now showing) or failed loud. Never
+   * silently falls back: a city the geocoder can't place is an error.
+   */
+  async function resolvePlace(
+    rawPrompt: string,
+    existing: PipelineGeocode
+  ): Promise<ResolvedPlace | null> {
+    const fail = (reason: string) => {
+      setError(reason);
+      setLoadingText(null);
+      return null;
+    };
+    setLoadingText("Finding your city…");
+    const cityQ = city.trim();
+    if (!cityQ) return fail("Add a city so I know where to plan.");
+
+    let cityData = existing.city;
+    if (!cityData) {
+      const cityOutcome = await fetchJson("/api/geocode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: cityQ, kind: "city" }),
+        parse: parseGeocodePayload,
+      });
+      if (cityOutcome.outcome === "ambiguous") {
+        setRecovery({
+          mode: "geocode",
+          prompt: rawPrompt,
+          queryType: "city",
+          message: cityOutcome.message,
+          candidates: cityOutcome.candidates,
+          geocode: {},
         });
-        if (cats.length > 0) updated.category_signals = cats;
-      }
-      if (distribution) {
-        const count = updated.stop_count;
-        const slots =
-          typeof count === "number"
-            ? slotsFromDistributionAnswer(
-                clarifyDistribution,
-                updated.category_signals,
-                count
-              )
-            : null;
-        if (!slots) {
-          setError(
-            `Describe all ${count ?? "requested"} stops, for example "${distribution.options[0] ?? "2 dinner + 1 drinks"}".`
-          );
-          setLoadingText(null);
-          return;
-        }
-        updated.category_signals = slots;
-      }
-      // narrow answers fold back onto EXACTLY the generic signal each
-      // question targeted; untouched signals (and duplicate slots of the
-      // same category) pass through applyNarrowAnswer identically
-      if (Object.values(clarifyNarrow).some((v) => v.trim())) {
-        updated.category_signals = (updated.category_signals ?? []).map((c) => {
-          const a = clarifyNarrow[c]?.trim();
-          return a ? applyNarrowAnswer(c, a) : c;
-        });
-      }
-    }
-      const finalizedSlots = finalizeRequestedSlots(updated);
-      if (!finalizedSlots.ok) {
-        setError(finalizedSlots.reason);
         setLoadingText(null);
-        return;
+        return null;
       }
-      updated = finalizedSlots.parsed;
-      setError(null);
-      setClarify(null);
-      setParsedObj(updated);
-      await continuePipeline(updated, { geocode: clarify.geocode });
-    } finally {
-      endOperation(operation);
+      cityData = cityOutcome;
     }
+
+    // Once the user/provider has resolved an ambiguous city, carry its
+    // formatted locality/region/country into every Places query. Keeping
+    // the original bare "London" here would reintroduce ambiguity later.
+    let planZone: string = cityData.timeZone;
+    let hp: { label: string; location: { latitude: number; longitude: number } } = {
+      label: `Start · ${cityData.formattedAddress} centre`,
+      location: cityData.location,
+    };
+    const geocode: PipelineGeocode = { city: cityData };
+
+    const addrQ = startAddress.trim();
+    if (addrQ) {
+      let addrData = existing.address;
+      if (!addrData) {
+        setLoadingText("Finding your starting address…");
+        const addressOutcome = await fetchJson("/api/geocode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: addrQ, kind: "address", cityContext: cityData }),
+          parse: parseGeocodePayload,
+        });
+        if (addressOutcome.outcome === "ambiguous") {
+          setRecovery({
+            mode: "geocode",
+            prompt: rawPrompt,
+            queryType: "address",
+            message: addressOutcome.message,
+            candidates: addressOutcome.candidates,
+            geocode,
+          });
+          setLoadingText(null);
+          return null;
+        }
+        addrData = addressOutcome;
+      }
+      geocode.address = addrData;
+      hp = { label: `Start · ${addrData.formattedAddress}`, location: addrData.location };
+      planZone = addrData.timeZone;
+    }
+
+    setHomePoint(hp);
+    setPlanZone(planZone);
+    return { planZone, hp, cityLabel: cityData.formattedAddress, geocode };
   }
 
-  // everything from the geocode onward — parseData is final here.
-  async function continuePipeline(
-    parseData: ParsedPrompt,
-    opts: ContinueOptions = {}
+  /**
+   * THE PLANNER CALL. One request, two possible passes: without answers it
+   * may come back with questions; with answers it is final. The response
+   * carries both the plan (activities, duration estimates, time intent) and
+   * its projection onto ParsedPrompt, which the rest of the pipeline
+   * consumes unchanged.
+   */
+  async function planFrom(
+    rawPrompt: string,
+    place: ResolvedPlace,
+    answers?: PlannerAnswer[]
   ) {
     const fail = (reason: string) => {
       setError(reason);
       setLoadingText(null);
     };
+    setLoadingText("Shaping your day…");
+    const { plan, parsed } = await fetchJson("/api/parse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: rawPrompt,
+        timeZone: place.planZone,
+        // the app already resolves start times from the browser clock
+        // everywhere else; sending it keeps the planner on the SAME clock
+        // (and keeps the e2e time-freeze seam working)
+        nowISO: new Date().toISOString(),
+        city: place.cityLabel,
+        ...(answers && answers.length > 0 ? { answers } : {}),
+      }),
+      parse: parsePlanPayload,
+    });
+
+    // the city is app-supplied input, never LLM-inferred — it rides on the
+    // parse so swap/reroute re-searches inherit it from the store
+    parsed.city = place.cityLabel;
+    parsed.home = place.hp.location;
+    setParsedObj(parsed);
+
+    // planner extracted nothing AND the prompt is degenerate → "couldn't
+    // understand"; a sincere-but-vague prompt falls through to the general
+    // "things to do" pool instead of a rejection
+    const unparseable = emptyParseReason(parsed, rawPrompt);
+    if (unparseable) return fail(unparseable);
+
+    // "cheap fancy dinner" — contradictory, not impossible: say so
+    const contradiction = contradictionReason(rawPrompt, parsed);
+    if (contradiction) return fail(contradiction);
+
+    // ONE round. `answers` present means this WAS the second pass, so any
+    // questions that come back anyway are ignored rather than re-asked.
+    if (!answers && plan.questions.length > 0) {
+      setClarify({ questions: plan.questions, prompt: rawPrompt, place });
+      setClarifyAnswers({});
+      setLoadingText(null);
+      return;
+    }
+
+    await continuePipeline(plan, parsed, place);
+  }
+
+  // clarify answered or skipped → a SECOND planner pass, or the first plan
+  // as-is. Chosen over a structured client-side merge because the answers
+  // are free-form semantics ("something quieter", "Italian", "9ish") and
+  // folding them onto searchQueries and the time intent is the same
+  // judgment the planner just made — doing it twice, in two languages, is
+  // how the old rule table grew. Skipping costs nothing: the first pass
+  // already produced a complete, plannable proposal.
+  async function submitClarify(skip: boolean) {
+    if (!clarify) return;
+    const operation = beginOperation();
+    if (!operation) return;
+    const { prompt: rawPrompt, place, questions } = clarify;
     try {
-      setLoadingText("Reading your evening…");
-      // ── geocode the city + starting address FIRST (plain text queries —
-      // real location services are deliberately future work). This resolves
-      // the plan's timezone, which the plausibility check below needs — a
-      // Vancouver lunch must be judged against Vancouver's clock. Never
-      // silently fall back: a city the geocoder can't place fails loud. ──
-      setLoadingText("Finding your city…");
-      const cityQ = city.trim();
-      if (!cityQ) return fail("Add a city so I know where to plan.");
-      let cityData = opts.geocode?.city;
-      if (!cityData) {
-        const cityOutcome = await fetchJson("/api/geocode", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: cityQ, kind: "city" }),
-          parse: parseGeocodePayload,
-        });
-        if (cityOutcome.outcome === "ambiguous") {
-          setRecovery({
-            mode: "geocode",
-            parsed: parseData,
-            queryType: "city",
-            message: cityOutcome.message,
-            candidates: cityOutcome.candidates,
-            geocode: {},
-          });
-          setLoadingText(null);
-          return;
-        }
-        cityData = cityOutcome;
-      }
+      const answers: PlannerAnswer[] = skip
+        ? []
+        : questions
+            .map((q) => ({
+              question: q.question,
+              answer: (clarifyAnswers[q.id] ?? "").trim(),
+            }))
+            .filter((a) => a.answer !== "");
+      setError(null);
+      setClarify(null);
+      await planFrom(rawPrompt, place, answers);
+    } catch (err) {
+      setError(clientErrorMessage(err));
+    } finally {
+      setLoadingText(null);
+      endOperation(operation);
+    }
+  }
 
-      // Once the user/provider has resolved an ambiguous city, carry its
-      // formatted locality/region/country into every Places query. Keeping
-      // the original bare "London" here would reintroduce ambiguity later.
-      parseData.city = cityData.formattedAddress;
-      let planZone: string = cityData.timeZone;
-      let hp: { label: string; location: { latitude: number; longitude: number } } = {
-        label: `Start · ${cityData.formattedAddress} centre`,
-        location: cityData.location,
-      };
-      const resolvedGeocode: PipelineGeocode = { city: cityData };
-      const addrQ = startAddress.trim();
-      if (addrQ) {
-        let addrData = opts.geocode?.address;
-        if (!addrData) {
-          setLoadingText("Finding your starting address…");
-          const addressOutcome = await fetchJson("/api/geocode", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              query: addrQ,
-              kind: "address",
-              cityContext: cityData,
-            }),
-            parse: parseGeocodePayload,
-          });
-          if (addressOutcome.outcome === "ambiguous") {
-            setRecovery({
-              mode: "geocode",
-              parsed: parseData,
-              queryType: "address",
-              message: addressOutcome.message,
-              candidates: addressOutcome.candidates,
-              geocode: resolvedGeocode,
-            });
-            setLoadingText(null);
-            return;
-          }
-          addrData = addressOutcome;
-        }
-        resolvedGeocode.address = addrData;
-        hp = {
-          label: `Start · ${addrData.formattedAddress}`,
-          location: addrData.location,
-        };
-        planZone = addrData.timeZone;
-      }
-      setHomePoint(hp);
-      setPlanZone(planZone);
-      // the plan's starting point rides on the parse (like parsed.city) so
-      // select can weigh each candidate's code-computed distance from it —
-      // and swap/reroute re-searches inherit the same anchor from the store
-      parseData.home = hp.location;
-
-      // Resolve the start instant in the PLAN's zone. Malformed input (an
-      // unparseable clock, contradictory calendar qualifiers, a date that
-      // doesn't exist) still fails loud — those are facts about the input.
-      // The PLAUSIBILITY gate that used to live here is gone: refusing an
-      // hour because a table called it unreasonable was an opinion, and the
-      // objective hours filter decides openness on real data a few steps
-      // below. An impossible hour now surfaces as every pool emptied on
-      // `hours`, which noVenuesReason reports honestly.
-      const check = resolveStartTimeChecked(
-        parseData.time_window ?? "",
-        new Date(),
-        parseData.category_signals ?? [],
-        planZone
-      );
-      if (!check.ok) return fail(check.reason);
-      const startInstant: Date = check.start;
+  // everything from the planner onward — the plan and parse are final here.
+  async function continuePipeline(
+    plan: PlanIntent,
+    parseData: ParsedPrompt,
+    place: ResolvedPlace
+  ) {
+    const { planZone, hp } = place;
+    const fail = (reason: string) => {
+      setError(reason);
+      setLoadingText(null);
+    };
+    try {
+      // THE plan's one anchor. It came from the planner, which resolved it
+      // against a real clock in this zone; code owns only the fallback for
+      // a plan whose time was never stated and never answered.
+      const startInstant: Date = planStartInstant(plan, new Date(), planZone);
 
       let weather: WeatherHour[] | null = null;
       try {
@@ -657,7 +647,16 @@ export default function Home() {
       } = await fetchJson("/api/places/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parsed: parseData, weather, timeZone: planZone }),
+        body: JSON.stringify({
+          parsed: parseData,
+          weather,
+          timeZone: planZone,
+          // THE plan's resolved anchor, passed explicitly. `time_window`
+          // is prose on the planner path, so the hours filter must never
+          // re-derive an instant from it — one anchor, shared by search,
+          // the hours filter, the weather gate and the schedule.
+          targetTime: startInstant.toISOString(),
+        }),
         parse: parsePlacesPayload,
       });
       setPools(categories);
@@ -705,6 +704,7 @@ export default function Home() {
           ? parseData.category_signals
           : sels.map((selection) => selection.category);
       const ctx: PlanCtx = {
+        plan,
         parseData,
         planZone,
         hp,
@@ -809,7 +809,7 @@ export default function Home() {
         let legs: TravelLeg[] = [];
         let hl: TravelLeg | null = null;
         if (points.length >= 1 && points.every(Boolean)) {
-          const dry = buildSchedule(sels, parseData.time_window ?? "", new Date(), [], undefined, null, planZone);
+          const dry = buildSchedule(sels, "", new Date(), [], ctx.startInstant, null, planZone);
           const { startISO } = dry;
           // how long we stay at each point, so every leg can be routed at
           // its own departure instant (§1.5). Index 0 is home — no dwell.
@@ -831,7 +831,16 @@ export default function Home() {
           hl = split.homeLeg;
           legs = split.interLegs;
         }
-        const { stops } = buildSchedule(sels, parseData.time_window ?? "", new Date(), legs, undefined, hl, planZone);
+        const { stops } = buildSchedule(
+          sels,
+          "",
+          new Date(),
+          legs,
+          // the SAME anchor the hours filter and weather gate used
+          ctx.startInstant,
+          hl,
+          planZone
+        );
         return { stops, legs, hl };
       };
 
@@ -1182,8 +1191,16 @@ export default function Home() {
       else setStartAddress(candidate.formattedAddress);
       setRecovery(null);
       setError(null);
-      await continuePipeline(gate.parsed, { geocode });
+      // The geocode now pauses BEFORE the planner call, so resuming means
+      // finishing the place resolution and then planning — not resuming a
+      // parse that never happened.
+      const place = await resolvePlace(gate.prompt, geocode);
+      if (!place) return;
+      await planFrom(gate.prompt, place);
+    } catch (err) {
+      setError(clientErrorMessage(err));
     } finally {
+      setLoadingText(null);
       endOperation(operation);
     }
   }
@@ -1730,16 +1747,23 @@ export default function Home() {
 
   const wxNow = weather?.[0] ?? null;
 
-  // 1–2 targeted questions before search — inline, minimal, skippable
+  // Up to three planner-authored questions before search — inline,
+  // minimal, skippable. The shapes are uniform now (question + chips +
+  // free text) because the questions are no longer a fixed set of ids the
+  // UI could special-case; every one is keyed by its own id.
   const clarifyBlock = clarify && (
     <div className={"clarify" + (itinerary ? " clarify--stage" : "")}>
       {clarify.questions.map((qq, questionIndex) => {
-        const questionKey =
-          qq.id === "narrow" ? `narrow:${qq.category}` : qq.id;
         const questionLabelId = `clarify-question-${questionIndex}`;
+        const answer = clarifyAnswers[qq.id] ?? "";
+        const setAnswer = (value: string) =>
+          setClarifyAnswers((m) => ({ ...m, [qq.id]: value }));
+        // "pick a time" is a prompt for the text box, not an answer on its
+        // own — selecting it opens the box rather than submitting the words
+        const isPlaceholderChip = (o: string) => /^pick a time$/i.test(o);
         return (
           <div
-            key={questionKey}
+            key={qq.id}
             className="clarify__q"
             role="group"
             aria-labelledby={questionLabelId}
@@ -1749,16 +1773,7 @@ export default function Home() {
             </div>
             <div className="clarify__chips">
               {qq.options.map((o) => {
-                const pressed =
-                  qq.id === "when"
-                    ? clarifyWhen === o
-                    : qq.id === "kind"
-                      ? clarifyKind === o
-                      : qq.id === "distribution"
-                        ? clarifyDistribution === o
-                        : qq.id === "narrow"
-                          ? clarifyNarrow[qq.category ?? ""] === o
-                          : clarifyVibe === o;
+                const pressed = answer === o;
                 return (
                   <button
                     key={o}
@@ -1766,81 +1781,20 @@ export default function Home() {
                     className={`chipbtn ${pressed ? "chipbtn--on" : ""}`}
                     aria-pressed={pressed}
                     disabled={busy}
-                    onClick={() =>
-                      qq.id === "when"
-                        ? setClarifyWhen(o)
-                        : qq.id === "kind"
-                          ? setClarifyKind(o)
-                          : qq.id === "distribution"
-                            ? setClarifyDistribution(o)
-                            : qq.id === "narrow"
-                              ? setClarifyNarrow((m) => ({
-                                  ...m,
-                                  [qq.category ?? ""]: o,
-                                }))
-                              : setClarifyVibe(o)
-                    }
+                    onClick={() => setAnswer(o)}
                   >
                     {o}
                   </button>
                 );
               })}
-              {qq.id === "when" && clarifyWhen === "pick a time" && (
-                <input
-                  className="clarify__input"
-                  value={clarifyTime}
-                  disabled={busy}
-                  onChange={(e) => setClarifyTime(e.target.value)}
-                  placeholder="7pm"
-                  aria-label="Pick a time"
-                  autoFocus
-                />
-              )}
-              {qq.id === "narrow" && (
-                <input
-                  className="clarify__input"
-                  value={clarifyNarrow[qq.category ?? ""] ?? ""}
-                  disabled={busy}
-                  onChange={(e) =>
-                    setClarifyNarrow((m) => ({
-                      ...m,
-                      [qq.category ?? ""]: e.target.value,
-                    }))
-                  }
-                  placeholder="or type one…"
-                  aria-label={qq.question}
-                />
-              )}
-              {qq.id === "kind" && (
-                <input
-                  className="clarify__input"
-                  value={clarifyKind}
-                  disabled={busy}
-                  onChange={(e) => setClarifyKind(e.target.value)}
-                  placeholder="or type one… (bowling, live music)"
-                  aria-label="What kind of thing"
-                />
-              )}
-              {qq.id === "distribution" && (
-                <input
-                  className="clarify__input"
-                  value={clarifyDistribution}
-                  disabled={busy}
-                  onChange={(e) => setClarifyDistribution(e.target.value)}
-                  placeholder={qq.options[0] ?? "2 dinner + 1 drinks"}
-                  aria-label="How to split the stops"
-                />
-              )}
-              {qq.id === "vibe" && (
-                <input
-                  className="clarify__input"
-                  value={clarifyVibe}
-                  disabled={busy}
-                  onChange={(e) => setClarifyVibe(e.target.value)}
-                  placeholder="or type one…"
-                  aria-label="Describe the vibe"
-                />
-              )}
+              <input
+                className="clarify__input"
+                value={isPlaceholderChip(answer) ? "" : answer}
+                disabled={busy}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="or type one…"
+                aria-label={qq.question}
+              />
             </div>
           </div>
         );
