@@ -21,7 +21,8 @@ import { fetchWeatherHours } from "../weather/fetchWeather";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
 import { selectVenues as realSelectVenues, Selection } from "../select/selectVenues";
 import { getDuration } from "../schedule/durations";
-import { toZonedISO, isPlausibleAt, bandForCategories, hourInBand } from "../schedule/schedule";
+import { toZonedISO } from "../schedule/schedule";
+import { isParkLike } from "../../lib/categoryTraits";
 import { DEFAULT_ZONE, instantAtWallClock, wallClockParts } from "../../lib/zoneTime";
 import { isRecord, logEvent } from "../_shared/http";
 import {
@@ -226,16 +227,61 @@ function validInterpretOutput(value: unknown): value is ValidInterpretOutput {
   return validShift(value.time, false) && validShift(value.duration, true);
 }
 
+/**
+ * MERIDIEM DISAMBIGUATION ONLY — the minimal survivor of the deleted
+ * plausibility gate (2026-07-27). A bare hour in a swap refinement ("make
+ * it 10") is genuinely ambiguous, and the stop's kind is the only evidence
+ * available for reading it: on a brunch stop that plainly means 10 AM, on a
+ * bar stop 10 PM. That is reading comprehension, not a verdict about
+ * whether anywhere is open — nothing here can REFUSE a time any more, and
+ * the objective hours filter still decides what is actually usable.
+ *
+ * Deliberately coarse and short: it only has to separate morning-ish kinds
+ * from evening-ish ones. Unknown categories get no opinion, and the
+ * outing-planner default (assume PM) stands.
+ */
+const ROUGH_HOURS: Array<[RegExp, { startHour: number; endHour: number }]> = [
+  [/breakfast/i, { startHour: 6, endHour: 12 }],
+  [/brunch/i, { startHour: 8, endHour: 15 }],
+  [/coffee|caf[eé]|espresso|matcha/i, { startHour: 7, endHour: 22 }],
+  [/lunch/i, { startHour: 11, endHour: 16 }],
+  [/club/i, { startHour: 20, endHour: 4 }],
+  [/\bbars?\b|cocktail|pub|brewery|wine|drink/i, { startHour: 11, endHour: 2 }],
+  [
+    /dinner|restaurant|dining|ramen|sushi|pizza|taco|noodle|pho|steak|izakaya|bbq/i,
+    { startHour: 11, endHour: 23 },
+  ],
+];
+
+/** Rough daytime window for a category, or null when we have no opinion.
+ *  Parks come from the shared traits table, like everywhere else (§5.3). */
+export function roughHoursFor(category: string | undefined): { startHour: number; endHour: number } | null {
+  const c = (category ?? "").trim();
+  if (!c) return null;
+  if (isParkLike(c)) return { startHour: 6, endHour: 22 };
+  return ROUGH_HOURS.find(([pattern]) => pattern.test(c))?.[1] ?? null;
+}
+
+/** Is this wall-clock hour inside the rough window? endHour < startHour
+ *  wraps past midnight (bars, clubs). Pure — no date, no zone. */
+export function hourInRoughHours(
+  h: number,
+  window: { startHour: number; endHour: number }
+): boolean {
+  if (window.startHour <= window.endHour) return h >= window.startHour && h < window.endHour;
+  return h >= window.startHour || h < window.endHour;
+}
+
 // Deterministic fallback for time expressions, so common relative phrases
 // resolve even if the model whiffs. Earlier is negative, later positive.
 export function parseTimeExpr(text: string, category?: string): TimeShift | null {
   const s = text.toLowerCase();
   // The PM assumption below is right for most stops but was applied blind:
-  // on a BRUNCH stop "make it 10" became 22:00, which the plausible-band
-  // guard then refused with "A 10:00 PM brunch won't work" — a confusing
-  // answer to a request that plainly meant 10 AM. When the stop's category
-  // has a known band, prefer the reading that fits it (§7.3).
-  const band = category ? bandForCategories([category]) : null;
+  // on a BRUNCH stop "make it 10" became 22:00, which read as a 10 PM
+  // brunch — a confusing answer to a request that plainly meant 10 AM.
+  // When the stop's category has a rough window, prefer the reading that
+  // fits it (§7.3).
+  const band = category ? roughHoursFor(category) : null;
 
   // hour/minute (+ optional meridiem) → "HH:MM"; null when out of range so
   // callers can fall through (e.g. "by 30 minutes" is relative, not 30:00)
@@ -247,8 +293,8 @@ export function parseTimeExpr(text: string, category?: string): TimeShift | null
     else if (!ap && h >= 1 && h <= 11) {
       // keep AM only when the category's band actually wants it and the
       // PM reading is outside — otherwise the evening default stands
-      const amFits = band ? hourInBand(h, band) : false;
-      const pmFits = band ? hourInBand(h + 12, band) : true;
+      const amFits = band ? hourInRoughHours(h, band) : false;
+      const pmFits = band ? hourInRoughHours(h + 12, band) : true;
       if (!(amFits && !pmFits)) h += 12;
     }
     if (h < 0 || h > 24 || m < 0 || m >= 60) return null;
@@ -1076,10 +1122,13 @@ async function timeChange(
   }
   const newStartMs = nd.getTime();
 
-  // guards (plausible hour first so "dinner at 4am" gives the real reason)
-  if (!isPlausibleAt(nd, [category], tz)) {
-    return { swapped: false, reason: `A ${clockLabel(nd, tz)} ${category} won't work — nothing's really open then.` };
-  }
+  // The plausible-hour refusal that used to sit here is GONE with the rest
+  // of the gate: "a 4 AM dinner won't work" was a table's opinion, and a
+  // wrong one next to a 24-hour diner. The move is still fully checked —
+  // against FACTS. The floor and overlap guards below are arithmetic, and
+  // `resettleTail` then re-runs the objective filter plus the availability
+  // seam at every resulting arrival, so a genuinely closed target fails
+  // with the honest "nothing open then" from real hours data instead.
   if (newStartMs <= floor.getTime()) {
     return { swapped: false, reason: `Can't move ${target.name} earlier than where the evening already is.` };
   }

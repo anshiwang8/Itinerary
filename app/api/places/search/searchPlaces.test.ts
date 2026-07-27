@@ -14,7 +14,7 @@ import {
 import { DropEntry, ParsedPrompt } from "./filter";
 import { isOutdoorCategory } from "../../../lib/categoryTraits";
 import { resolveCategory } from "../../schedule/durations";
-import { isPlausibleAt } from "../../schedule/schedule";
+import { roughHoursFor, hourInRoughHours } from "../../itinerary/swap";
 
 function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
   return {
@@ -655,14 +655,18 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(includedTypeFor("bench"), "park");
       assert.strictEqual(isOutdoorCategory("bench"), true);
       assert.strictEqual(resolveCategory("bench"), "park");
-      assert.ok(isPlausibleAt(new Date(2026, 6, 3, 10, 0), ["bench"]));
-      assert.ok(!isPlausibleAt(new Date(2026, 6, 3, 23, 30), ["bench"]));
+      // the traits table also drives the swap engine's meridiem window —
+      // the one surviving consumer after the plausibility gate was deleted
+      const bench = roughHoursFor("bench");
+      assert.ok(bench, "a park-like category must have a rough window");
+      assert.ok(hourInRoughHours(10, bench!));
+      assert.ok(!hourInRoughHours(23.5, bench!));
       // "green space" likewise
       assert.strictEqual(includedTypeFor("green space"), "park");
       assert.strictEqual(isOutdoorCategory("green space"), true);
       assert.strictEqual(resolveCategory("green space"), "park");
       // "patio" is weather-exposed but NOT green space — it must NOT get
-      // the park type filter, the park duration, or the park band
+      // the park type filter, the park duration, or the park rough window
       assert.strictEqual(isOutdoorCategory("patio"), true);
       assert.strictEqual(includedTypeFor("patio"), undefined);
       assert.notStrictEqual(resolveCategory("patio"), "park");

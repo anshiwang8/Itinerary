@@ -91,8 +91,9 @@ straight map polyline.
 
 All of these produce their exact message with zero live calls:
 - `"."` / `"asdfghjkl"` → unparseable (pre-parse guard, mode-independent).
-- `"brunch at 3am"` / `"dinner at 4am"` → the category-window message
-  (mockParse extracts the clock time + category; the band check is code).
+- (removed 2026-07-27) `"brunch at 3am"` / `"dinner at 4am"` no longer fail.
+  The plausibility gate that refused them is gone; an unusual hour is
+  planned, and the objective hours filter decides what is really open.
 - `"cheap fancy dinner"` → the contradiction message (prompt-level guard).
 - `"vegan steakhouse"` → the CONTRADICTION message naming the pair ("vegan
   and steakhouse pull opposite ways") — caught by the dietary-vs-venue-type

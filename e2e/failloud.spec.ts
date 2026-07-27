@@ -10,15 +10,14 @@ const UNPARSEABLE =
   "I couldn't make sense of that — try describing your evening, like “dinner and drinks in Ossington”.";
 
 // prompt → the exact message it must produce
+// DELETED 2026-07-27: "brunch at 3am" and "dinner at 4am" used to be
+// pinned here with the plausibility gate's category-window messages. Those
+// were refusals based on a hardcoded table's opinion about reasonable
+// hours, and the gate is gone — an unusual hour is now PLANNED, and the
+// objective hours filter decides what is genuinely open (a 24-hour diner
+// at 3 AM is a real answer, not an error). The honest all-closed outcome
+// is still covered: see the hours-dominant case below.
 const FAIL_LOUD_CASES: Array<[string, string]> = [
-  [
-    "brunch at 3am",
-    "Couldn't plan a 3 AM brunch — brunch around here runs about 8 AM to 3 PM. Try a later time?",
-  ],
-  [
-    "dinner at 4am",
-    "Couldn't plan a 4 AM dinner — dinner around here runs about 11 AM to 11 PM. Try a later time?",
-  ],
   [
     "cheap fancy dinner",
     "That's a bit contradictory — cheap and fancy pull opposite ways.",

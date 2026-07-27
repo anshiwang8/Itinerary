@@ -78,211 +78,42 @@ function inferCategoryStart(
   return null;
 }
 
-// Plausible start bands per category — the fail-loud guard for resolved
-// times that carry no user time info. endHour < startHour wraps past
-// midnight (bars, clubs).
-export interface PlausibleBand {
-  startHour: number;
-  endHour: number;
-}
-/** A RegExp-shaped adapter so the bands table keeps its uniform shape
- *  while park membership is decided by the shared traits table. */
-const PARK_BAND_MATCH = {
-  test: (c: string) => isParkLike(c),
-} as RegExp;
-
-export const PLAUSIBLE_BANDS: Array<[RegExp, PlausibleBand]> = [
-  // parks are a daylight-hours activity with no "typical" start — they
-  // keep the immediate next-full-hour anchor, but get a dawn-to-dusk band
-  // so a 6 AM bench-sit passes and a midnight one honestly refuses
-  [PARK_BAND_MATCH, { startHour: 6, endHour: 22 }],
-  [/brunch/i, { startHour: 8, endHour: 15 }],
-  [/breakfast/i, { startHour: 6, endHour: 12 }],
-  [/lunch/i, { startHour: 11, endHour: 16 }],
-  [/coffee|caf[eé]|espresso|matcha/i, { startHour: 7, endHour: 22 }],
-  [/ice\s*cream|gelato/i, { startHour: 10, endHour: 23 }],
-  [/dessert/i, { startHour: 10, endHour: 24 }],
-  [/comedy|show|theatre|theater|concert/i, { startHour: 12, endHour: 24 }],
-  [/club/i, { startHour: 20, endHour: 4 }],
-  [/\bbars?\b|cocktail|pub|brewery|wine|drink/i, { startHour: 11, endHour: 2 }],
-  [
-    /dinner|restaurant|dining|ramen|sushi|pizza|taco|noodle|pho|steak|izakaya|bbq/i,
-    { startHour: 11, endHour: 23 },
-  ],
-];
-// The fallback band — used ONLY when no category matches a band above:
-// an unrecognized category ("axe throwing") or a general/vague request
-// with no category at all. It wraps past midnight to 1 AM because "some-
-// thing to do" in a city genuinely runs late (bars, clubs, late food are
-// open at 11 PM), and the immediate "now" slot rounds UP to the next full
-// hour — an 8–23 band refused a 10:18 PM vague prompt purely on rounding.
-// Recognized categories keep their OWN bands untouched, so explicit
-// impossible requests ("brunch at 3am") still fail loud exactly as before.
-export const DEFAULT_PLAUSIBLE_BAND: PlausibleBand = { startHour: 8, endHour: 1 };
-
-// The band check reads the WALL-CLOCK hour in the plan's zone — a 7 PM
-// Vancouver dinner must be judged against 19:00 Pacific, not the server's
-// or Toronto's hour for that same instant.
-/** Is this wall-clock hour inside the band? Pure — no date, no zone, so
- *  callers reasoning about a bare hour (the swap engine's meridiem guess)
- *  can share the same membership rule. */
-export function hourInBand(h: number, band: PlausibleBand): boolean {
-  if (band.startHour <= band.endHour) return h >= band.startHour && h < band.endHour;
-  return h >= band.startHour || h < band.endHour; // wraps midnight
-}
-
-function inBand(d: Date, band: PlausibleBand, timeZone: string = DEFAULT_ZONE): boolean {
-  const { hour, minute } = wallClockParts(d, timeZone);
-  return hourInBand(hour + minute / 60, band);
-}
-
-function firstCategory(categories: string[]): string | null {
-  return categories.find((category) => typeof category === "string" && category.trim()) ?? null;
-}
-
-/** The plausible-hours band for the first scheduled category. */
-export function bandForCategories(categories: string[]): PlausibleBand {
-  const category = firstCategory(categories);
-  return category
-    ? PLAUSIBLE_BANDS.find(([pattern]) => pattern.test(category))?.[1] ??
-        DEFAULT_PLAUSIBLE_BAND
-    : DEFAULT_PLAUSIBLE_BAND;
-}
-
-/** Is `d` a sensible hour for these categories, in the plan's zone? Reused
- * by the swap engine to reject implausible time changes ("dinner at 4am"). */
-export function isPlausibleAt(
-  d: Date,
-  categories: string[],
-  timeZone: string = DEFAULT_ZONE
-): boolean {
-  return inBand(d, bandForCategories(categories), timeZone);
-}
-
-export type StartResolution =
-  | { ok: true; start: Date }
-  | {
-      ok: false;
-      reason: string;
-      /** set ONLY on the inferred-time path (user typed NO time; our own
-       * guessed slot landed outside a known category band). The UI may
-       * offer an informed override there. NEVER set for explicit
-       * impossible requests ("brunch at 3am") — those stay hard fails. */
-      overridable?: boolean;
-      /** the banded category that blocked the inferred slot */
-      category?: string;
-    };
-
-export const IMPLAUSIBLE_TIME_MESSAGE =
-  "Couldn't find a sensible time for this — add one, like “dinner at 7pm”.";
-
-function hour12(h: number): string {
-  const hh = ((h % 24) + 24) % 24;
-  return `${hh % 12 || 12} ${hh < 12 ? "AM" : "PM"}`;
-}
-
-function clock12(d: Date, timeZone: string = DEFAULT_ZONE): string {
-  const { hour, minute } = wallClockParts(d, timeZone);
-  const num = `${hour % 12 || 12}${minute ? `:${String(minute).padStart(2, "0")}` : ""}`;
-  return `${num} ${hour < 12 ? "AM" : "PM"}`;
-}
-
-// User asked for an hour nothing plausibly serves ("brunch at 3am") —
-// name the category, its realistic window, and which direction to move.
-function implausibleExplicitReason(
-  start: Date,
-  categories: string[],
-  timeZone: string = DEFAULT_ZONE
-): string {
-  const first = firstCategory(categories);
-  const hit = first ? PLAUSIBLE_BANDS.find(([pattern]) => pattern.test(first)) : undefined;
-  const label = hit ? first : null;
-  const band = hit?.[1] ?? DEFAULT_PLAUSIBLE_BAND;
-  const { hour, minute } = wallClockParts(start, timeZone);
-  const h = hour + minute / 60;
-  // outside a non-wrapping band: before open → later; past close → earlier.
-  // A wrapped band's dead zone always sits before that day's opening.
-  const beforeOpen = band.startHour <= band.endHour ? h < band.startHour : true;
-  const suggest = beforeOpen ? "Try a later time?" : "Try an earlier time?";
-  if (!label) {
-    return `Couldn't plan that for ${clock12(start, timeZone)} — nothing much is open then. Try a time between ${hour12(band.startHour)} and ${hour12(band.endHour)}?`;
-  }
-  return `Couldn't plan a ${clock12(start, timeZone)} ${label} — ${label} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}. ${suggest}`;
-}
-
-// The user gave NO time and the resolver's own inferred slot (next full
-// hour / category default) landed outside a KNOWN category's band — e.g.
-// "sit in a park" at 10:54 PM resolves to 11 PM, past the park band's
-// 10 PM close. "Add a time" is misleading here: nothing they type fixes
-// tonight. Name the real obstacle; the UI turns this into a CHOICE
-// ("still want it" override / "something else"), so the message carries
-// no trailing suggestion — the buttons are the suggestion. Returns null
-// when no category has a band (nothing specific to say → the caller
-// keeps the generic add-a-time message).
-function implausibleInferredReason(
-  start: Date,
-  categories: string[],
-  timeZone: string = DEFAULT_ZONE
-): { reason: string; category: string } | null {
-  const category = firstCategory(categories);
-  if (!category) return null;
-  const hit = PLAUSIBLE_BANDS.find(([pattern]) => pattern.test(category));
-  if (!hit) return null;
-  const band = hit[1];
-  const { hour, minute } = wallClockParts(start, timeZone);
-  const h = hour + minute / 60;
-  const beforeOpen = band.startHour <= band.endHour ? h < band.startHour : true;
-  const window = `${category} around here runs about ${hour12(band.startHour)} to ${hour12(band.endHour)}`;
-  const reason = beforeOpen
-    ? `It's ${clock12(start, timeZone)} — early for ${category} (${window}).`
-    : `It's ${clock12(start, timeZone)} — late for a typical ${category} visit (${window}).`;
-  return { reason, category };
-}
+// ── the plausibility gate is GONE (2026-07-27) ───────────────────────────
+// PLAUSIBLE_BANDS / isPlausibleAt / bandForCategories / the two implausible-
+// reason builders / StartResolution's `overridable` + `category` all existed
+// to refuse times a hardcoded table considered unreasonable. They are
+// removed on purpose.
+//
+// "Nothing's open at 3am" is a FACT — the objective hours filter decides it
+// on real Places data, per venue, at the resolved instant. "Brunch isn't
+// plausible at 3am" was an OPINION, and a wrong one whenever a 24/7 diner is
+// around the corner. This layer was guessing where evidence is available,
+// which is exactly the habit the planner change removes. An impossible hour
+// now surfaces as what it really is: every pool emptied on `hours`, which
+// noVenuesReason already reports honestly ("everything nearby is closed at
+// that hour").
+//
+// The one behaviour that had to SURVIVE the deletion is the swap engine's
+// meridiem disambiguation ("make it 10" on a brunch stop means 10 AM, not
+// 10 PM). That is a reading-comprehension judgment about an ambiguous
+// number, not a refusal, so it kept a minimal category→rough-hours map of
+// its own in swap.ts — see ROUGH_HOURS there.
 
 /**
- * resolveStartTime + the fail-loud plausibility check. EVERY resolved
- * start must land inside a plausible band for at least one category
- * (generic 8–23 band when nothing matches). An explicit clock time or
- * day-part that lands outside every band ("brunch at 3am") fails with a
- * specific message naming the category's realistic window; an inferred
- * start (category default / next-full-hour) outside every band fails
- * with the generic add-a-time message.
+ * Resolve a time_window to a start instant, without any plausibility
+ * judgment. Malformed input (an unparseable clock, a contradictory calendar
+ * qualifier, a date that doesn't exist) still fails loud — those are facts
+ * about the input, not opinions about the hour.
  */
+export type StartResolution = { ok: true; start: Date } | { ok: false; reason: string };
+
 export function resolveStartTimeChecked(
   timeWindow: string,
   now: Date = new Date(),
   categories: string[] = [],
   timeZone: string = DEFAULT_ZONE
 ): StartResolution {
-  const resolved = resolveStartTimeResult(timeWindow, now, categories, timeZone);
-  if (!resolved.ok) return { ok: false, reason: resolved.reason };
-  const start = resolved.start;
-  const tw = (timeWindow ?? "").toLowerCase();
-
-  const band = bandForCategories(categories);
-  if (inBand(start, band, timeZone)) return { ok: true, start };
-
-  const qualifier = calendarQualifier(tw);
-  const calendarClock =
-    qualifier.kind === "invalid" ? { kind: "none" as const } : bareClockAfterCalendar(tw, qualifier);
-  const hasClockTime =
-    parseTargetTime(tw) !== null || calendarClock.kind === "valid";
-  const hasDayPart = Object.keys(DAY_PART_DEFAULTS).some((k) => tw.includes(k));
-  // an explicit "now" (clarify answer) is a stated time too — a 3 AM
-  // refusal must say "nothing's open then", never "add a time" (they just did)
-  const hasExplicitNow = /\bnow\b/.test(tw);
-  if (hasClockTime || hasDayPart || hasExplicitNow) {
-    return { ok: false, reason: implausibleExplicitReason(start, categories, timeZone) };
-  }
-  // no stated time: if the category itself has a known window, say THAT
-  // (adding a time wouldn't help) and mark the failure OVERRIDABLE — the
-  // user never typed a time, so an informed "still want it" is legitimate.
-  // No banded category → the generic add-a-time message, not overridable.
-  const inferred = implausibleInferredReason(start, categories, timeZone);
-  if (inferred) {
-    return { ok: false, reason: inferred.reason, overridable: true, category: inferred.category };
-  }
-  return { ok: false, reason: IMPLAUSIBLE_TIME_MESSAGE };
+  return resolveStartTimeResult(timeWindow, now, categories, timeZone);
 }
 
 /** Format an absolute instant as an ISO string in `timeZone` (default

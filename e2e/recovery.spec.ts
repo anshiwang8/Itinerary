@@ -352,121 +352,17 @@ test.describe("@mock weather-gate", () => {
   });
 });
 
-// ── Batch 4b: the inferred-time gate ─────────────────────────────────────
-// The user typed NO time and the app's own inferred slot fell outside a
-// known category band (parks at ~11 PM) — that's now a CHOICE panel, not a
-// refusal string. The client clock is frozen late via addInitScript (the
-// gate is a client-side check); fixture determinism at any SERVER hour
-// comes from the hours-less "Fixture … Three" (keep-on-missing survivor)
-// and the deliberately-empty "beach" pool.
-test.describe("@mock inferred-time gate", () => {
-  async function planLate(page: Page, prompt: string): Promise<void> {
-    await page.addInitScript(`{
-      const RealDate = Date;
-      const fixed = new RealDate('2026-07-16T22:54:00-04:00').getTime();
-      function FakeDate(...a) { return a.length ? new RealDate(...a) : new RealDate(fixed); }
-      FakeDate.now = () => fixed;
-      FakeDate.parse = RealDate.parse;
-      FakeDate.UTC = RealDate.UTC;
-      FakeDate.prototype = RealDate.prototype;
-      window.Date = FakeDate;
-    }`);
-    await page.goto("/");
-    await page.locator(".prompt__input").fill(prompt);
-    await page.locator(".prompt__go").click();
-    await dismissClarifyIfShown(page);
-    // "sit in a park" has a category but no time → the WHEN clarify shows
-    // first; skipping keeps the time unspecified, which is what arms the gate
-    const skip = page.locator(".clarify__skip");
-    await expect(page.locator(".clarify, .recover, .empty__err").first()).toBeVisible({ timeout: 30_000 });
-    if (await skip.isVisible()) await skip.click();
-  }
-
-  test("inferred out-of-band → interactive gate panel, not a dead-end string @mock", async ({ page }) => {
-    await planLate(page, "sit in a park");
-    const gate = page.locator(".recover--gate");
-    await expect(gate).toBeVisible({ timeout: 30_000 });
-    // names the obstacle and the window — and asks as a REAL question
-    await expect(gate).toContainText(/late for a typical park walk visit/i);
-    await expect(gate).toContainText(/6 AM to 10 PM/);
-    await expect(gate.getByRole("button", { name: "Still want it" })).toBeVisible();
-    await expect(gate.getByRole("button", { name: "Something else" })).toBeVisible();
-    // no plain-refusal surface, no plan behind it
-    await expect(page.locator(".empty__err, .stage__err")).toHaveCount(0);
-    await expect(page.locator(".lstrip")).toHaveCount(0);
-  });
-
-  test("'Still want it' overrides the gate and actually plans @mock", async ({ page }) => {
-    await planLate(page, "sit in a park");
-    await page.locator(".recover--gate").getByRole("button", { name: "Still want it" }).click();
-    // the band gate is bypassed; the hours filter still runs for real and
-    // the keep-on-missing fixture survives at any server hour
-    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator(".lstrip__stop .eyebrow").first()).toHaveText(/park/i);
-    await expect(page.locator(".lstrip__stop .lstrip__name").first()).toHaveText(/Fixture Park walk/);
-  });
-
-  test("override finds NOTHING → lands in the recovery flow, not a new dead end @mock", async ({ page }) => {
-    // "beach" shares the park band (gate fires) but its pool is empty
-    await planLate(page, "sit by the beach");
-    const gate = page.locator(".recover--gate");
-    await expect(gate).toBeVisible({ timeout: 30_000 });
-    await expect(gate).toContainText(/late for a typical beach visit/i);
-    await gate.getByRole("button", { name: "Still want it" }).click();
-
-    // the EXISTING recovery panel takes over — with the honest reason
-    const recover = page.locator(".recover");
-    await expect(recover).toBeVisible({ timeout: 30_000 });
-    await expect(recover).toContainText(/Couldn't find any beach/i);
-    // nothing else was picked, so "Plan without it" would be meaningless
-    await expect(page.locator(".recover__skip")).toHaveCount(0);
-    // widen honestly comes back empty for beach (still no fixtures)…
-    await page.locator(".recover__widen").click();
-    await expect(page.locator(".recover__note")).toContainText(/Still no beach city-wide/i);
-    // …and the replace follow-up recovers to a real plan (any-hour fixture)
-    await page.locator(".recover__input").fill("axe throwing");
-    await page.locator(".recover__go").click();
-    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator(".lstrip__stop .lstrip__name").first()).toHaveText(/Fixture Axe throwing/);
-  });
-
-  test("'Something else' returns to the kind picker and continues cleanly @mock", async ({ page }) => {
-    await planLate(page, "sit in a park");
-    await page.locator(".recover--gate").getByRole("button", { name: "Something else" }).click();
-    // back to batch 4's kind question — no error, no retyping
-    const clarify = page.locator(".clarify");
-    await expect(clarify).toBeVisible({ timeout: 30_000 });
-    await expect(clarify).toContainText("What kind of thing?");
-    await expect(page.locator(".empty__err, .stage__err")).toHaveCount(0);
-    // picking a direction continues to a real plan (general pool has the
-    // any-hour keep-on-missing fixture)
-    await clarify.getByRole("button", { name: "something to do", exact: true }).click();
-    await clarify.getByRole("button", { name: "Go", exact: true }).click();
-    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator(".lstrip__stop .lstrip__name").first()).toHaveText(/Fixture General/);
-  });
-
-  test("'Something else' → drinks lands TONIGHT, not tomorrow's category default @mock", async ({ page }) => {
-    // the batch-4c repro: at a frozen 22:54, choosing "drinks" after the
-    // gate used to fall through to bar's 20:00 default — already passed —
-    // and roll the whole plan to TOMORROW 8 PM. The gate continuation now
-    // carries an explicit "now", so the plan anchors at 23:00 tonight
-    // (inside the bar band's past-midnight wrap). The hours-less Night
-    // Owl fixture keeps the bar pool non-empty at any SERVER hour.
-    await planLate(page, "sit in a park");
-    await page.locator(".recover--gate").getByRole("button", { name: "Something else" }).click();
-    const clarify = page.locator(".clarify");
-    await expect(clarify).toBeVisible({ timeout: 30_000 });
-    await clarify.getByRole("button", { name: "drinks", exact: true }).click();
-    await clarify.getByRole("button", { name: "Go", exact: true }).click();
-
-    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
-    const firstStop = page.locator(".lstrip__stop").first();
-    await expect(firstStop.locator(".eyebrow")).toHaveText(/drinks|bar/i);
-    // TONIGHT: the stop's time line must carry no "tomorrow" prefix and
-    // sit in the 11 PM slot the frozen clock implies
-    const be = firstStop.locator(".lstrip__be");
-    await expect(be).not.toContainText(/tomorrow/i);
-    await expect(be).toContainText(/11:\d{2} PM/);
-  });
-});
+// ── Batch 4b's inferred-time gate suite was DELETED (2026-07-27) ──────────
+// Four scenarios lived here: the gate panel appearing for "sit in a park"
+// late at night, "Still want it" overriding it, an override that found
+// nothing falling into the recovery flow, and "Something else" re-opening
+// the kind picker. All four pinned the PLAUSIBILITY GATE, which is gone —
+// an hour is no longer refused because a hardcoded band disliked it, so
+// there is no verdict left to override and no panel to render.
+//
+// What replaced them: a late-night park prompt now simply plans, and if
+// nothing is genuinely open the objective hours filter empties the pools
+// and noVenuesReason says so. The resolver side of that change is pinned in
+// app/api/schedule/schedule.test.ts ("park prompts anchor immediately at
+// ANY hour"); the empty-pool recovery path those tests also exercised is
+// still covered by the dumplings/bao scenarios above.

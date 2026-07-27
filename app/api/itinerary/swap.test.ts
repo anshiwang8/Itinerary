@@ -393,8 +393,13 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "impossible time ('dinner at 4am') fails loud with the real reason",
+    "'dinner at 4am' is refused on the FACT (it's in the past), not on taste",
     async () => {
+      // REWRITTEN 2026-07-27: this used to assert the plausibility gate's
+      // "a 4:00 AM dinner won't work — nothing's really open then". That
+      // was a table's opinion, and wrong next to a 24-hour diner. The move
+      // is still refused, but for a checkable reason: 4 AM on this stop's
+      // own date is behind the floor the evening has already reached.
       const it = mkItinerary();
       const now = new Date(T(18, 0));
       const res = await swapStop(
@@ -402,9 +407,29 @@ const cases: Array<[string, () => Promise<void>]> = [
         mkDeps({ time: { mode: "absolute", targetTime: "04:00" } })
       );
       assert.strictEqual(res.swapped, false);
-      if (!res.swapped) assert.match(res.reason, /4:00 AM|won't work|nothing's really open/);
+      if (!res.swapped) assert.match(res.reason, /earlier than where the evening already is/);
+      // plan-then-commit: a refusal leaves the itinerary untouched
       assert.strictEqual(it.stops[0].id, "d1");
       assert.strictEqual(it.stops[0].start_time, T(19, 0));
+    },
+  ],
+  [
+    "an unusual FORWARD time is no longer refused up front — hours decide it",
+    async () => {
+      // The counterpart of the case above, and the actual point of deleting
+      // the gate: 11 PM dinner used to sit inside the dinner band and 11:30
+      // PM did not. Now neither is a verdict — the swap proceeds to the real
+      // availability check, and the fixture venue's own hours decide.
+      const it = mkItinerary();
+      const now = new Date(T(18, 0));
+      const res = await swapStop(
+        it, 0, "push dinner to 11pm", now,
+        mkDeps({ time: { mode: "absolute", targetTime: "23:00" } })
+      );
+      // whatever the hours say, the refusal must never be the old opinion
+      if (!res.swapped) {
+        assert.doesNotMatch(res.reason, /nothing's really open then/);
+      }
     },
   ],
   [

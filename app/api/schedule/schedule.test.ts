@@ -4,11 +4,11 @@ import assert from "node:assert";
 import { DURATION_TABLE, getDuration, resolveCategory } from "./durations";
 import {
   buildSchedule,
-  IMPLAUSIBLE_TIME_MESSAGE,
   resolveStartTime,
   resolveStartTimeChecked,
 } from "./schedule";
 import { TravelLeg } from "./travel";
+import { wallClockParts } from "../../lib/zoneTime";
 
 // Fixed "now": Friday 2026-07-03 13:20 local (EDT, -04:00).
 const NOW = new Date(2026, 6, 3, 13, 20, 0);
@@ -250,16 +250,26 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
-    "MULTI-CITY: plausibility band judged in the plan's zone (independent of runner TZ)",
+    "MULTI-CITY: an explicit clock time lands on the PLAN's wall clock, not the runner's",
     () => {
-      // an explicit 8pm dinner is fine in Vancouver's own clock
+      // REWRITTEN 2026-07-27: this used to also assert that a 4 AM dinner
+      // was REFUSED by the plausibility band. That verdict is gone — a 4 AM
+      // dinner is now planned, and the objective hours filter decides
+      // whether anything is actually open. What still matters, and is what
+      // this case was really protecting, is that "8pm" means 8 PM in
+      // Vancouver rather than 8 PM in Toronto or on the test runner.
       const inst = new Date("2026-07-11T16:00:00Z");
       const ok = resolveStartTimeChecked("8pm", inst, ["dinner"], "America/Vancouver");
       assert.strictEqual(ok.ok, true);
-      // 4am dinner refused, and the message quotes the LOCAL hour "4 AM"
-      const bad = resolveStartTimeChecked("4am", inst, ["dinner"], "America/Vancouver");
-      assert.strictEqual(bad.ok, false);
-      if (!bad.ok) assert.match(bad.reason, /Couldn't plan a 4 AM dinner/);
+      if (ok.ok) {
+        assert.strictEqual(wallClockParts(ok.start, "America/Vancouver").hour, 20);
+      }
+      // the unusual hour resolves rather than refusing, on the same clock
+      const smallHours = resolveStartTimeChecked("4am", inst, ["dinner"], "America/Vancouver");
+      assert.strictEqual(smallHours.ok, true);
+      if (smallHours.ok) {
+        assert.strictEqual(wallClockParts(smallHours.start, "America/Vancouver").hour, 4);
+      }
     },
   ],
   [
@@ -312,10 +322,13 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
-    "park prompts anchor immediately and pass their dawn-to-dusk band",
+    "park prompts anchor immediately at ANY hour — openness is a filter question",
     () => {
-      // no category default → next full hour; the park band (6–22) accepts
-      // early-morning and daytime immediate slots the generic band refused
+      // REWRITTEN 2026-07-27: the last assertion used to be "a midnight
+      // park sit honestly refuses", from the park band (6–22). That was the
+      // table's opinion. A 24-hour waterfront path exists; whether THIS park
+      // is open at 23:30 is decided by the hours filter on real data, so the
+      // resolver's only job here is the anchor.
       const at5am = new Date(2026, 6, 11, 5, 10, 0);
       const early = resolveStartTimeChecked("unspecified", at5am, ["park"]);
       assert.strictEqual(early.ok, true);
@@ -324,9 +337,11 @@ const cases: Array<[string, () => void]> = [
       }
       const midday = resolveStartTimeChecked("unspecified", new Date(2026, 6, 11, 12, 20, 0), ["park"]);
       assert.strictEqual(midday.ok, true);
-      // a midnight park sit still honestly refuses
       const late = resolveStartTimeChecked("unspecified", new Date(2026, 6, 11, 23, 30, 0), ["park"]);
-      assert.strictEqual(late.ok, false);
+      assert.strictEqual(late.ok, true);
+      if (late.ok) {
+        assert.strictEqual(late.start.toISOString(), new Date(2026, 6, 12, 0, 0, 0).toISOString());
+      }
     },
   ],
   [
@@ -342,13 +357,13 @@ const cases: Array<[string, () => void]> = [
       // midday "now" passes the checked resolver
       const ok = resolveStartTimeChecked("now", t, []);
       assert.strictEqual(ok.ok, true);
-      // 3 AM "now" is refused with the SPECIFIC nothing-open message —
-      // never the "add a time" one (the user just gave a time)
+      // REWRITTEN 2026-07-27: 3 AM "now" used to be refused ("nothing much
+      // is open then"). Someone typing "right now" at 3 AM means it — the
+      // plan is built and the hours filter reports what is genuinely open.
       const late = resolveStartTimeChecked("now", new Date(2026, 6, 11, 2, 57, 0), []);
-      assert.strictEqual(late.ok, false);
-      if (!late.ok) {
-        assert.match(late.reason, /nothing much is open then/);
-        assert.notStrictEqual(late.reason, IMPLAUSIBLE_TIME_MESSAGE);
+      assert.strictEqual(late.ok, true);
+      if (late.ok) {
+        assert.strictEqual(late.start.toISOString(), new Date(2026, 6, 11, 3, 0, 0).toISOString());
       }
     },
   ],
@@ -360,13 +375,15 @@ const cases: Array<[string, () => void]> = [
         resolveStartTime("unspecified", t, ["axe throwing"]).toISOString(),
         new Date(2026, 6, 11, 14, 0, 0).toISOString()
       );
-      // RESOLVED (was the "KNOWN INTERACTION" flagged for the ambiguous-
-      // prompt work): the generic band now wraps to 1 AM, so a vague/
-      // unrecognized request at 11:30 PM gets its immediate slot (00:00)
-      // instead of being refused on rounding alone.
+      // a vague/unrecognized request at 11:30 PM gets its immediate slot
+      // (00:00). This once depended on the generic band happening to wrap
+      // past midnight; with no band at all it simply resolves.
       const late = new Date(2026, 6, 11, 23, 30, 0);
       const r = resolveStartTimeChecked("unspecified", late, ["axe throwing"]);
       assert.strictEqual(r.ok, true);
+      if (r.ok) {
+        assert.strictEqual(r.start.toISOString(), new Date(2026, 6, 12, 0, 0, 0).toISOString());
+      }
     },
   ],
   [
@@ -378,172 +395,46 @@ const cases: Array<[string, () => void]> = [
       const r = resolveStartTimeChecked("now", t, []);
       assert.strictEqual(r.ok, true);
       if (r.ok) assert.strictEqual(r.start.getHours(), 23);
-      // and past midnight still works up to the 1 AM edge
+      // and past midnight works — there is no longer an edge to fall off
       const midnight = resolveStartTimeChecked("now", new Date(2026, 6, 16, 23, 40, 0), []);
       assert.strictEqual(midnight.ok, true);
-      // but the small hours are still honestly refused
+      // REWRITTEN 2026-07-27: the small hours used to be refused outright.
+      // 24-hour venues exist; the hours filter is the honest judge.
       const threeAM = resolveStartTimeChecked("now", new Date(2026, 6, 16, 2, 57, 0), []);
-      assert.strictEqual(threeAM.ok, false);
-      if (!threeAM.ok) assert.match(threeAM.reason, /nothing much is open then/);
+      assert.strictEqual(threeAM.ok, true);
+      if (threeAM.ok) assert.strictEqual(threeAM.start.getHours(), 3);
     },
   ],
   [
-    "LATE-NIGHT (batch 4): an INFERRED out-of-band time names the real obstacle, not 'add a time'",
+    "checked resolver: every well-formed time resolves to the instant it names",
     () => {
-      // the reported repro: "sit in a park" at 10:54 PM → inferred 11 PM,
-      // past the park band's 10 PM close. "Add a time" was misleading —
-      // nothing the user types fixes tonight. Since batch 4b the failure
-      // is also OVERRIDABLE (the UI offers "still want it") and carries
-      // no trailing suggestion — the panel's buttons ARE the suggestion.
-      const t = new Date(2026, 6, 16, 22, 54, 0);
-      const r = resolveStartTimeChecked("unspecified", t, ["park"]);
-      assert.strictEqual(r.ok, false);
-      if (!r.ok) {
-        assert.notStrictEqual(r.reason, IMPLAUSIBLE_TIME_MESSAGE);
-        assert.strictEqual(
-          r.reason,
-          "It's 11 PM — late for a typical park visit (park around here runs about 6 AM to 10 PM)."
-        );
-        assert.strictEqual(r.overridable, true);
-        assert.strictEqual(r.category, "park");
-      }
-      // too EARLY reads the other way round — and is overridable too
-      const dawn = resolveStartTimeChecked("unspecified", new Date(2026, 6, 16, 4, 30, 0), ["park"]);
-      assert.strictEqual(dawn.ok, false);
-      if (!dawn.ok) {
-        assert.match(dawn.reason, /early for park \(park around here runs about 6 AM to 10 PM\)\.$/);
-        assert.strictEqual(dawn.overridable, true);
-      }
-      // a category with NO band keeps the generic add-a-time message and
-      // is NOT overridable (there's no informed window to override)
-      const unknown = resolveStartTimeChecked("unspecified", new Date(2026, 6, 3, 4, 0, 0), ["axe throwing"]);
-      assert.strictEqual(unknown.ok, false);
-      if (!unknown.ok) {
-        assert.strictEqual(unknown.reason, IMPLAUSIBLE_TIME_MESSAGE);
-        assert.strictEqual(unknown.overridable, undefined);
-      }
-    },
-  ],
-  [
-    "GATE CONTINUATION (batch 4c): 'now' + bar late at night resolves TONIGHT, not tomorrow's default",
-    () => {
-      // the confirmed repro's resolver shape: at 22:54, a bar category with
-      // NO time signal falls to its 20:00 default → rolls to TOMORROW.
-      // With the explicit "now" the gate's "something else" now stamps on
-      // the continuation, it must resolve to the immediate slot TONIGHT
-      // (23:00 — inside the bar band's past-midnight wrap).
-      const t = new Date(2026, 6, 16, 22, 54, 0);
-      // sanity: the un-stamped fall-through really is tomorrow (the bug shape)
-      const plain = resolveStartTime("unspecified", t, ["bar"]);
-      assert.strictEqual(plain.toISOString(), new Date(2026, 6, 17, 20, 0, 0).toISOString());
-      // the stamped continuation: tonight, and it passes the checked resolver
-      const stamped = resolveStartTimeChecked("now", t, ["bar"]);
-      assert.strictEqual(stamped.ok, true);
-      if (stamped.ok) {
-        assert.strictEqual(stamped.start.toISOString(), new Date(2026, 6, 16, 23, 0, 0).toISOString());
-      }
-    },
-  ],
-  [
-    "OVERRIDE BOUNDARY (batch 4b): explicit impossible requests are NEVER overridable",
-    () => {
-      // the load-bearing distinction: the override exists ONLY for the
-      // inferred path. An explicit "brunch at 3am"/"dinner at 4am"/"now"
-      // stays a hard fail — same messages, no override flag.
-      const now = new Date(2026, 6, 3, 1, 0, 0);
-      for (const [tw, cats] of [
-        ["3am", ["brunch"]],
-        ["4am", ["dinner"]],
-        ["evening", ["brunch"]], // explicit day-part
-      ] as Array<[string, string[]]>) {
-        const r = resolveStartTimeChecked(tw, now, cats);
-        assert.strictEqual(r.ok, false, `${tw} ${cats[0]} must fail`);
-        if (!r.ok) assert.strictEqual(r.overridable, undefined, `${tw} ${cats[0]} must not be overridable`);
-      }
-      // explicit "now" (a clarify answer) is a stated time — not overridable
-      const late = resolveStartTimeChecked("now", new Date(2026, 6, 11, 2, 57, 0), []);
-      assert.strictEqual(late.ok, false);
-      if (!late.ok) assert.strictEqual(late.overridable, undefined);
-      // and "now" + park at 11 PM: stated time, park band → explicit hard
-      // fail with the category window, still no override
-      const nowPark = resolveStartTimeChecked("now", new Date(2026, 6, 16, 22, 54, 0), ["park"]);
-      assert.strictEqual(nowPark.ok, false);
-      if (!nowPark.ok) {
-        assert.match(nowPark.reason, /park around here runs about 6 AM to 10 PM/);
-        assert.strictEqual(nowPark.overridable, undefined);
-      }
-    },
-  ],
-  [
-    "4 AM 'axe throwing' (no default): plausible-band check fails loud",
-    () => {
-      const fourAM = new Date(2026, 6, 3, 4, 0, 0);
-      // next-full-hour would book 5 AM — outside the generic 8–23 band
-      const res = resolveStartTimeChecked("unspecified", fourAM, ["axe throwing"]);
-      assert.deepStrictEqual(res, { ok: false, reason: IMPLAUSIBLE_TIME_MESSAGE });
-    },
-  ],
-  [
-    "checked resolver: sane inferred, plausible explicit, and day-part times pass",
-    () => {
-      // 13:20 → next full hour 14:00, inside the generic band
+      // REWRITTEN 2026-07-27: these used to assert only `ok === true`, and
+      // each comment explained which BAND the time fell inside. With no
+      // bands, the meaningful assertion is the resolved instant itself.
       const NOW = new Date(2026, 6, 3, 13, 20, 0);
       const sane = resolveStartTimeChecked("unspecified", NOW, ["axe throwing"]);
       assert.strictEqual(sane.ok, true);
-      // explicit clock time inside the category's band passes
-      const fourAM = new Date(2026, 6, 3, 3, 0, 0);
-      const explicit = resolveStartTimeChecked("7pm", fourAM, ["dinner"]);
+      if (sane.ok) {
+        assert.strictEqual(sane.start.toISOString(), new Date(2026, 6, 3, 14, 0, 0).toISOString());
+      }
+      const threeAM = new Date(2026, 6, 3, 3, 0, 0);
+      const explicit = resolveStartTimeChecked("7pm", threeAM, ["dinner"]);
       assert.strictEqual(explicit.ok, true);
-      // stated day-part passes too (morning → 10:00, generic band)
-      const dayPart = resolveStartTimeChecked("morning", fourAM, ["axe throwing"]);
+      if (explicit.ok) {
+        assert.strictEqual(explicit.start.toISOString(), new Date(2026, 6, 3, 19, 0, 0).toISOString());
+      }
+      const dayPart = resolveStartTimeChecked("morning", threeAM, ["axe throwing"]);
       assert.strictEqual(dayPart.ok, true);
-      // club at 22:00 is inside its own (midnight-wrapping) band
-      const club = resolveStartTimeChecked("unspecified", fourAM, ["night club"]);
+      if (dayPart.ok) {
+        assert.strictEqual(dayPart.start.toISOString(), new Date(2026, 6, 3, 10, 0, 0).toISOString());
+      }
+      const club = resolveStartTimeChecked("unspecified", threeAM, ["night club"]);
       assert.strictEqual(club.ok, true);
-      // 1 AM drinks: inside the bar band's past-midnight wrap
-      const lateBar = resolveStartTimeChecked("1am", fourAM, ["bar"]);
+      const lateBar = resolveStartTimeChecked("1am", threeAM, ["bar"]);
       assert.strictEqual(lateBar.ok, true);
-    },
-  ],
-  [
-    "explicit implausible times fail loud with the category's window (BUG 1)",
-    () => {
-      const now = new Date(2026, 6, 3, 1, 0, 0);
-      // "brunch at 3am" — names brunch, its window, and says try LATER
-      const brunch = resolveStartTimeChecked("3am", now, ["brunch"]);
-      assert.strictEqual(brunch.ok, false);
-      if (!brunch.ok) {
-        assert.strictEqual(
-          brunch.reason,
-          "Couldn't plan a 3 AM brunch — brunch around here runs about 8 AM to 3 PM. Try a later time?"
-        );
+      if (lateBar.ok) {
+        assert.strictEqual(lateBar.start.toISOString(), new Date(2026, 6, 4, 1, 0, 0).toISOString());
       }
-      // "dinner at 4am" — same surface, dinner's window
-      const dinner = resolveStartTimeChecked("4am", now, ["dinner"]);
-      assert.strictEqual(dinner.ok, false);
-      if (!dinner.ok) {
-        assert.strictEqual(
-          dinner.reason,
-          "Couldn't plan a 4 AM dinner — dinner around here runs about 11 AM to 11 PM. Try a later time?"
-        );
-      }
-      // past close (non-wrapping band) suggests EARLIER: brunch at 5 PM
-      const lateBrunch = resolveStartTimeChecked("5pm", now, ["brunch"]);
-      assert.strictEqual(lateBrunch.ok, false);
-      if (!lateBrunch.ok) assert.match(lateBrunch.reason, /Try an earlier time\?$/);
-      // explicit time, no banded category → generic honest message
-      const generic = resolveStartTimeChecked("4am", now, ["axe throwing"]);
-      assert.strictEqual(generic.ok, false);
-      if (!generic.ok) {
-        assert.strictEqual(
-          generic.reason,
-          "Couldn't plan that for 4 AM — nothing much is open then. Try a time between 8 AM and 1 AM?"
-        );
-      }
-      // implausible DAY-PART hits the same surface ("brunch tonight")
-      const evening = resolveStartTimeChecked("evening", now, ["brunch"]);
-      assert.strictEqual(evening.ok, false);
-      if (!evening.ok) assert.match(evening.reason, /brunch around here runs about 8 AM to 3 PM/);
     },
   ],
   [
@@ -668,16 +559,19 @@ const cases: Array<[string, () => void]> = [
         "2026-07-10T14:00:00.000Z"
       );
 
+      // REWRITTEN 2026-07-27: a bare hour after a weekday ("Monday 2") is
+      // still READ as a clock time — that parsing contract is what this
+      // case protects. It used to then be refused as an implausible 2 AM
+      // dinner; now it simply resolves to Monday 02:00 local.
       const explicitBare = resolveStartTimeChecked(
         "Monday 2",
         NOW,
         ["dinner"],
         "America/Toronto"
       );
-      assert.strictEqual(explicitBare.ok, false);
-      if (!explicitBare.ok) {
-        assert.strictEqual(explicitBare.overridable, undefined);
-        assert.match(explicitBare.reason, /dinner/);
+      assert.strictEqual(explicitBare.ok, true);
+      if (explicitBare.ok) {
+        assert.strictEqual(explicitBare.start.toISOString(), "2026-07-06T06:00:00.000Z");
       }
     },
   ],
@@ -736,19 +630,6 @@ const cases: Array<[string, () => void]> = [
         ).toISOString(),
         "2026-11-01T05:30:00.000Z"
       );
-    },
-  ],
-  [
-    "plausibility validates the first scheduled category, not a later permissive one",
-    () => {
-      const result = resolveStartTimeChecked(
-        "1am",
-        new Date("2026-07-03T00:00:00Z"),
-        ["dinner", "bar"],
-        "America/Toronto"
-      );
-      assert.strictEqual(result.ok, false);
-      if (!result.ok) assert.match(result.reason, /dinner/);
     },
   ],
   [

@@ -110,7 +110,6 @@ interface PipelineGeocode {
 }
 
 interface ContinueOptions {
-  overrideTimeGate?: boolean;
   geocode?: PipelineGeocode;
 }
 
@@ -313,23 +312,22 @@ export default function Home() {
   // several in one clarify round ("dinner and drinks" is two)
   const [clarifyNarrow, setClarifyNarrow] = useState<Record<string, string>>({});
 
-  // The interactive-recovery panel — one component, four triggers:
+  // The interactive-recovery panel — one component, three triggers:
   //  - "geocode": a city or starting address has multiple factual matches
   //    → show formatted-address candidates and resume with the exact choice.
   //    Never select provider result zero implicitly.
-  //  - "empty": SOME (or, after an override, ALL) categories came back
-  //    empty → honest reason + widen / replace that slot. Rows flagged
-  //    noWiden suppress the widen offer (a weather problem isn't a radius
-  //    problem — widening can't fix rain).
-  //  - "time-gate" (batch 4b): the user typed NO time and our own inferred
-  //    slot landed outside a known category band → a real choice ("still
-  //    want it" bypasses the gate; "something else" re-opens the kind
-  //    picker) instead of a dead-end refusal string.
+  //  - "empty": SOME categories came back empty → honest reason + widen /
+  //    replace that slot. Rows flagged noWiden suppress the widen offer (a
+  //    weather problem isn't a radius problem — widening can't fix rain).
   //  - "weather-gate": a category came back empty specifically because the
   //    WEATHER blocked it while others survived → the honest reason plus
   //    the same real choice ("still want it" retries that category with
   //    ONLY the weather gate off; "something else" moves to replacing the
   //    slot) — never the useless widen offer.
+  //
+  // A fourth mode, "time-gate", was removed with the plausibility gate
+  // (2026-07-27): it existed only to offer a choice about an hour a
+  // hardcoded table disliked, and there is no such verdict any more.
   const [recovery, setRecovery] = useState<
     | {
         mode: "geocode";
@@ -338,7 +336,6 @@ export default function Home() {
         message: string;
         candidates: GeocodeCandidate[];
         geocode: PipelineGeocode;
-        overrideTimeGate?: boolean;
       }
     | {
         mode: "empty";
@@ -347,13 +344,6 @@ export default function Home() {
         replaceText: Record<string, string>;
         busy: boolean;
         note: { kind: "status" | "error"; text: string } | null;
-      }
-    | {
-        mode: "time-gate";
-        parsed: ParsedPrompt;
-        reason: string;
-        category: string;
-        geocode: PipelineGeocode;
       }
     | {
         mode: "weather-gate";
@@ -534,10 +524,7 @@ export default function Home() {
     }
   }
 
-  // everything from the time check onward — parseData is final here.
-  // opts.overrideTimeGate: the user pressed "still want it" on the
-  // time-gate panel — an explicit, informed confirmation — so the
-  // inferred-time band check is bypassed for THIS run only.
+  // everything from the geocode onward — parseData is final here.
   async function continuePipeline(
     parseData: ParsedPrompt,
     opts: ContinueOptions = {}
@@ -572,7 +559,6 @@ export default function Home() {
             message: cityOutcome.message,
             candidates: cityOutcome.candidates,
             geocode: {},
-            overrideTimeGate: opts.overrideTimeGate,
           });
           setLoadingText(null);
           return;
@@ -613,7 +599,6 @@ export default function Home() {
               message: addressOutcome.message,
               candidates: addressOutcome.candidates,
               geocode: resolvedGeocode,
-              overrideTimeGate: opts.overrideTimeGate,
             });
             setLoadingText(null);
             return;
@@ -634,41 +619,22 @@ export default function Home() {
       // and swap/reroute re-searches inherit the same anchor from the store
       parseData.home = hp.location;
 
-      // fail loud on an implausible time, judged in the PLAN's zone.
-      // Explicit impossible requests ("brunch at 3am") stay HARD fails.
-      // The inferred case (user typed no time; our own guess landed
-      // outside a known band) is OVERRIDABLE: it opens the time-gate
-      // panel, and "still want it" re-enters here with the override set.
+      // Resolve the start instant in the PLAN's zone. Malformed input (an
+      // unparseable clock, contradictory calendar qualifiers, a date that
+      // doesn't exist) still fails loud — those are facts about the input.
+      // The PLAUSIBILITY gate that used to live here is gone: refusing an
+      // hour because a table called it unreasonable was an opinion, and the
+      // objective hours filter decides openness on real data a few steps
+      // below. An impossible hour now surfaces as every pool emptied on
+      // `hours`, which noVenuesReason reports honestly.
       const check = resolveStartTimeChecked(
         parseData.time_window ?? "",
         new Date(),
         parseData.category_signals ?? [],
         planZone
       );
-      let startInstant: Date;
-      if (check.ok) {
-        startInstant = check.start;
-      } else if (check.overridable && opts.overrideTimeGate) {
-        // informed override — keep the same inferred instant, skip the gate
-        startInstant = resolveStartTime(
-          parseData.time_window ?? "",
-          new Date(),
-          parseData.category_signals ?? [],
-          planZone
-        );
-      } else if (check.overridable) {
-        setRecovery({
-          mode: "time-gate",
-          parsed: parseData,
-          reason: check.reason,
-          category: check.category ?? "that",
-          geocode: resolvedGeocode,
-        });
-        setLoadingText(null);
-        return;
-      } else {
-        return fail(check.reason);
-      }
+      if (!check.ok) return fail(check.reason);
+      const startInstant: Date = check.start;
 
       let weather: WeatherHour[] | null = null;
       try {
@@ -698,58 +664,16 @@ export default function Home() {
       setWeatherBlocks(wxBlocks);
 
       // the empty-map net: EVERY pool came back empty → say why, don't
-      // render a map with nothing on it. After a time-gate OVERRIDE the
-      // plain string would be a brand-new dead end — the user just chose
-      // to push past one — so that case routes into the SAME recovery
-      // panel instead (widen / try something else), with synthesized
-      // null-id selections since select never ran.
+      // render a map with nothing on it. This is also where an impossible
+      // HOUR now lands: with the plausibility gate gone, "brunch at 3am"
+      // isn't refused up front — it runs, every venue drops on `hours`, and
+      // noVenuesReason names that as the dominant cause. An honest fact
+      // instead of a table's opinion.
       const poolEntries = Object.entries(categories);
       const allEmpty =
         poolEntries.length === 0 ||
         poolEntries.every(([, arr]) => !Array.isArray(arr) || arr.length === 0);
       if (allEmpty) {
-        if (opts.overrideTimeGate && poolEntries.length > 0) {
-          const requestedSlots =
-            parseData.category_signals.length > 0
-              ? parseData.category_signals
-              : poolEntries.map(([category]) => category);
-          const emptySels: Selection[] = requestedSlots.map((category, slot) => ({
-            category,
-            slot,
-            id: null,
-            reason: "no venues survived filtering",
-          }));
-          const arrivalBySlot = provisionalArrivals(
-            requestedSlots,
-            startInstant,
-            emptySels
-          );
-          setRecovery({
-            mode: "empty",
-            ctx: {
-              parseData,
-              planZone,
-              hp,
-              weather,
-              startInstant,
-              arrivalBySlot,
-              pools: categories,
-              sels: emptySels,
-              drops,
-              slots: {},
-            },
-            empties: requestedSlots.map((category, slot) => ({
-              category,
-              slot,
-              reason: emptyCategoryReason(category, drops, parseData.location),
-            })),
-            replaceText: {},
-            busy: false,
-            note: null,
-          });
-          setLoadingText(null);
-          return;
-        }
         return fail(
           wxBlocks.length >= poolEntries.length && wxBlocks.length > 0
             ? weatherBlockedReason(wxBlocks)
@@ -1243,8 +1167,7 @@ export default function Home() {
 
   // ── geocode-choice action ─────────────────────────────────────────────
   // Resume the exact paused pipeline with the chosen provider candidate.
-  // The next run does not repeat that query, so ambiguity cannot loop and
-  // a later time-gate override retains the same factual city/address.
+  // The next run does not repeat that query, so ambiguity cannot loop.
   async function chooseGeocodeCandidate(candidate: GeocodeCandidate) {
     if (recovery?.mode !== "geocode") return;
     const operation = beginOperation();
@@ -1259,60 +1182,10 @@ export default function Home() {
       else setStartAddress(candidate.formattedAddress);
       setRecovery(null);
       setError(null);
-      await continuePipeline(gate.parsed, {
-        overrideTimeGate: gate.overrideTimeGate,
-        geocode,
-      });
+      await continuePipeline(gate.parsed, { geocode });
     } finally {
       endOperation(operation);
     }
-  }
-
-  // ── time-gate actions (batch 4b) ──────────────────────────────────────
-  // "Still want it": the user read the window and confirmed — re-run the
-  // pipeline with the band gate bypassed for this one run. Whatever the
-  // hours data then says is honest (venues with no listed hours survive
-  // via keep-on-missing; nothing surviving lands in the recovery panel).
-  async function overrideTimeGate() {
-    if (recovery?.mode !== "time-gate") return;
-    const operation = beginOperation();
-    if (!operation) return;
-    const parsed = recovery.parsed;
-    const geocode = recovery.geocode;
-    try {
-      setRecovery(null);
-      await continuePipeline(parsed, { overrideTimeGate: true, geocode });
-    } finally {
-      endOperation(operation);
-    }
-  }
-
-  // "Something else": swap direction without retyping — re-open the kind
-  // picker (batch 4's clarify question) on the same prompt, categories
-  // cleared so the answer genuinely steers the plan. CRUCIALLY (batch 4c)
-  // the continuation carries an explicit "now": reaching the gate at all
-  // means no time was typed and our own right-now guess was the problem —
-  // the person is clearly asking about tonight. Without this, the new
-  // kind fell through to its category default (bar → 20:00), which had
-  // already passed and rolled the plan to TOMORROW 8 PM. Same semantics
-  // as answering the original When question with "now" — including its
-  // consequences: a category that's genuinely closed right now gets the
-  // explicit-window refusal, exactly like now+that-category typed fresh.
-  function timeGateSomethingElse() {
-    if (recovery?.mode !== "time-gate" || activeOperation.current) return;
-    const parsed = {
-      ...recovery.parsed,
-      category_signals: [],
-      time_window: timeWindowForWhenAnswer("now"),
-    };
-    setRecovery(null);
-    setClarify({ questions: [kindQuestion()], parsed, geocode: recovery.geocode });
-    setClarifyKind("");
-    setClarifyDistribution("");
-    setClarifyWhen(null);
-    setClarifyTime("");
-    setClarifyVibe("");
-    setClarifyNarrow({});
   }
 
   // ── weather-gate actions ──────────────────────────────────────────────
@@ -2004,9 +1877,8 @@ export default function Home() {
     String(recovery.ctx.parseData.location).trim() &&
     String(recovery.ctx.parseData.location).trim().toLowerCase() !== "unspecified"
   );
-  // time-gate variant of the SAME panel (batch 4b): a real choice —
-  // override the inferred-time gate, or change direction — never a
-  // dead-end refusal string
+  // gate variants of the SAME panel: a real choice — push past a weather
+  // block, or change direction — never a dead-end refusal string
   const recoveryBlock =
     recovery && recovery.mode === "geocode" ? (
       <div
@@ -2035,22 +1907,6 @@ export default function Home() {
                 {candidate.formattedAddress}
               </button>
             ))}
-          </div>
-        </div>
-      </div>
-    ) : recovery && recovery.mode === "time-gate" ? (
-      <div className={"clarify recover recover--gate" + (itinerary ? " clarify--stage" : "")}>
-        <div className="clarify__q">
-          <div className="clarify__label recover__reason">
-            {recovery.reason} Still want to try one, or do something else?
-          </div>
-          <div className="clarify__chips">
-            <button className="chipbtn recover__override" disabled={busy} onClick={overrideTimeGate}>
-              Still want it
-            </button>
-            <button className="chipbtn recover__else" disabled={busy} onClick={timeGateSomethingElse}>
-              Something else
-            </button>
           </div>
         </div>
       </div>
