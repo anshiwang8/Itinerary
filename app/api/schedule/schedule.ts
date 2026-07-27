@@ -486,6 +486,91 @@ export interface ScheduledStop extends SelectionLike {
   travelToNext?: TravelLeg;
 }
 
+// ── window validation ────────────────────────────────────────────────────
+//
+// The planner PROPOSES how much fits between a stated start and end. Code
+// decides, here, once the real travel legs are known — this is the concrete
+// case the architecture rule names: if the planner says four activities fit
+// between 3 and 8 and the real legs make it six hours, the LLM never gets to
+// be wrong about it.
+
+/**
+ * How far past a stated end a plan may run before code intervenes.
+ *
+ * 30 minutes, deliberately generous. A stated window is a human's rough
+ * intent ("3 to 8ish"), not a booking; the travel legs inside it already
+ * carry their own delay margins; and stop durations are estimates on both
+ * sides. Dropping a whole activity someone asked for — the only remedy
+ * available — to recover fifteen minutes is a worse outcome than running
+ * slightly over, so the tolerance sits where dropping starts to be the
+ * lesser harm rather than at zero.
+ */
+export const WINDOW_OVERRUN_TOLERANCE_MINUTES = 30;
+
+/**
+ * A gap this large at the end of a stated window means the planner
+ * UNDER-filled it. Code deliberately does not fill it (that would be a
+ * second planning mechanism, in the wrong language); it is logged so the
+ * shortfall is visible.
+ */
+export const WINDOW_UNDERFILL_LOG_MINUTES = 90;
+
+export interface WindowFit {
+  /** minutes the last timed stop's END runs past the stated end (0 if none) */
+  overrunMinutes: number;
+  /** within the tolerance — nothing to do */
+  fits: boolean;
+  /** how many LEADING timed stops finish inside the window + tolerance */
+  keep: number;
+  /** total timed stops considered */
+  timed: number;
+  /** unused minutes between the last kept stop's end and the window's end */
+  unfilledMinutes: number;
+}
+
+/**
+ * Does this schedule actually fit the stated window? Pure: takes the stops
+ * as scheduled (real travel already folded into their times) and the stated
+ * end. Returns null when there is no usable end to check against — an
+ * unstated end is not a constraint, and code must not invent one.
+ */
+export function checkWindowFit(
+  stops: ScheduledStop[],
+  endISO: string | null | undefined,
+  toleranceMinutes: number = WINDOW_OVERRUN_TOLERANCE_MINUTES
+): WindowFit | null {
+  if (!endISO) return null;
+  const end = new Date(endISO).getTime();
+  if (!Number.isFinite(end)) return null;
+
+  const timed = stops.filter((s) => s.id !== null && s.end_time);
+  if (timed.length === 0) return null;
+
+  const limit = end + toleranceMinutes * 60_000;
+  let keep = 0;
+  let lastKeptEnd = 0;
+  for (const stop of timed) {
+    const stopEnd = new Date(stop.end_time!).getTime();
+    if (!Number.isFinite(stopEnd) || stopEnd > limit) break;
+    keep++;
+    lastKeptEnd = stopEnd;
+  }
+
+  const finalEnd = new Date(timed[timed.length - 1].end_time!).getTime();
+  const overrunMinutes = Number.isFinite(finalEnd)
+    ? Math.max(0, Math.round((finalEnd - end) / 60_000))
+    : 0;
+
+  return {
+    overrunMinutes,
+    fits: keep === timed.length,
+    keep,
+    timed: timed.length,
+    unfilledMinutes:
+      keep > 0 ? Math.max(0, Math.round((end - lastKeptEnd) / 60_000)) : 0,
+  };
+}
+
 /**
  * Assign start/end times to ordered selections. Pure — travel legs are
  * fetched by the caller (Routes API) and passed in; travelLegs[k] is the

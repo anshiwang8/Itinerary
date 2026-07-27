@@ -1,7 +1,12 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { buildSchedule, ScheduledStop } from "./api/schedule/schedule";
+import {
+  buildSchedule,
+  checkWindowFit,
+  ScheduledStop,
+  WINDOW_UNDERFILL_LOG_MINUTES,
+} from "./api/schedule/schedule";
 import { TravelLeg } from "./api/schedule/travel";
 import { HOME, splitHomeLeg } from "./api/schedule/home";
 import { Itinerary } from "./api/itinerary/store";
@@ -19,6 +24,8 @@ import {
   unmetConstraintReason,
   weatherBlockedReason,
   widenOfferLabel,
+  windowOverrunMessage,
+  windowTooTightReason,
 } from "./lib/planGuards";
 import {
   planStartInstant,
@@ -802,6 +809,10 @@ export default function Home() {
     // resolves them in that appended position, so re-order by the parse's
     // category_signals; a replacement category takes its slot's position
     const orderedSels = orderByRequest(ctx.sels, parseData.category_signals, ctx.slots);
+    const fail = (reason: string) => {
+      setError(reason);
+      setLoadingText(null);
+    };
     try {
       setPools(pools);
       setParsedObj(parseData);
@@ -853,6 +864,85 @@ export default function Home() {
         return { stops, legs, hl };
       };
 
+      // ── window validation (Part 5) ───────────────────────────────────
+      // THE moment code checks the planner's arithmetic. The planner
+      // proposed how much fits between the stated start and end; only now,
+      // with real travel legs folded into real end times, is that checkable.
+      // Runs BEFORE the arrival re-check on purpose: no point adapting a
+      // venue we're about to drop, and it keeps the common case at one
+      // routing pass.
+      const validateWindow = async (
+        sels: Selection[],
+        stops: ScheduledStop[]
+      ): Promise<
+        | { ok: true; sels: Selection[]; stops: ScheduledStop[]; legs: TravelLeg[]; hl: TravelLeg | null }
+        | { ok: false; reason: string }
+        | null
+      > => {
+        const fit = checkWindowFit(stops, ctx.plan.timeIntent.endISO);
+        if (!fit) return null; // no stated end — nothing to validate against
+        const windowLabel =
+          ctx.plan.timeIntent.label && ctx.plan.timeIntent.label !== "unspecified"
+            ? ctx.plan.timeIntent.label
+            : null;
+
+        if (fit.fits) {
+          // A big gap at the end means the planner UNDER-filled the window.
+          // Acceptable for now, and deliberately NOT filled here — that
+          // would be a second planning mechanism in the wrong language.
+          // Logged so the shortfall is visible.
+          if (fit.unfilledMinutes >= WINDOW_UNDERFILL_LOG_MINUTES) {
+            console.info(
+              "[window-fit]",
+              JSON.stringify({
+                verdict: "underfilled",
+                unfilledMinutes: fit.unfilledMinutes,
+                stops: fit.timed,
+                endISO: ctx.plan.timeIntent.endISO,
+              })
+            );
+          }
+          return null;
+        }
+
+        // Nothing fits — there is no activity to drop that rescues this.
+        if (fit.keep === 0) {
+          console.info(
+            "[window-fit]",
+            JSON.stringify({ verdict: "impossible", overrunMinutes: fit.overrunMinutes })
+          );
+          return { ok: false, reason: windowTooTightReason(windowLabel) };
+        }
+
+        // Drop the trailing activities that genuinely don't fit, and SAY SO.
+        const timedSels = sels.filter((s) => s.id !== null);
+        const dropped = timedSels.slice(fit.keep);
+        const droppedIds = new Set(dropped.map((s) => s.id));
+        const trimmed = sels.filter((s) => s.id === null || !droppedIds.has(s.id));
+        console.info(
+          "[window-fit]",
+          JSON.stringify({
+            verdict: "trimmed",
+            overrunMinutes: fit.overrunMinutes,
+            kept: fit.keep,
+            of: fit.timed,
+            dropped: dropped.map((s) => s.category),
+          })
+        );
+        setLoadingText("Fitting your window…");
+        const replanned = await planOnce(trimmed);
+        setBannerFlat(true);
+        setBanner(
+          windowOverrunMessage(
+            windowLabel,
+            fit.keep,
+            fit.timed,
+            dropped.map((s) => s.category)
+          )
+        );
+        return { ok: true, sels: trimmed, ...replanned };
+      };
+
       // ── arrival re-check (§1.4) ──────────────────────────────────────
       // The objective filter judges EVERY category at the plan's single
       // anchor instant, because per-stop arrival times don't exist yet at
@@ -871,6 +961,10 @@ export default function Home() {
       let sels = orderedSels;
       let { stops, legs, hl } = await planOnce(sels);
       const adaptedNames: string[] = [];
+
+      const windowed = await validateWindow(sels, stops);
+      if (windowed && !windowed.ok) return fail(windowed.reason);
+      if (windowed) ({ sels, stops, legs, hl } = windowed);
 
       if (!opts.skipArrivalCheck) {
         let closed = closedOnArrival(stops);

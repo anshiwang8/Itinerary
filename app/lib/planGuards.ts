@@ -318,6 +318,37 @@ export function closedOnArrivalReason(
   return `${who} is closed by the time you'd get there (${arrivalLabel}) — want to look further out, or try something else for this stop?`;
 }
 
+// ── stated-window outcomes ────────────────────────────────────────────────
+// The planner proposes how much fits; code checks it against real travel
+// legs and says what it had to do. Never a silent overrun by hours, and
+// never a silently dropped activity someone asked for.
+
+/** Some of the proposed activities don't fit the stated window — name the
+ *  window, the arithmetic, and exactly which stops were dropped. */
+export function windowOverrunMessage(
+  windowLabel: string | null,
+  kept: number,
+  total: number,
+  droppedCategories: string[]
+): string {
+  const where = windowLabel ? `Your ${windowLabel} window` : "The time you gave";
+  const dropped = droppedCategories.filter(Boolean);
+  const names =
+    dropped.length === 0
+      ? "the rest"
+      : dropped.length === 1
+      ? dropped[0]
+      : `${dropped.slice(0, -1).join(", ")} and ${dropped[dropped.length - 1]}`;
+  return `${where} fits ${kept} of these ${total} once travel is counted — dropped ${names}.`;
+}
+
+/** Not even the FIRST stop fits. Nothing can be dropped to rescue this, so
+ *  it's a hard, honest refusal with the two moves that actually help. */
+export function windowTooTightReason(windowLabel: string | null): string {
+  const where = windowLabel ? `your ${windowLabel} window` : "that window";
+  return `Couldn't fit anything into ${where} once travel time is counted — want to widen it, or ask for something shorter?`;
+}
+
 /** The widen-offer label, scoped to the plan's neighborhood/location. */
 export function widenOfferLabel(locationLabel?: string | null): string {
   const loc = meaningfulLocation(locationLabel);

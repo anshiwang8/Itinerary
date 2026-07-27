@@ -351,6 +351,52 @@ test.describe("@mock generic-category clarify", () => {
   });
 });
 
+// ── stated windows (Part 5): the planner PROPOSES how much fits; code
+// decides once the real travel legs are known ─────────────────────────────
+test.describe("@mock stated time windows", () => {
+  test("a stated window plans multiple stops that end inside it @mock", async ({ page }) => {
+    await planEvening(page, "dinner and drinks from 5-9pm");
+
+    // both stops survive — nothing was dropped, so no window banner at all
+    await expect(page.locator(".lstrip__stop")).toHaveCount(2);
+    await expect(page.locator(".banner--show")).toHaveCount(0);
+
+    // and every stop genuinely STARTS inside the stated 5-9 PM window —
+    // read from the strip's own rendered times, so this fails if the plan
+    // silently drifts outside what was asked for
+    const times = await page.locator(".lstrip__stop .lstrip__be").allInnerTexts();
+    expect(times).toHaveLength(2);
+    for (const text of times) {
+      const match = text.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+      expect(match, `unparseable stop time "${text}"`).not.toBeNull();
+      const hour12 = Number(match![1]) % 12;
+      const hour24 = /pm/i.test(match![3]) ? hour12 + 12 : hour12;
+      const minutes = hour24 * 60 + Number(match![2]);
+      expect(minutes, `"${text}" starts before the 5 PM window`).toBeGreaterThanOrEqual(17 * 60);
+      expect(minutes, `"${text}" starts after the 9 PM window`).toBeLessThanOrEqual(21 * 60);
+    }
+  });
+
+  test("an OVER-STUFFED window drops what doesn't fit and says so @mock", async ({ page }) => {
+    // Three stops into a two-hour window. Dinner alone is 105 minutes, so
+    // 7-9 fits exactly one of them once travel is counted — and the user
+    // must be TOLD, never silently handed a plan running hours over.
+    await planEvening(page, "dinner and drinks and dessert from 7-9pm");
+
+    const banner = page.locator(".banner--show");
+    await expect(banner).toBeVisible({ timeout: 30_000 });
+    await expect(banner).toContainText(/7-9pm window fits 1 of these 3/i);
+    await expect(banner).toContainText(/once travel is counted/i);
+    // the dropped activities are NAMED, never silently discarded
+    await expect(banner).toContainText(/drinks/i);
+    await expect(banner).toContainText(/dessert/i);
+
+    // and the plan that ships is the part that actually fits
+    await expect(page.locator(".lstrip__stop")).toHaveCount(1);
+    await expect(page.locator(".lstrip__stop .eyebrow").first()).toHaveText(/dinner/i);
+  });
+});
+
 // ── the "right now" repro (reported live at 11:28 PM) ───────────────────
 // The parse LOST immediacy phrasing entirely — "right now" came back
 // time_window "unspecified", the resolver fell to the category's default

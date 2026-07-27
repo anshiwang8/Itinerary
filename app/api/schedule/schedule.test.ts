@@ -4,8 +4,10 @@ import assert from "node:assert";
 import { DURATION_TABLE, getDuration, resolveCategory } from "./durations";
 import {
   buildSchedule,
+  checkWindowFit,
   resolveStartTime,
   resolveStartTimeChecked,
+  WINDOW_OVERRUN_TOLERANCE_MINUTES,
 } from "./schedule";
 import { TravelLeg } from "./travel";
 import { wallClockParts } from "../../lib/zoneTime";
@@ -666,6 +668,171 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(stops[0].start_time, "2026-07-03T19:00:00-04:00");
       assert.strictEqual(stops[0].end_time, "2026-07-03T21:45:00-04:00");
       assert.strictEqual(stops[1].start_time, "2026-07-03T21:45:00-04:00");
+    },
+  ],
+  // ── window validation (Part 5): the planner PROPOSES how much fits;
+  // code decides, here, once the real travel legs are known ──
+  [
+    "a stated 3-8 window fits several stops that end near 8",
+    () => {
+      // 3 PM start, three stops with real legs between them
+      const start = new Date(2026, 6, 3, 15, 0, 0);
+      const legs: TravelLeg[] = [
+        { fromIndex: 0, mode: "transit", rawMinutes: 15, marginMinutes: 5, totalMinutes: 20, distanceMeters: 3000, encodedPolyline: null },
+        { fromIndex: 1, mode: "walk", rawMinutes: 10, marginMinutes: 0, totalMinutes: 10, distanceMeters: 800, encodedPolyline: null },
+      ];
+      const { stops } = buildSchedule(
+        [
+          { category: "museum", id: "m1", name: "Museum", plannedMinutes: 90 },   // 90+15
+          { category: "coffee shop", id: "c1", name: "Cafe", plannedMinutes: 45 }, // 45+10
+          { category: "ramen", id: "r1", name: "Ramen", plannedMinutes: 90 },      // 90+15
+        ],
+        "",
+        NOW,
+        legs,
+        start,
+        null,
+        "America/Toronto"
+      );
+      // 15:00 +105 =16:45, +20 travel =17:05 +55 =18:00, +10 travel =18:10 +105 =19:55
+      assert.strictEqual(stops[2].end_time, "2026-07-03T19:55:00-04:00");
+      const fit = checkWindowFit(stops, "2026-07-03T20:00:00-04:00");
+      assert.ok(fit);
+      assert.strictEqual(fit!.fits, true);
+      assert.strictEqual(fit!.keep, 3);
+      assert.strictEqual(fit!.overrunMinutes, 0);
+      // ends 5 minutes before 8 — no meaningful gap to report
+      assert.strictEqual(fit!.unfilledMinutes, 5);
+    },
+  ],
+  [
+    "a SLIGHT overrun is tolerated rather than costing someone a whole stop",
+    () => {
+      const start = new Date(2026, 6, 3, 15, 0, 0);
+      const { stops } = buildSchedule(
+        [
+          { category: "museum", id: "m1", name: "Museum", plannedMinutes: 120 },
+          { category: "ramen", id: "r1", name: "Ramen", plannedMinutes: 120 },
+        ],
+        "",
+        NOW,
+        [],
+        start,
+        null,
+        "America/Toronto"
+      );
+      // 15:00 +135 = 17:15, +135 = 19:30 … against an 19:15 end = 15 over
+      const fit = checkWindowFit(stops, "2026-07-03T19:15:00-04:00");
+      assert.ok(fit);
+      assert.strictEqual(fit!.overrunMinutes, 15);
+      assert.ok(fit!.overrunMinutes < WINDOW_OVERRUN_TOLERANCE_MINUTES);
+      assert.strictEqual(fit!.fits, true, "inside the tolerance nothing is dropped");
+      assert.strictEqual(fit!.keep, 2);
+    },
+  ],
+  [
+    "an OVER-STUFFED window keeps what fits and reports the rest honestly",
+    () => {
+      const start = new Date(2026, 6, 3, 15, 0, 0);
+      const legs: TravelLeg[] = [
+        { fromIndex: 0, mode: "transit", rawMinutes: 25, marginMinutes: 5, totalMinutes: 30, distanceMeters: 9000, encodedPolyline: null },
+        { fromIndex: 1, mode: "transit", rawMinutes: 25, marginMinutes: 5, totalMinutes: 30, distanceMeters: 9000, encodedPolyline: null },
+        { fromIndex: 2, mode: "transit", rawMinutes: 25, marginMinutes: 5, totalMinutes: 30, distanceMeters: 9000, encodedPolyline: null },
+      ];
+      const { stops } = buildSchedule(
+        [
+          { category: "museum", id: "m1", name: "Museum", plannedMinutes: 105 },
+          { category: "ramen", id: "r1", name: "Ramen", plannedMinutes: 90 },
+          { category: "cocktails", id: "b1", name: "Bar", plannedMinutes: 60 },
+          { category: "gelato", id: "d1", name: "Gelato", plannedMinutes: 30 },
+        ],
+        "",
+        NOW,
+        legs,
+        start,
+        null,
+        "America/Toronto"
+      );
+      // The planner's four "fit" 3-8 on paper. With real 30-minute legs the
+      // chain is 15:00-17:00, 17:30-19:15, 19:45-20:55, 21:25-22:05 — the
+      // exact scenario the architecture rule names: the LLM proposed a
+      // number, and code catches that it was wrong.
+      assert.strictEqual(stops[3].end_time, "2026-07-03T22:05:00-04:00");
+      const fit = checkWindowFit(stops, "2026-07-03T20:00:00-04:00");
+      assert.ok(fit);
+      assert.strictEqual(fit!.fits, false);
+      assert.strictEqual(fit!.timed, 4);
+      // only the stops finishing inside 20:00 + the 30-minute tolerance
+      assert.strictEqual(fit!.keep, 2);
+      // 22:05 against a 20:00 end — over two hours, not a rounding error
+      assert.strictEqual(fit!.overrunMinutes, 125);
+      assert.ok(fit!.overrunMinutes > WINDOW_OVERRUN_TOLERANCE_MINUTES);
+    },
+  ],
+  [
+    "no stated end means NO constraint — code must not invent one",
+    () => {
+      const { stops } = buildSchedule(
+        [{ category: "ramen", id: "r1", name: "Ramen" }],
+        "evening",
+        NOW,
+        [],
+        undefined,
+        null,
+        "America/Toronto"
+      );
+      assert.strictEqual(checkWindowFit(stops, null), null);
+      assert.strictEqual(checkWindowFit(stops, undefined), null);
+      assert.strictEqual(checkWindowFit(stops, "not a date"), null);
+      // and a plan with no TIMED stops has nothing to measure
+      assert.strictEqual(
+        checkWindowFit(
+          [{ category: "x", id: null, start_time: null, end_time: null, durationMinutes: null }],
+          "2026-07-03T20:00:00-04:00"
+        ),
+        null
+      );
+    },
+  ],
+  [
+    "even the FIRST stop overrunning is reported as keep:0, not a silent trim",
+    () => {
+      const start = new Date(2026, 6, 3, 19, 0, 0);
+      const { stops } = buildSchedule(
+        [{ category: "museum", id: "m1", name: "Museum", plannedMinutes: 180 }],
+        "",
+        NOW,
+        [],
+        start,
+        null,
+        "America/Toronto"
+      );
+      const fit = checkWindowFit(stops, "2026-07-03T19:30:00-04:00");
+      assert.ok(fit);
+      assert.strictEqual(fit!.keep, 0);
+      assert.strictEqual(fit!.fits, false);
+      // there is no activity to drop that rescues this — the caller fails loud
+      assert.ok(fit!.overrunMinutes > WINDOW_OVERRUN_TOLERANCE_MINUTES);
+    },
+  ],
+  [
+    "an UNDER-filled window is measured, not filled",
+    () => {
+      const start = new Date(2026, 6, 3, 15, 0, 0);
+      const { stops } = buildSchedule(
+        [{ category: "coffee shop", id: "c1", name: "Cafe", plannedMinutes: 45 }],
+        "",
+        NOW,
+        [],
+        start,
+        null,
+        "America/Toronto"
+      );
+      // 15:00 + 55 = 15:55, against a 20:00 end
+      const fit = checkWindowFit(stops, "2026-07-03T20:00:00-04:00");
+      assert.ok(fit);
+      assert.strictEqual(fit!.fits, true);
+      assert.strictEqual(fit!.unfilledMinutes, 245);
     },
   ],
   [
