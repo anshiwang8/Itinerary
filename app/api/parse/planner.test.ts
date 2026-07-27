@@ -335,6 +335,80 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "a window already UNDERWAY is REPAIRED to start now, not rejected",
+    () => {
+      // Asked at 3 PM for "1-6pm": the 1 has gone, the 6 has not. That is a
+      // real window entered part-way through, not a mis-resolved date — and
+      // rejecting it would discard a still-open window for a generic
+      // fallback. Code cannot plan into the past, so the start moves to now
+      // and the user's stated end survives untouched.
+      const underway = goodPlan({
+        timeIntent: {
+          startISO: "2026-07-27T13:00:00-04:00", // 2h behind NOW
+          endISO: "2026-07-27T18:00:00-04:00",
+          kind: "explicit",
+          label: "1-6pm",
+        },
+      });
+      assert.deepStrictEqual(findPlanProblems(underway, NOW), [], "must not be rejected");
+      const result = validatePlan(underway, NOW);
+      assert.ok(result.ok);
+      assert.strictEqual(
+        new Date(result.plan.timeIntent.startISO!).getTime(),
+        NOW.getTime(),
+        "the start is clamped up to now"
+      );
+      assert.strictEqual(
+        result.plan.timeIntent.endISO,
+        "2026-07-27T18:00:00-04:00",
+        "the stated end is never touched"
+      );
+
+      // The repair is for windows, NOT bare past starts: with no end there is
+      // nothing to say the request is still live, so the lag rule still runs.
+      expectProblem(
+        goodPlan({
+          timeIntent: {
+            startISO: "2026-07-27T13:00:00-04:00",
+            endISO: null,
+            kind: "explicit",
+            label: "1pm",
+          },
+        }),
+        /in the past/,
+        "a past start with no end"
+      );
+
+      // And a window whose END has also gone is over, not underway.
+      expectProblem(
+        goodPlan({
+          timeIntent: {
+            startISO: "2026-07-27T09:00:00-04:00",
+            endISO: "2026-07-27T11:00:00-04:00",
+            kind: "explicit",
+            label: "9-11am",
+          },
+        }),
+        /in the past/,
+        "a window that has fully passed"
+      );
+
+      // A sliver too small to hold even the shortest stop is over too.
+      expectProblem(
+        goodPlan({
+          timeIntent: {
+            startISO: "2026-07-27T13:00:00-04:00",
+            endISO: new Date(NOW.getTime() + 5 * 60_000).toISOString(),
+            kind: "explicit",
+            label: "1pm-now",
+          },
+        }),
+        /in the past/,
+        "a window with five minutes left"
+      );
+    },
+  ],
+  [
     "an unusual-but-possible hour is NOT refused — hours are decided on real data",
     () => {
       // 3 AM brunch used to be refused by a hardcoded plausibility band.
@@ -618,6 +692,97 @@ const cases: Array<[string, () => void]> = [
       };
       const floored = applyTimeFloors(plan, "a full day tomorrow starting at 9am", NOW, ZONE);
       assert.strictEqual(floored.timeIntent.startISO, "2026-07-28T09:00:00-04:00");
+    },
+  ],
+  [
+    "the WEEKDAY floor fixes a start that lands on the wrong day",
+    () => {
+      // LIVE REPRO 2026-07-27 (a Monday): "plan my saturday from 3-8pm" came
+      // back anchored on 2026-07-31 — a FRIDAY. Which weekday a date IS is a
+      // fact, so the model does not get to be wrong about it.
+      const plan = fallbackPlan("x", NOW, ZONE);
+      plan.timeIntent = {
+        startISO: "2026-07-31T15:00:00-04:00", // Friday
+        endISO: "2026-07-31T20:00:00-04:00",
+        kind: "explicit",
+        label: "3-8pm",
+      };
+      const fixed = applyTimeFloors(plan, "plan my saturday from 3-8pm", NOW, ZONE);
+      const start = new Date(fixed.timeIntent.startISO!);
+      assert.strictEqual(wallClockParts(start, ZONE).weekday, 6, "must land on a Saturday");
+      assert.strictEqual(wallClockParts(start, ZONE).day, 1); // 2026-08-01
+      // the model's wall-clock time survives the move
+      assert.strictEqual(wallClockParts(start, ZONE).hour, 15);
+      // and a stated window keeps its LENGTH, just on the right day
+      const end = new Date(fixed.timeIntent.endISO!);
+      assert.strictEqual(wallClockParts(end, ZONE).weekday, 6);
+      assert.strictEqual(end.getTime() - start.getTime(), 5 * 3_600_000);
+    },
+  ],
+  [
+    "the weekday floor leaves a CORRECT resolution alone",
+    () => {
+      const plan = fallbackPlan("x", NOW, ZONE);
+      // live probe: "dinner on friday at 7pm" resolved correctly already
+      plan.timeIntent = {
+        startISO: "2026-07-31T19:00:00-04:00", // a real Friday
+        endISO: null,
+        kind: "explicit",
+        label: "friday 7pm",
+      };
+      const same = applyTimeFloors(plan, "dinner on friday at 7pm", NOW, ZONE);
+      assert.strictEqual(same.timeIntent.startISO, "2026-07-31T19:00:00-04:00");
+    },
+  ],
+  [
+    "the weekday floor corrects FACTS, not readings, and abstains when unsure",
+    () => {
+      const withStart = (startISO: string) => {
+        const plan = fallbackPlan("x", NOW, ZONE);
+        plan.timeIntent = { startISO, endISO: null, kind: "explicit", label: "x" };
+        return plan;
+      };
+      // "next tuesday" from a Monday: BOTH tomorrow-the-28th and the-4th are
+      // Tuesdays, so which one was meant is a reading, not a fact. Whichever
+      // the model chose is left alone — the live probe chose the 4th, the
+      // legacy resolver would choose the 28th, and both are defensible.
+      for (const chosen of ["2026-07-28T10:00:00-04:00", "2026-08-04T10:00:00-04:00"]) {
+        const untouched = applyTimeFloors(
+          withStart(chosen),
+          "coffee next tuesday at 10am",
+          NOW,
+          ZONE
+        );
+        assert.strictEqual(untouched.timeIntent.startISO, chosen);
+      }
+
+      // TWO weekdays named — the floor has no single answer, so it abstains
+      const twoDays = applyTimeFloors(
+        withStart("2026-07-31T10:00:00-04:00"),
+        "saturday or sunday, whichever",
+        NOW,
+        ZONE
+      );
+      assert.strictEqual(twoDays.timeIntent.startISO, "2026-07-31T10:00:00-04:00");
+
+      // a competing calendar qualifier likewise: the model saw more than the
+      // floor's one regex does, so it abstains rather than overriding
+      const competing = applyTimeFloors(
+        withStart("2026-07-28T10:00:00-04:00"),
+        "tomorrow, not saturday",
+        NOW,
+        ZONE
+      );
+      assert.strictEqual(competing.timeIntent.startISO, "2026-07-28T10:00:00-04:00");
+
+      // and immediacy still outranks it entirely
+      const immediate = applyTimeFloors(
+        withStart("2026-08-01T10:00:00-04:00"),
+        "saturday plans but I want to leave right now",
+        NOW,
+        ZONE
+      );
+      assert.strictEqual(immediate.timeIntent.label, "now");
     },
   ],
   [

@@ -19,7 +19,9 @@ import { hasImmediateTimeSignal } from "../../lib/immediateTime";
 import { hasAllDaySignal } from "../../lib/allDayTime";
 import {
   DEFAULT_ZONE,
+  instantAtLocalDateTime,
   instantAtWallClock,
+  localDateAfterDays,
   nextFullHourInZone,
   normalizeZone,
   toZonedISO,
@@ -44,6 +46,30 @@ export const MAX_PLAN_HORIZON_DAYS = 14;
  *  10:59 for an 11 PM ask). An hour behind is a wrong date, not a rounding. */
 export const MAX_START_LAG_MINUTES = 60;
 const MAX_TEXT_CHARS = 240;
+
+/**
+ * A stated window can be entered part-way through: at 6:30 someone can
+ * reasonably ask for "dinner and drinks from 5-9pm" — the 5 has gone, the 9
+ * has not. That start is not a mis-resolved date (what MAX_START_LAG_MINUTES
+ * exists to catch); it is the window the user actually named, asked from
+ * inside it.
+ *
+ * So it is REPAIRED rather than rejected, for the same reason durations are
+ * clamped: arithmetic code can fix does not deserve the one retry, and
+ * rejecting here would throw away a real, still-open window to ship a generic
+ * fallback — strictly worse for the user. Code cannot plan into the past, so
+ * the start moves up to `now` and the user's stated end is kept.
+ *
+ * Only while enough of the window survives to hold anything; past that it is
+ * over, not underway, and the normal lag rule takes it.
+ */
+function windowUnderway(start: Date | null, end: Date | null, now: Date): boolean {
+  if (!start || !end) return false;
+  return (
+    start.getTime() < now.getTime() &&
+    end.getTime() - now.getTime() >= MIN_ACTIVITY_MINUTES * 60_000
+  );
+}
 
 /** The canonical id for the WHEN question. Code guarantees one exists
  *  whenever the time is unspecified, and the cap ranks it above filler. */
@@ -157,9 +183,11 @@ ACTIVITIES
 - "searchQuery" is what a person would type into a map to find this kind of place: a concrete, searchable PLACE KIND ("ramen restaurant", "ice skating rink", "record store"). Never a specific business you are guessing at, never an abstract mood.
 - "intent" is the same stop in plain words, for the user to read.
 - Order the activities the way the day should actually run (food before drinks before dessert; an outdoor thing before a late indoor one).
+- Every activity must SUIT THE HOURS IT WILL ACTUALLY HAPPEN IN. Work out roughly when each one lands, given the start and the ones before it, and choose accordingly: a window that begins at 3 PM contains no breakfast and no brunch; a plan that begins at 9 PM contains no museum. This is about matching the day you were asked for — it is NOT a rule about what is "open", which is checked later against real data.
 
 FILL THE AVAILABLE TIME
 - A stated window ("3 to 8pm") or duration ("about 3 hours") must be filled with enough activities to plausibly occupy it, allowing for travel between stops. One activity for five hours is wrong.
+- Before choosing each activity, WORK OUT THE CLOCK IT LANDS ON: the start, plus everything before it. Then pick something that belongs at that hour. Worked example for "3 to 8pm": slot 0 begins at 3 PM, so it is an afternoon thing — a gallery, a market, a coffee — and NEVER breakfast or brunch; slot 1 lands around 5; slot 2 lands at dinner time, so that is where food goes. A brunch inside a 3-8pm window is simply wrong, and so is a museum in a plan that starts at 9 PM.
 - A stated COUNT wins outright: "3 activities tonight" is exactly 3 activities.
 - A stated activity is always KEPT even when the window is bigger than it: "dinner, 3-8pm" means dinner PLUS other things, never dinner alone.
 - With no stated window and no stated count, 2 to 3 activities make a good outing.
@@ -176,8 +204,9 @@ TIME — reason against the CURRENT INSTANT you are given
 - Resolve to a real ISO instant carrying the plan timezone's offset.
 - Times do NOT have to be conventionally sensible. 24/7 diners, late gyms and overnight venues exist. Whether anything is actually open is decided later, in code, against real opening hours — never refuse or shift a time for being unusual.
 - "kind": "explicit" when the user stated a clock time or window; "relative" when you resolved it from words like tonight / now / tomorrow afternoon; "unspecified" when they gave no time information at all — then startISO and endISO are both null.
-- Set "endISO" ONLY when the user stated an end or a duration. Never invent one.
+- Set "endISO" ONLY when the user stated a FINISH ("until 10", "by midnight", "back before 9") or a DURATION ("for about three hours"). Never invent one. A phrase that says when to START — "7pm", "around six", "after 8", "this evening" — sets startISO and leaves endISO null, even when it looks like a range. If you are not sure it is a finish, it is not.
 - When "kind" is "unspecified" you MUST include a question with "id": "${WHEN_QUESTION_ID}".
+- Any question you ask about time offers START times ("6pm", "7pm", "8pm"), never ranges — an answer of "5-6pm" is a start, not a window, and reading it as one would cut the outing short.
 
 EVENTS — never invent a real-world event's date or time
 If the user names an event ("the FIFA fan festival", "Nuit Blanche", "the parade"), treat it as a PLACE to search for and ASK when it is. You do not know event schedules, and a confidently wrong one sends someone across the city for nothing.
@@ -374,7 +403,9 @@ export function findPlanProblems(raw: unknown, now: Date): string[] {
     if (start) {
       const lagMinutes = (now.getTime() - start.getTime()) / 60_000;
       const horizonDays = (start.getTime() - now.getTime()) / 86_400_000;
-      if (lagMinutes > MAX_START_LAG_MINUTES) {
+      // a window entered part-way through is repaired in coercePlan, not
+      // rejected here — see windowUnderway
+      if (lagMinutes > MAX_START_LAG_MINUTES && !windowUnderway(start, end, now)) {
         problems.push(
           `\`timeIntent.startISO\` is ${Math.round(lagMinutes)} minutes in the past — resolve it against the current instant`
         );
@@ -512,7 +543,7 @@ function capQuestions(
  * when-question, and cap the round at three. Assumes findPlanProblems()
  * returned empty — call validatePlan(), not this.
  */
-function coercePlan(raw: Record<string, unknown>): PlanIntent {
+function coercePlan(raw: Record<string, unknown>, now: Date): PlanIntent {
   const rawActivities = raw.activities as Array<Record<string, unknown>>;
   // sort by the model's stated slot, then renumber dense from 0 — downstream
   // slot identity (selections, recovery rows, ordering) assumes 0..n-1
@@ -532,8 +563,18 @@ function coercePlan(raw: Record<string, unknown>): PlanIntent {
   });
 
   const rawTime = raw.timeIntent as Record<string, unknown>;
-  const startISO = typeof rawTime.startISO === "string" ? rawTime.startISO : null;
+  const rawStartISO = typeof rawTime.startISO === "string" ? rawTime.startISO : null;
   const endISO = typeof rawTime.endISO === "string" ? rawTime.endISO : null;
+  // a window already underway starts NOW — its stated start has gone, its
+  // stated end has not, and code cannot plan into the past (see windowUnderway)
+  const startISO =
+    windowUnderway(
+      rawStartISO ? parseInstant(rawStartISO) : null,
+      endISO ? parseInstant(endISO) : null,
+      now
+    ) && rawStartISO
+      ? new Date(now).toISOString()
+      : rawStartISO;
   const timeIntent: TimeIntent = {
     startISO,
     endISO,
@@ -594,7 +635,7 @@ export type PlanValidation =
 export function validatePlan(raw: unknown, now: Date): PlanValidation {
   const problems = findPlanProblems(raw, now);
   if (problems.length > 0) return { ok: false, problems };
-  return { ok: true, plan: coercePlan(raw as Record<string, unknown>) };
+  return { ok: true, plan: coercePlan(raw as Record<string, unknown>, now) };
 }
 
 // ── the ladder ────────────────────────────────────────────────────────────
@@ -719,6 +760,100 @@ export function fallbackPlan(prompt: string, now: Date, timeZone: string): PlanI
  * chosen there: it leaves a full day ahead without starting before anything
  * is open.
  */
+const WEEKDAY_NAMES_LOWER = [
+  "sunday",
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+];
+const WEEKDAY_MENTION = new RegExp(
+  `\\b(next\\s+)?(${WEEKDAY_NAMES_LOWER.join("|")})\\b`,
+  "gi"
+);
+/** Other calendar qualifiers that make a bare weekday ambiguous or moot. */
+const COMPETING_CALENDAR =
+  /\b(today|tomorrow)\b|\b\d{4}-\d{1,2}-\d{1,2}\b|\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b/i;
+
+/**
+ * WEEKDAY FLOOR — added 2026-07-27 after live verification.
+ *
+ * "Is 2026-07-31 a Saturday?" is a FACT, not a judgment, so the model does
+ * not get to be wrong about it. Live probe (now = Monday 2026-07-27):
+ * "plan my saturday from 3-8pm" came back anchored on 2026-07-31 — a
+ * FRIDAY. "friday at 7pm" and "next tuesday at 10am" were both correct, so
+ * this is an arithmetic slip rather than a misreading, which is exactly the
+ * class the immediacy floor already exists for.
+ *
+ * Deliberately narrow: it fires only when the raw prompt names exactly ONE
+ * weekday and no competing calendar qualifier, and only when the model's own
+ * start lands on a DIFFERENT weekday. It then moves the date to the nearest
+ * future occurrence — "next <weekday>" staying strict, matching the rule
+ * resolveStartTimeResult already documents — and preserves the model's
+ * wall-clock time and the length of any stated window.
+ */
+export function applyWeekdayFloor(
+  plan: PlanIntent,
+  prompt: string,
+  now: Date,
+  timeZone: string
+): PlanIntent {
+  const zone = normalizeZone(timeZone);
+  const text = (prompt ?? "").toLowerCase();
+  if (COMPETING_CALENDAR.test(text)) return plan;
+
+  const mentions = [...text.matchAll(WEEKDAY_MENTION)];
+  if (mentions.length !== 1) return plan;
+  const [, nextPrefix, dayName] = mentions[0];
+  const wanted = WEEKDAY_NAMES_LOWER.indexOf(dayName);
+  if (wanted < 0) return plan;
+
+  const start = parseInstant(plan.timeIntent.startISO);
+  if (!start) return plan;
+  const startParts = wallClockParts(start, zone);
+  // The floor's ONLY job is a wrong weekday. If the model already landed on
+  // the right day of the week it abstains — including for "next <weekday>",
+  // where WHICH of two valid occurrences was meant is a genuine semantic
+  // judgment (live probe: from a Monday, the model read "next tuesday" as a
+  // week out; the legacy resolver reads it as tomorrow, and both are
+  // defensible English). Code corrects facts, not readings.
+  if (startParts.weekday === wanted) return plan;
+
+  const localNow = wallClockParts(now, zone);
+  let offset = (wanted - localNow.weekday + 7) % 7;
+  if (nextPrefix && offset === 0) offset = 7;
+  let corrected = instantAtLocalDateTime(
+    localDateAfterDays(now, zone, offset),
+    zone,
+    startParts.hour,
+    startParts.minute
+  );
+  // an occurrence that has already passed today means next week's
+  if (corrected && offset === 0 && corrected.getTime() <= now.getTime()) {
+    corrected = instantAtLocalDateTime(
+      localDateAfterDays(now, zone, 7),
+      zone,
+      startParts.hour,
+      startParts.minute
+    );
+  }
+  if (!corrected || corrected.getTime() === start.getTime()) return plan;
+
+  // keep any stated window the same LENGTH, just moved to the right day
+  const end = parseInstant(plan.timeIntent.endISO);
+  const shiftMs = corrected.getTime() - start.getTime();
+  return {
+    ...plan,
+    timeIntent: {
+      ...plan.timeIntent,
+      startISO: toZonedISO(corrected, zone),
+      endISO: end ? toZonedISO(new Date(end.getTime() + shiftMs), zone) : plan.timeIntent.endISO,
+    },
+  };
+}
+
 export function applyTimeFloors(
   plan: PlanIntent,
   prompt: string,
@@ -750,7 +885,8 @@ export function applyTimeFloors(
       questions: plan.questions.filter((q) => q.id !== WHEN_QUESTION_ID),
     };
   }
-  return plan;
+  // no immediacy or all-day signal — a named weekday may still need fixing
+  return applyWeekdayFloor(plan, prompt, now, zone);
 }
 
 // ── the adapter to the legacy pipeline currency ───────────────────────────
