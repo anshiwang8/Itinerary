@@ -459,9 +459,25 @@ function mockTime(p: string, queries: string[], now: Date, timeZone: string): Mo
     // "3-8pm": the trailing meridiem governs both ends
     const start = mockClock(Number(range[1]), Number(range[2] ?? 0), range[3] ?? endAp);
     const end = mockClock(Number(range[4]), Number(range[5] ?? 0), endAp);
+    // A range rolls as ONE unit. Rolling each end independently is what a
+    // per-instant `rollForward` does, and at 5:30 PM it turns "5-9pm" into
+    // start=tomorrow 17:00 / end=today 21:00 — an inverted window the
+    // validator rightly rejects, dropping the plan to the fallback. Which
+    // day the window belongs to is decided ONCE, by its end: a window whose
+    // end has passed is tomorrow's; one already underway is still today's.
+    const rolls =
+      dayOffset === 0 &&
+      instantAtWallClock(now, timeZone, end.hour, end.minute, 0).getTime() <= now.getTime();
+    const offset = dayOffset + (rolls ? 1 : 0);
     return {
-      startISO: at(start.hour, start.minute, dayOffset === 0),
-      endISO: at(end.hour, end.minute, dayOffset === 0),
+      startISO: toZonedISO(
+        instantAtWallClock(now, timeZone, start.hour, start.minute, offset),
+        timeZone
+      ),
+      endISO: toZonedISO(
+        instantAtWallClock(now, timeZone, end.hour, end.minute, offset),
+        timeZone
+      ),
       kind: "explicit",
       label: range[0],
     };

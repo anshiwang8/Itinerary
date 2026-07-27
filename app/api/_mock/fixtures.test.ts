@@ -138,6 +138,63 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "a stated WINDOW stays coherent at EVERY hour of the day (rolls as a unit)",
+    () => {
+      // Regression: the two ends used to roll to tomorrow independently, so
+      // at 5:30 PM "5-9pm" resolved to start=tomorrow 17:00 / end=today
+      // 21:00 — inverted, validator-rejected, silently downgraded to the
+      // fallback plan. Every other test here pins NOW at 15:00, so only the
+      // e2e suite saw it, and only after 5 PM. Sweep the clock instead.
+      for (let hour = 0; hour < 24; hour++) {
+        const now = new Date(`2026-07-27T${String(hour).padStart(2, "0")}:30:00-04:00`);
+        const raw = mockPlan("dinner and drinks from 5-9pm", now, DEFAULT_ZONE);
+        const result = validatePlan(raw, now);
+        assert.ok(result.ok, `rejected at ${hour}:30 — ${result.ok ? "" : result.problems.join("; ")}`);
+        const { startISO, endISO } = result.plan.timeIntent;
+        assert.ok(startISO && endISO, `both ends must resolve at ${hour}:30`);
+        assert.ok(
+          new Date(endISO!) > new Date(startISO!),
+          `window inverted at ${hour}:30 (${startISO} → ${endISO})`
+        );
+        // the stated END is always kept exactly as asked
+        assert.strictEqual(wallClockParts(new Date(endISO!), DEFAULT_ZONE).hour, 21, `${hour}:30`);
+        // the start is the stated 5 PM, EXCEPT while the window is already
+        // underway (18:30/19:30/20:30), where code cannot plan into the past
+        // and the repair moves it up to now
+        const startHour = wallClockParts(new Date(startISO!), DEFAULT_ZONE).hour;
+        const underway = hour >= 17 && hour < 21;
+        assert.strictEqual(startHour, underway ? hour : 17, `start at ${hour}:30`);
+        assert.ok(
+          new Date(startISO!).getTime() >= now.getTime() - 60 * 60_000,
+          `start must never be planned into the past at ${hour}:30`
+        );
+      }
+    },
+  ],
+  [
+    "a window already UNDERWAY stays today; one already OVER rolls to tomorrow",
+    () => {
+      // 5:30 PM, asked for 5-9pm: underway, not tomorrow's problem.
+      const underway = new Date("2026-07-27T17:30:00-04:00");
+      const now1 = validatePlan(mockPlan("dinner from 5-9pm", underway, DEFAULT_ZONE), underway);
+      assert.ok(now1.ok);
+      assert.strictEqual(
+        wallClockParts(new Date(now1.plan.timeIntent.startISO!), DEFAULT_ZONE).day,
+        wallClockParts(underway, DEFAULT_ZONE).day,
+        "a window already underway must stay TODAY"
+      );
+      // 11:30 PM, asked for 5-9pm: that window is gone; it means tomorrow's.
+      const over = new Date("2026-07-27T23:30:00-04:00");
+      const now2 = validatePlan(mockPlan("dinner from 5-9pm", over, DEFAULT_ZONE), over);
+      assert.ok(now2.ok);
+      assert.notStrictEqual(
+        wallClockParts(new Date(now2.plan.timeIntent.startISO!), DEFAULT_ZONE).day,
+        wallClockParts(over, DEFAULT_ZONE).day,
+        "a window whose end has passed must roll to TOMORROW"
+      );
+    },
+  ],
+  [
     "a vague prompt asks, and one answer resolves every slot sharing its query",
     () => {
       const vague = planned("not sure what to do");
