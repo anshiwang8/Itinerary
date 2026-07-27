@@ -12,7 +12,12 @@ import {
   requestContext,
   requireServiceKey,
 } from "../_shared/http";
-import { parseParsedPrompt, parsePools, parseSlots } from "../_shared/schemas";
+import {
+  parseParsedPrompt,
+  parsePools,
+  parseSlots,
+  parseSlotEstimates,
+} from "../_shared/schemas";
 
 // Thin wrapper over selectVenues (shared with the reroute engine).
 export async function POST(request: NextRequest) {
@@ -28,6 +33,9 @@ export async function POST(request: NextRequest) {
     // the requested stops in order, duplicates intact — a repeated category
     // is two stops sharing one pool, not one stop (code-audit §7.1)
     const slots = parseSlots(body.slots);
+    // the planner's per-slot duration estimates (index-aligned with slots);
+    // absent for callers that never saw a planner
+    const estimates = parseSlotEstimates(body.plannedMinutes, slots?.length);
 
     // Fixture seam replaces the Groq completion only. Slot validation,
     // constraint enforcement, correction, and global assignment below are
@@ -38,12 +46,20 @@ export async function POST(request: NextRequest) {
         parsed,
         poolsIn,
         slots,
-        mockSelectModelResponse
+        mockSelectModelResponse,
+        estimates
       );
       return apiJson(ctx, { selections });
     }
     const apiKey = requireServiceKey(process.env.GROQ_API_KEY);
-    const selections = await selectVenues(apiKey, parsed, poolsIn, slots);
+    const selections = await selectVenues(
+      apiKey,
+      parsed,
+      poolsIn,
+      slots,
+      undefined,
+      estimates
+    );
     return apiJson(ctx, { selections });
   } catch (err) {
     if (err instanceof SelectParseError) {

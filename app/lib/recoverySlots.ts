@@ -11,6 +11,8 @@ export interface RecoverySelectionLike {
   category?: string;
   id?: string | null;
   slot?: number;
+  /** the stop's own resolved length, when a planner/selector produced one */
+  plannedMinutes?: number;
 }
 
 export interface ScheduledSlotLike {
@@ -27,9 +29,12 @@ function validDate(value: Date | string | null | undefined): Date | null {
   return Number.isFinite(date.getTime()) ? date : null;
 }
 
-function durationTotal(category: string): number {
+/** Same rule the scheduler uses: the stop's OWN length wins, and the
+ *  buffer stays the table's scheduling margin. DURATION_TABLE is the
+ *  fallback for slots that never met a planner. */
+function durationTotal(category: string, plannedMinutes?: number): number {
   const duration = getDuration(category);
-  return duration.baseMinutes + duration.bufferMinutes;
+  return (plannedMinutes ?? duration.baseMinutes) + duration.bufferMinutes;
 }
 
 /**
@@ -47,6 +52,7 @@ export function provisionalArrivals(
   if (!cursorStart) return {};
 
   const categoryBySlot = new Map<number, string>();
+  const minutesBySlot = new Map<number, number>();
   for (const selection of selections) {
     if (
       validSlot(selection.slot) &&
@@ -55,6 +61,13 @@ export function provisionalArrivals(
     ) {
       categoryBySlot.set(selection.slot, selection.category);
     }
+    if (
+      validSlot(selection.slot) &&
+      typeof selection.plannedMinutes === "number" &&
+      Number.isFinite(selection.plannedMinutes)
+    ) {
+      minutesBySlot.set(selection.slot, selection.plannedMinutes);
+    }
   }
 
   const arrivals: SlotArrivalMap = {};
@@ -62,7 +75,7 @@ export function provisionalArrivals(
   requestedCategories.forEach((requestedCategory, slot) => {
     arrivals[slot] = new Date(cursorMs).toISOString();
     const category = categoryBySlot.get(slot) ?? requestedCategory;
-    cursorMs += durationTotal(category) * 60_000;
+    cursorMs += durationTotal(category, minutesBySlot.get(slot)) * 60_000;
   });
   return arrivals;
 }

@@ -797,6 +797,112 @@ const cases: Array<[string, () => Promise<void>]> = [
       }
     },
   ],
+  // ── duration refinement (Part 4): the selector adjusts the planner's
+  // pre-venue estimate now that it knows the actual place ──
+  [
+    "the planner's estimate is SENT with each slot, and the refined answer rides on the pick",
+    async () => {
+      groqCalls = [];
+      responder = () =>
+        JSON.stringify({
+          selections: [
+            { slot: 0, category: "cafe", id: "b", reason: "Cozy corner spot.", minutes: 150 },
+          ],
+        });
+      const res = await POST(
+        req({ parsed, pools, slots: ["cafe"], plannedMinutes: [45] })
+      );
+      const data = await res.json();
+      // the pre-venue estimate reached the model
+      const payload = JSON.parse(groqCalls[0].messages[1].content);
+      assert.strictEqual(payload.slots[0].estimatedMinutes, 45);
+      // and its refinement rides ON the selection, like priceLevel/description
+      assert.strictEqual(data.selections[0].plannedMinutes, 150);
+    },
+  ],
+  [
+    "a refined duration is CLAMPED, never rejected — a bad estimate must not void a good pick",
+    async () => {
+      for (const [minutes, expected] of [
+        [900, 360],
+        [1, 15],
+        [88.6, 89],
+      ] as Array<[number, number]>) {
+        groqCalls = [];
+        responder = () =>
+          JSON.stringify({
+            selections: [
+              { slot: 0, category: "cafe", id: "b", reason: "Cozy.", minutes },
+            ],
+          });
+        const res = await POST(
+          req({ parsed, pools, slots: ["cafe"], plannedMinutes: [45] })
+        );
+        const data = await res.json();
+        // the PICK survives — only the number was corrected
+        assert.strictEqual(data.selections[0].id, "b", String(minutes));
+        assert.strictEqual(data.selections[0].plannedMinutes, expected, String(minutes));
+        assert.strictEqual(groqCalls.length, 1, "clamping must not burn the retry");
+      }
+    },
+  ],
+  [
+    "a MISSING refinement falls back to the planner's estimate, then to the table",
+    async () => {
+      // model omitted `minutes` → the planner's estimate stands
+      groqCalls = [];
+      responder = () =>
+        JSON.stringify({
+          selections: [{ slot: 0, category: "cafe", id: "b", reason: "Cozy." }],
+        });
+      const withEstimate = await POST(
+        req({ parsed, pools, slots: ["cafe"], plannedMinutes: [45] })
+      );
+      assert.strictEqual((await withEstimate.json()).selections[0].plannedMinutes, 45);
+
+      // no planner estimate at all (swap/reroute shape) → no plannedMinutes,
+      // so the scheduler uses DURATION_TABLE exactly as it always did
+      groqCalls = [];
+      const noEstimate = await POST(req({ parsed, pools }));
+      assert.strictEqual(
+        (await noEstimate.json()).selections[0].plannedMinutes,
+        undefined
+      );
+    },
+  ],
+  [
+    "the DETERMINISTIC fallback keeps the planner's estimate, not the rejected model's",
+    async () => {
+      groqCalls = [];
+      // invalid twice → the fallback assignment takes over
+      responder = () =>
+        JSON.stringify({
+          selections: [
+            { slot: 0, category: "cafe", id: "ghost-id-999", reason: "no", minutes: 300 },
+          ],
+        });
+      const res = await POST(
+        req({ parsed, pools, slots: ["cafe"], plannedMinutes: [45] })
+      );
+      const sel = (await res.json()).selections[0];
+      assert.strictEqual(sel.fallback, true);
+      // the model's answer was thrown away wholesale — including its 300 —
+      // but the planner's own estimate was never in question
+      assert.strictEqual(sel.plannedMinutes, 45);
+    },
+  ],
+  [
+    "a mismatched estimates array is rejected at the boundary, before any model work",
+    async () => {
+      groqCalls = [];
+      responder = () => valid("a");
+      const res = await POST(
+        req({ parsed, pools, slots: ["cafe"], plannedMinutes: [45, 60] })
+      );
+      assert.strictEqual(res.status, 400);
+      assert.strictEqual(groqCalls.length, 0);
+    },
+  ],
 ];
 
 // ── runner ──

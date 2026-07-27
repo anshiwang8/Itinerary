@@ -378,18 +378,28 @@ function mockKindAnswer(answer: string): string {
   return answer.trim();
 }
 
-/** Rough dwell per activity — the model's estimate, not a lookup the
- *  scheduler owns. Production clamps whatever comes back to 15-360. */
+/** Rough dwell per activity — the fixture model's estimate, not a lookup
+ *  the scheduler owns. Production clamps whatever comes back to 15-360.
+ *
+ *  These values deliberately EQUAL DURATION_TABLE's base minutes for every
+ *  fixture category. The mock's job is to prove the plumbing (estimate →
+ *  selector refinement → stop → schedule), not the arithmetic, and every
+ *  arrival-sensitive e2e scenario — the per-slot recovery targeting, the
+ *  weather-at-that-slot check, the closes-before-you-arrive adapt — pins
+ *  exact clock times that would all shift for no product reason if the
+ *  fixture disagreed with the table. That an estimate DIFFERENT from the
+ *  table really moves the schedule is pinned in schedule.test.ts, and the
+ *  refinement/clamp/fallback ladder in select.test.ts. */
 const MOCK_MINUTES: Array<[RegExp, number]> = [
-  [/coffee|caf[eé]/i, 45],
-  [/dessert|ice ?cream|gelato|bao/i, 40],
-  [/park|walk|beach|garden/i, 45],
-  [/galler|museum/i, 90],
-  [/bar|drink|pub|cocktail/i, 70],
-  [/dinner|restaurant|sushi|ramen|dumpling|steak|brunch|lunch|food/i, 105],
+  [/coffee|caf[eé]/i, 50],
+  [/dessert|ice ?cream|gelato|bao/i, 30],
+  [/park|walk|beach|garden/i, 40],
+  [/galler|museum/i, 105],
+  [/bar|drink|pub|cocktail/i, 60],
+  [/dinner|restaurant|sushi|ramen|dumpling|steak|brunch|lunch|food/i, 90],
 ];
 function mockMinutes(query: string): number {
-  return MOCK_MINUTES.find(([pattern]) => pattern.test(query))?.[1] ?? 90;
+  return MOCK_MINUTES.find(([pattern]) => pattern.test(query))?.[1] ?? 60;
 }
 
 /** The hour an activity IMPLIES when the user stated no time. This is the
@@ -791,6 +801,7 @@ export const mockSelectModelResponse: SelectModelCall = async (messages) => {
     id: string | null;
     reason: string;
     unmet_constraint: string | null;
+    minutes?: number;
   }> = [];
   for (const value of slots) {
     if (
@@ -837,12 +848,21 @@ export const mockSelectModelResponse: SelectModelCall = async (messages) => {
       });
       continue;
     }
+    // The DURATION REFINEMENT, mirrored: the fixture "model" echoes the
+    // planner's pre-venue estimate back unchanged, which is the honest
+    // no-adjustment-needed answer and keeps mock schedules byte-stable.
+    // Production clamps whatever comes back to 15-360 either way.
+    const estimatedMinutes =
+      "estimatedMinutes" in value && typeof value.estimatedMinutes === "number"
+        ? value.estimatedMinutes
+        : undefined;
     selections.push({
       slot: value.slot,
       category: value.category,
       id: pick.id,
       reason: `A reliable ${value.category} spot that suits the outing.`,
       unmet_constraint: null,
+      ...(estimatedMinutes !== undefined ? { minutes: estimatedMinutes } : {}),
     });
   }
   return JSON.stringify({ selections });

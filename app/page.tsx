@@ -690,6 +690,15 @@ export default function Home() {
           // the requested stops in order, duplicates intact — a category asked
           // for twice is TWO stops sharing one pool (code-audit §7.1)
           slots: (parseData.category_signals ?? []).length > 0 ? parseData.category_signals : undefined,
+          // the planner's pre-venue duration estimates. The selector refines
+          // each one now that it knows the actual place — folded into the
+          // SAME Groq round-trip rather than a second call, because an extra
+          // model round-trip per plan is real latency for a judgment the
+          // selector is already making with the venue in front of it.
+          plannedMinutes:
+            (parseData.category_signals ?? []).length > 0
+              ? plan.activities.map((a) => a.estimatedMinutes)
+              : undefined,
         }),
         parse: parseSelectionsPayload,
       });

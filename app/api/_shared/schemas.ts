@@ -198,6 +198,27 @@ export function parseSlots(value: unknown): string[] | undefined {
   return stringList(value, "slots");
 }
 
+/** The planner's per-slot duration estimates, index-aligned with `slots`.
+ *  Bounds match the planner's own clamp; selectVenues re-clamps anyway. */
+export function parseSlotEstimates(
+  value: unknown,
+  slotCount: number | undefined
+): number[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > REQUEST_LIMITS.categories) {
+    badRequest(`\`plannedMinutes\` must be an array with at most ${REQUEST_LIMITS.categories} entries.`);
+  }
+  if (slotCount !== undefined && value.length !== slotCount) {
+    badRequest("`plannedMinutes` must have exactly one entry per slot.");
+  }
+  return value.map((minutes, index) => {
+    if (!finiteNumber(minutes) || minutes < 1 || minutes > 360) {
+      badRequest(`\`plannedMinutes[${index}]\` must be a number from 1 to 360.`);
+    }
+    return Math.round(minutes);
+  });
+}
+
 export function parseCategories(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   return stringList(value, "categoriesOverride");

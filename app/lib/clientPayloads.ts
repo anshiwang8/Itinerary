@@ -227,7 +227,9 @@ function isSelection(value: unknown): value is Selection {
     (selection.id === null || typeof selection.id === "string") &&
     typeof selection.reason === "string" &&
     (selection.slot === undefined ||
-      (typeof selection.slot === "number" && Number.isInteger(selection.slot)))
+      (typeof selection.slot === "number" && Number.isInteger(selection.slot))) &&
+    (selection.plannedMinutes === undefined ||
+      (finiteNumber(selection.plannedMinutes) && selection.plannedMinutes > 0))
   );
 }
 

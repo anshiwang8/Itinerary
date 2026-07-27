@@ -469,6 +469,11 @@ export interface SelectionLike {
   currentOpeningHours?: CurrentOpeningHours;
   /** venue coordinates — passthrough; the reroute engine needs them */
   location?: { latitude: number; longitude: number };
+  /** THE stop's own length in minutes, proposed by the planner and refined
+   * against the venue that was actually picked. Absent means no LLM
+   * estimate reached this stop (swap, reroute, recovery slots, legacy
+   * stored plans) and DURATION_TABLE decides — exactly as it always did. */
+  plannedMinutes?: number;
 }
 
 export interface ScheduledStop extends SelectionLike {
@@ -524,7 +529,14 @@ export function buildSchedule(
       timed.push({ ...sel, start_time: null, end_time: null, durationMinutes: null });
       continue;
     }
-    const { baseMinutes, bufferMinutes } = getDuration(sel.category);
+    // The stop's OWN duration wins when it has one; DURATION_TABLE is the
+    // fallback for every stop that never met a planner. Only the BASE is
+    // the model's to judge — the buffer is a scheduling margin (transition,
+    // ordering, settling), a policy of ours rather than a fact about the
+    // venue, so it keeps coming from the table for the resolved category.
+    const table = getDuration(sel.category);
+    const baseMinutes = sel.plannedMinutes ?? table.baseMinutes;
+    const { bufferMinutes } = table;
     const total = baseMinutes + bufferMinutes;
     const stopStart = new Date(cursor);
     cursor = new Date(cursor.getTime() + total * 60_000);

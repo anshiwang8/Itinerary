@@ -633,6 +633,42 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "a stop's OWN duration wins over the table; the buffer stays ours",
+    () => {
+      const { stops } = buildSchedule(
+        [
+          // the LLM says this tasting-menu place needs 150, not the table's 90
+          { category: "ramen", id: "r1", name: "Tasting Menu", plannedMinutes: 150 },
+          // no estimate → DURATION_TABLE, exactly as before (bar = 60 + 10)
+          { category: "cocktails", id: "b1", name: "Cocktail Bar" },
+        ],
+        "evening",
+        NOW,
+        [],
+        undefined,
+        null,
+        "America/Toronto"
+      );
+      // base is the model's; buffer is the table's for the RESOLVED category
+      // (restaurant = 15), because a buffer is our scheduling margin rather
+      // than a judgment about the venue
+      assert.deepStrictEqual(stops[0].durationMinutes, {
+        base: 150,
+        buffer: 15,
+        total: 165,
+      });
+      assert.deepStrictEqual(stops[1].durationMinutes, {
+        base: 60,
+        buffer: 10,
+        total: 70,
+      });
+      // and the chain actually MOVES by the refined length: 19:00 + 2h45
+      assert.strictEqual(stops[0].start_time, "2026-07-03T19:00:00-04:00");
+      assert.strictEqual(stops[0].end_time, "2026-07-03T21:45:00-04:00");
+      assert.strictEqual(stops[1].start_time, "2026-07-03T21:45:00-04:00");
+    },
+  ],
+  [
     "3-stop chain: sequential, non-overlapping, Toronto ISO, travel placeholder",
     () => {
       const { startISO, stops } = buildSchedule(
