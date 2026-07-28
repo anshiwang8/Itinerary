@@ -12,6 +12,7 @@ import {
   requireServiceKey,
 } from "../_shared/http";
 import { fetchProvider, readProviderJson, requireProviderRecord } from "../_shared/provider";
+import { withModelFallback } from "../_shared/modelFallback";
 import { parsePlannerBody } from "../_shared/schemas";
 import { DEFAULT_ZONE, normalizeZone } from "../../lib/zoneTime";
 import { applyTimeFloors, buildPlannerMessages, planToParsed, planWithModel } from "./planner";
@@ -25,9 +26,15 @@ import { applyTimeFloors, buildPlannerMessages, planToParsed, planWithModel } fr
 // the current instant in the plan's timezone. Every rule the planner proposes
 // is checked in planner.ts before it can reach a user.
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama-3.3-70b-versatile";
 
-async function callGroq(apiKey: string, messages: unknown[]): Promise<string> {
+// the model is a PARAMETER now — withModelFallback picks it from the
+// planner's chain and re-runs this whole call on the next entry if the
+// current model is rate limited (models.ts explains why per call type)
+async function callGroq(
+  apiKey: string,
+  messages: unknown[],
+  model: string
+): Promise<string> {
   const res = await fetchProvider("groq", GROQ_URL, {
     method: "POST",
     headers: {
@@ -35,7 +42,7 @@ async function callGroq(apiKey: string, messages: unknown[]): Promise<string> {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: MODEL,
+      model,
       messages,
       // Belt and braces: the system prompt demands bare JSON, and
       // response_format guarantees the model can't wrap it in prose.
@@ -81,19 +88,29 @@ export async function POST(request: NextRequest) {
     // The seam replaces the DATA SOURCE only: the fixture's raw object still
     // goes through the production validator, and the deterministic time
     // floors still apply, because both are LOGIC.
-    const complete = isMockMode()
-      ? async () => JSON.stringify(mockPlan(prompt, now, timeZone, body.answers ?? []))
-      : (() => {
-          const apiKey = requireServiceKey(process.env.GROQ_API_KEY);
-          return (msgs: unknown[]) => callGroq(apiKey, msgs);
-        })();
+    const apiKey = isMockMode() ? "" : requireServiceKey(process.env.GROQ_API_KEY);
 
-    const { plan: modelPlan, source, problems } = await planWithModel(
-      messages,
-      now,
-      prompt,
-      timeZone,
-      complete
+    // The fallback wraps the ENTIRE planWithModel ladder, not the single
+    // completion inside it: that ladder is a conversation (answer → "this was
+    // invalid, here's why" → correction), and letting a correction land on a
+    // different model than the answer it corrects would be a subtler bug than
+    // the rate limit it was working around.
+    const { plan: modelPlan, source, problems } = await withModelFallback(
+      "planner",
+      (model) =>
+        planWithModel(
+          messages,
+          now,
+          prompt,
+          timeZone,
+          // e2e fixture seam — deterministic planner, no Groq call, no key
+          // needed. The seam replaces the DATA SOURCE only: the fixture's raw
+          // object still goes through the production validator, and the
+          // deterministic time floors still apply, because both are LOGIC.
+          isMockMode()
+            ? async () => JSON.stringify(mockPlan(prompt, now, timeZone, body.answers ?? []))
+            : (msgs: unknown[]) => callGroq(apiKey, msgs, model)
+        )
     );
     const plan = applyTimeFloors(modelPlan, prompt, now, timeZone);
     // Permanent observability at the resolution point, same spirit as

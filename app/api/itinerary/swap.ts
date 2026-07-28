@@ -19,13 +19,19 @@ import { Itinerary, ItineraryStop, withStatuses, floorTime, timedIndexes, rebuil
 import { filterPools, ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
 import { fetchWeatherHours } from "../weather/fetchWeather";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
-import { selectVenues as realSelectVenues, Selection } from "../select/selectVenues";
+import {
+  selectVenues as realSelectVenues,
+  selectModelCall,
+  Selection,
+} from "../select/selectVenues";
+import { withModelFallback } from "../_shared/modelFallback";
 import { getDuration } from "../schedule/durations";
 import { toZonedISO } from "../schedule/schedule";
 import { isParkLike } from "../../lib/categoryTraits";
 import { DEFAULT_ZONE, instantAtWallClock, wallClockParts } from "../../lib/zoneTime";
 import { isRecord, logEvent } from "../_shared/http";
 import {
+  ProviderError,
   fetchProvider,
   readProviderJson,
   requireProviderRecord,
@@ -42,7 +48,6 @@ import { isMockMode, mockSwapDeps } from "../_mock/fixtures";
 import { fallbackParsedFor, UNKNOWN_LOCATION_MESSAGE } from "./fallbackParsed";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama-3.3-70b-versatile";
 
 export type SwapIntent = "venue" | "time" | "constraint" | "duration";
 
@@ -432,39 +437,58 @@ export async function interpretRefinement(
       : localTime
       ? { ...fallback, intent: "time", time: localTime }
       : fallback;
+  // NOTE ON FAILURE HANDLING: the catch at the end of this function returns
+  // localFallback() for EVERY failure, and that now includes a rate limit
+  // that exhausted the swap chain. That is deliberate rather than an
+  // oversight — unlike the planner, this call has a real deterministic
+  // interpretation underneath it (parseTimeExpr/parseDurationExpr already
+  // own every number), so degrading to it beats refusing the swap because a
+  // model was busy. This is the one call type where "busy" should not reach
+  // the user.
   try {
-    const res = await fetchProvider("groq", GROQ_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: MODEL,
-        messages: [
-          { role: "system", content: REFINE_SYSTEM },
-          {
-            role: "user",
-            content: JSON.stringify({
-              current: {
-                category,
-                aesthetic: parsed.aesthetic,
-                budget: parsed.budget,
-                constraints: parsed.constraints ?? [],
-                startsAt: clockLabel(new Date(currentStartISO)),
-              },
-              complaint: refinement,
-            }),
-          },
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0,
-      }),
-      cache: "no-store",
+    // The swap chain, not the planner's: a small classification job with
+    // deterministic parsers beneath it runs on a smaller primary, leaving the
+    // 70B budget to the calls that need judgment (models.ts explains why).
+    const content = await withModelFallback("swap", async (model) => {
+      const res = await fetchProvider("groq", GROQ_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: REFINE_SYSTEM },
+            {
+              role: "user",
+              content: JSON.stringify({
+                current: {
+                  category,
+                  aesthetic: parsed.aesthetic,
+                  budget: parsed.budget,
+                  constraints: parsed.constraints ?? [],
+                  startsAt: clockLabel(new Date(currentStartISO)),
+                },
+                complaint: refinement,
+              }),
+            },
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0,
+        }),
+        cache: "no-store",
+      });
+      const data = requireProviderRecord("groq", await readProviderJson("groq", res));
+      const choices = data.choices;
+      const first = Array.isArray(choices) ? choices[0] : undefined;
+      const message = isRecord(first) ? first.message : undefined;
+      const raw = isRecord(message) ? message.content : undefined;
+      // thrown, not returned as a fallback, so it reaches withModelFallback —
+      // which passes it straight through (not retryable) to the catch below,
+      // preserving the previous behaviour exactly
+      if (typeof raw !== "string" || raw.length > 50_000) {
+        throw new ProviderError("groq", 502, "groq_invalid_response");
+      }
+      return raw;
     });
-    const data = requireProviderRecord("groq", await readProviderJson("groq", res));
-    const choices = data.choices;
-    const first = Array.isArray(choices) ? choices[0] : undefined;
-    const message = isRecord(first) ? first.message : undefined;
-    const content = isRecord(message) ? message.content : undefined;
-    if (typeof content !== "string" || content.length > 50_000) return localFallback();
     const parsedOutput: unknown = JSON.parse(content);
     if (!validInterpretOutput(parsedOutput)) return localFallback();
     const out = parsedOutput;
@@ -548,7 +572,15 @@ function realDeps(): SwapDeps {
     searchPools: (parsed, categories) =>
       realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories),
     selectVenues: (parsed, pools) =>
-      realSelectVenues(process.env.GROQ_API_KEY ?? "", parsed, pools),
+      withModelFallback("select", (model) =>
+        realSelectVenues(
+          process.env.GROQ_API_KEY ?? "",
+          parsed,
+          pools,
+          undefined,
+          selectModelCall(process.env.GROQ_API_KEY ?? "", model)
+        )
+      ),
     getSingleLeg: (origin, destination, fromIndex, departureTime, excludeTransit) =>
       realGetSingleLeg(process.env.GOOGLE_ROUTES_API_KEY ?? "", origin, destination, fromIndex, departureTime, excludeTransit),
     isUsableAt: usableByHours,

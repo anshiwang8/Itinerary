@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { ParsedPrompt, Place } from "../places/search/filter";
-import { SelectParseError, selectVenues } from "./selectVenues";
+import { SelectParseError, selectModelCall, selectVenues } from "./selectVenues";
+import { withModelFallback } from "../_shared/modelFallback";
 import { isMockMode, mockSelectModelResponse } from "../_mock/fixtures";
 import {
   ApiError,
@@ -52,13 +53,11 @@ export async function POST(request: NextRequest) {
       return apiJson(ctx, { selections });
     }
     const apiKey = requireServiceKey(process.env.GROQ_API_KEY);
-    const selections = await selectVenues(
-      apiKey,
-      parsed,
-      poolsIn,
-      slots,
-      undefined,
-      estimates
+    // one logical call = the whole selectVenues ladder (invalid ids → one
+    // correction → deterministic fallback) on ONE model; the chain advances
+    // only when a model is rate limited
+    const selections = await withModelFallback("select", (model) =>
+      selectVenues(apiKey, parsed, poolsIn, slots, selectModelCall(apiKey, model), estimates)
     );
     return apiJson(ctx, { selections });
   } catch (err) {

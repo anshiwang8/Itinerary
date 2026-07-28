@@ -7,6 +7,7 @@ import { ParsedPrompt, Place } from "../places/search/filter";
 import type { CurrentOpeningHours } from "../places/search/hours";
 import { haversineMeters } from "../schedule/travel";
 import { isRecord } from "../_shared/http";
+import { primaryModel } from "../_shared/models";
 import { parseBudget } from "../../lib/budget";
 import {
   constraintEvidence,
@@ -22,7 +23,6 @@ import {
 } from "../_shared/provider";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama-3.3-70b-versatile";
 
 const SYSTEM_PROMPT = `You are the venue selector for a day-plan generator. You receive the user's parsed request, the SLOTS to fill (the stops of the outing, in order), and candidate venue pools grouped by category. Pick exactly ONE venue for EACH SLOT.
 
@@ -109,7 +109,7 @@ function candidateView(p: Place, home?: { latitude: number; longitude: number })
   };
 }
 
-async function callGroq(apiKey: string, messages: unknown[]) {
+async function callGroq(apiKey: string, messages: unknown[], model: string) {
   const res = await fetchProvider("groq", GROQ_URL, {
     method: "POST",
     headers: {
@@ -117,7 +117,7 @@ async function callGroq(apiKey: string, messages: unknown[]) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: MODEL,
+      model,
       messages,
       response_format: { type: "json_object" },
       temperature: 0,
@@ -138,6 +138,16 @@ async function callGroq(apiKey: string, messages: unknown[]) {
 /** Provider seam for the semantic model completion. Validation, retry, and
  * deterministic assignment remain inside selectVenues for every caller. */
 export type SelectModelCall = (messages: unknown[]) => Promise<string>;
+
+/**
+ * A completion bound to ONE model, for callers wrapping selectVenues in
+ * withModelFallback. Binding matters: selectVenues' own ladder sends a
+ * correction ("these ids were invalid") back to the model that produced the
+ * bad answer, so the pair has to stay on the same model to make sense.
+ */
+export function selectModelCall(apiKey: string, model: string): SelectModelCall {
+  return (messages: unknown[]) => callGroq(apiKey, messages, model);
+}
 
 // Raw selection shape as the model returns it (unmet_constraint is the
 // wire name; Selection carries it as unmetConstraint).
@@ -378,7 +388,10 @@ export async function selectVenues(
   parsed: ParsedPrompt,
   poolsIn: Record<string, Place[]>,
   slotsIn?: string[],
-  modelCall: SelectModelCall = (messages) => callGroq(apiKey, messages),
+  // callers that do not wrap in withModelFallback (tests, direct use) get
+  // the chain's primary and no fallback — unchanged behaviour
+  modelCall: SelectModelCall = (messages) =>
+    callGroq(apiKey, messages, primaryModel("select")),
   /** the planner's per-slot duration estimates, index-aligned with slotsIn.
    *  Callers that never saw a planner (swap, reroute) omit it and keep the
    *  DURATION_TABLE behaviour unchanged — the same way home.ts's HOME

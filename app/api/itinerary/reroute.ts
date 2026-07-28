@@ -17,10 +17,12 @@ import {
   Place,
   WeatherHour,
 } from "../places/search/filter";
+import { withModelFallback } from "../_shared/modelFallback";
 import { fetchWeatherHours } from "../weather/fetchWeather";
 import { searchPools as realSearchPools } from "../places/search/searchPlaces";
 import {
   selectVenues as realSelectVenues,
+  selectModelCall,
   Selection,
 } from "../select/selectVenues";
 import { buildSchedule } from "../schedule/schedule";
@@ -91,7 +93,15 @@ function realDeps(): RerouteDeps {
     searchPools: (parsed, categories) =>
       realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories),
     selectVenues: (parsed, pools, slots) =>
-      realSelectVenues(process.env.GROQ_API_KEY ?? "", parsed, pools, slots),
+      withModelFallback("select", (model) =>
+        realSelectVenues(
+          process.env.GROQ_API_KEY ?? "",
+          parsed,
+          pools,
+          slots,
+          selectModelCall(process.env.GROQ_API_KEY ?? "", model)
+        )
+      ),
     getSingleLeg: (origin, destination, fromIndex, departureTime, excludeTransit) =>
       realGetSingleLeg(
         process.env.GOOGLE_ROUTES_API_KEY ?? "",
