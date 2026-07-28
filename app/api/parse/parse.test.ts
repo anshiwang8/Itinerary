@@ -16,16 +16,30 @@
 import assert from "node:assert";
 import { POST } from "./route";
 import { MAX_ACTIVITY_MINUTES } from "./planner";
+import { modelChain } from "../_shared/models";
 
 process.env.GROQ_API_KEY = "test-key";
 
 /** Queued model replies; the last one repeats if the route asks again. */
 let groqReplies: string[] = [];
 let groqCalls: string[] = [];
+/** which model id each call actually asked for, in order */
+let groqModels: string[] = [];
+/** model ids the fake provider should rate-limit, for the fallback tests */
+let rateLimited = new Set<string>();
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
   if (String(url).includes("api.groq.com")) {
-    groqCalls.push(String(init?.body ?? ""));
+    const body = String(init?.body ?? "");
+    groqCalls.push(body);
+    const model = String(JSON.parse(body || "{}").model ?? "");
+    groqModels.push(model);
+    if (rateLimited.has(model)) {
+      return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "retry-after": "9" },
+      });
+    }
     const content = groqReplies.length > 1 ? groqReplies.shift()! : groqReplies[0] ?? "";
     return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
       status: 200,
@@ -81,6 +95,8 @@ const plan = (overrides: Record<string, unknown> = {}) =>
 function reset(...replies: string[]) {
   groqReplies = replies;
   groqCalls = [];
+  groqModels = [];
+  rateLimited = new Set();
 }
 
 const cases: Array<[string, () => Promise<void>]> = [
@@ -266,6 +282,74 @@ const cases: Array<[string, () => Promise<void>]> = [
       const sent = groqCalls[0];
       assert.ok(/bowling/.test(sent), "the answer must reach the model");
       assert.ok(/EMPTY/.test(sent), "the second pass must forbid re-asking");
+    },
+  ],
+  [
+    "a RATE-LIMITED primary falls back to the next model and still plans",
+    async () => {
+      reset(plan());
+      rateLimited = new Set([modelChain("planner")[0]]);
+      const res = await POST(req("dinner at 7pm"));
+      const data = await res.json();
+      assert.strictEqual(res.status, 200, "a rate limit must not fail the request");
+      assert.deepStrictEqual(
+        groqModels,
+        [modelChain("planner")[0], modelChain("planner")[1]],
+        "asked the primary, then the SECOND model — not the primary twice"
+      );
+      assert.strictEqual(data.plan.activities[0].searchQuery, "restaurant");
+    },
+  ],
+  [
+    "the validation ladder still fires on a FALLBACK model, unchanged",
+    async () => {
+      // The safety argument for this whole change: a weaker backup model
+      // returning junk must still hit correction → deterministic fallback,
+      // exactly as the primary would. Nothing about that machinery is
+      // relaxed to accommodate a weaker model.
+      reset("{not json at all", "{still not json");
+      rateLimited = new Set([modelChain("planner")[0]]);
+      const res = await POST(req("dinner at 7pm"));
+      const data = await res.json();
+      assert.strictEqual(res.status, 200, "a raw model error never reaches the user");
+      // primary rate-limited once, then the fallback model twice: its answer
+      // and its correction retry — the ladder intact on the new model
+      assert.deepStrictEqual(groqModels, [
+        modelChain("planner")[0],
+        modelChain("planner")[1],
+        modelChain("planner")[1],
+      ]);
+      assert.ok(/was invalid/.test(groqCalls[2]), "the correction retry still happens");
+      assert.strictEqual(data.plan.activities.length, 1, "deterministic fallback served");
+    },
+  ],
+  [
+    "a correction NEVER lands on a different model than the answer it corrects",
+    async () => {
+      // The reason the fallback wraps the whole ladder rather than the single
+      // completion: a correction is a reply in a conversation, and swapping
+      // models mid-exchange would be a subtler bug than the rate limit it was
+      // working around.
+      reset("{malformed", plan());
+      const res = await POST(req("dinner at 7pm"));
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(groqModels.length, 2, "answer + correction");
+      assert.strictEqual(groqModels[0], groqModels[1], "same model for both halves");
+    },
+  ],
+  [
+    "every model rate-limited gives the actionable capacity message",
+    async () => {
+      reset(plan());
+      rateLimited = new Set(modelChain("planner"));
+      const res = await POST(req("dinner at 7pm"));
+      const data = await res.json();
+      assert.strictEqual(res.status, 503, "capacity exhausted, not a bad gateway");
+      assert.strictEqual(data.code, "model_capacity_exhausted");
+      assert.match(data.error, /try again/i);
+      assert.ok(!/could not complete/i.test(data.error), "not the generic provider text");
+      assert.strictEqual(res.headers.get("retry-after"), "9");
+      assert.strictEqual(groqModels.length, modelChain("planner").length);
     },
   ],
   [

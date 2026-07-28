@@ -113,6 +113,64 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "a 429 gets its OWN code and carries the upstream status + retry-after",
+    async () => {
+      // Before this, the status was checked and discarded: a 429, a 401 and a
+      // 403 all became the same generic 502, so nothing downstream could
+      // react to a rate limit because nothing downstream knew it was one.
+      await assert.rejects(
+        () =>
+          readProviderJson(
+            "groq",
+            new Response("{}", { status: 429, headers: { "retry-after": "12" } })
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof ProviderError);
+          assert.strictEqual(error.code, "groq_rate_limited");
+          assert.strictEqual(error.failure?.upstreamStatus, 429);
+          assert.strictEqual(error.failure?.retryAfterSeconds, 12);
+          assert.strictEqual(error.isModelRetryable, true);
+          // the PUBLIC surface is unchanged — this is about what the server knows
+          assert.strictEqual(error.status, 502);
+          return true;
+        }
+      );
+    },
+  ],
+  [
+    "a 401 keeps the generic code and is NOT model-retryable",
+    async () => {
+      await assert.rejects(
+        () => readProviderJson("groq", new Response("{}", { status: 401 })),
+        (error: unknown) => {
+          assert.ok(error instanceof ProviderError);
+          assert.strictEqual(error.code, "groq_rejected_request");
+          assert.strictEqual(error.failure?.upstreamStatus, 401);
+          assert.strictEqual(
+            error.isModelRetryable,
+            false,
+            "the same key fails identically on every model — advancing buries the real problem"
+          );
+          return true;
+        }
+      );
+    },
+  ],
+  [
+    "a rejection with a non-JSON body is still a rejection, not 'malformed'",
+    async () => {
+      // An HTML error page from a gateway is a rejected request; calling it
+      // invalid_response sends the reader hunting a parser bug that isn't there.
+      await assert.rejects(
+        () => readProviderJson("groq", new Response("<html>429</html>", { status: 429 })),
+        (error: unknown) =>
+          error instanceof ProviderError &&
+          error.code === "groq_rate_limited" &&
+          error.failure?.upstreamStatus === 429
+      );
+    },
+  ],
+  [
     "unexpected errors expose only a correlation id and structured redacted log",
     async () => {
       const ctx = requestContext(
