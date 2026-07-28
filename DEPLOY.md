@@ -39,6 +39,16 @@ stale.
 | Variable | Value / purpose |
 | --- | --- |
 | `GROQ_API_KEY` | Groq (parse / select / swap interpret) — server-side only |
+| `GROQ_MODELS_PLANNER` | OPTIONAL. Comma-separated model chain for the planner, tried in order on a rate limit. Unset = the in-code default. |
+| `GROQ_MODELS_SELECT` | OPTIONAL. Same, for venue selection (used by /api/select, reroute and swap's replacement search). |
+| `GROQ_MODELS_SWAP` | OPTIONAL. Same, for swap-intent classification — deliberately a smaller primary so swap traffic doesn't spend the planner's per-model budget. |
+
+The three `GROQ_MODELS_*` vars exist so a chain can be changed on the host
+WITHOUT a deploy: a rate limit or a decommissioned model is discovered in
+production, and waiting for a build is the wrong shape for that. Blank or
+unset falls back to the in-code defaults, so a typo empties nothing. Verify
+any id against `GET https://api.groq.com/openai/v1/models` before setting it —
+`app/api/_shared/models.ts` records which candidates were rejected and why.
 | `GOOGLE_PLACES_API_KEY` | Places Text Search (venue search) — server-side only |
 | `GOOGLE_GEOCODING_API_KEY` | Geocoding API (typed city and starting-address resolution) — server-side only |
 | `GOOGLE_ROUTES_API_KEY` | Routes computeRoutes — server-side only |
