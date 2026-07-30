@@ -297,6 +297,100 @@ const cases: Array<[string, () => Promise<void>]> = [
       });
     },
   ],
+
+  // ── the exact walk, pinned to a SYNTHETIC chain ──
+  //
+  // The cases above mostly drive the live defaults, which is a real check of
+  // the shipped config but a weak check of the walk: they can only assert
+  // "two models were tried", never "these two, in this order". Pinning the
+  // chain here lets the sequence itself be the assertion, and keeps these
+  // cases from going red the day someone legitimately reorders a chain.
+  [
+    "the first model answering costs exactly one call, on the chain's head",
+    async () => {
+      await withEnv2({ GROQ_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
+        const tried: string[] = [];
+        const { result } = await capturingLogs(() =>
+          withModelFallback("planner", async (model) => {
+            tried.push(model);
+            return `answered by ${model}`;
+          })
+        );
+        assert.deepStrictEqual(tried, ["alpha"], "a healthy primary must not touch the rest of the chain");
+        assert.strictEqual(result, "answered by alpha", "the primary's own answer is returned");
+      });
+    },
+  ],
+  [
+    "a 429 walks the chain IN ORDER, and stops as soon as one answers",
+    async () => {
+      await withEnv2({ GROQ_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
+        const tried: string[] = [];
+        const { result } = await capturingLogs(() =>
+          withModelFallback("planner", async (model) => {
+            tried.push(model);
+            if (model === "alpha") throw rejected(429, 12);
+            return `answered by ${model}`;
+          })
+        );
+        assert.deepStrictEqual(tried, ["alpha", "beta"], "head first, and gamma is never reached");
+        assert.strictEqual(result, "answered by beta");
+      });
+    },
+  ],
+  [
+    "exhaustion names the CALL TYPE it burned, not just the models",
+    async () => {
+      // `call` is what tells an operator WHICH budget ran out — a planner
+      // exhaustion and a swap exhaustion need different responses, and the
+      // error is the only place that distinction survives.
+      for (const call of ["planner", "swap"] as const) {
+        await withEnv2({ [`GROQ_MODELS_${call.toUpperCase()}`]: "one,two" }, async () => {
+          const { error } = await capturingLogs(() =>
+            withModelFallback(call, async () => {
+              throw rejected(429, 7);
+            })
+          );
+          const err = error as AllModelsRateLimitedError;
+          assert.strictEqual(err.call, call, "the error must say which call type exhausted");
+          assert.deepStrictEqual(err.attempted, ["one", "two"], "in order, every entry");
+          assert.strictEqual(err.retryAfterSeconds, 7);
+        });
+      }
+    },
+  ],
+  [
+    "a non-retryable rejection propagates the SAME error object, not a lookalike",
+    async () => {
+      await withEnv2({ GROQ_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
+        const thrown = rejected(401);
+        const tried: string[] = [];
+        const { error } = await capturingLogs(() =>
+          withModelFallback("planner", async (model) => {
+            tried.push(model);
+            throw thrown;
+          })
+        );
+        assert.strictEqual(error, thrown, "identity — the original error reaches the caller untouched");
+        assert.deepStrictEqual(tried, ["alpha"], "no advance past a key failure");
+      });
+    },
+  ],
+  [
+    "exhaustion with no retry-after carries undefined — never a fabricated wait",
+    async () => {
+      await withEnv2({ GROQ_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
+        const { error } = await capturingLogs(() =>
+          withModelFallback("planner", async () => {
+            throw rejected(429);
+          })
+        );
+        const err = error as AllModelsRateLimitedError;
+        assert.strictEqual(err.retryAfterSeconds, undefined, "absent is absent, not zero");
+        assert.deepStrictEqual(err.attempted, ["alpha", "beta", "gamma"], "every model was tried");
+      });
+    },
+  ],
 ];
 
 /** async-capable env swap (the sync one can't await) */
