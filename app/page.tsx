@@ -58,6 +58,9 @@ import {
   usedIdsOutsideRow,
 } from "./lib/recoverySlots";
 import { shouldShowDevControls } from "./lib/devControls";
+import { useAuth } from "./lib/useAuth";
+import { userInitials, userLabel } from "./lib/authUser";
+import LoginScreen from "./LoginScreen";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, {
   StripFocusRequest,
@@ -261,6 +264,13 @@ function stopsFromItinerary(it: Itinerary): MapStop[] {
 }
 
 export default function Home() {
+  // ── accounts (Stage 1A: login only) ──
+  // Deliberately inert with respect to everything below it: no pipeline call,
+  // no request, no stored plan reads this. Signing in CAPTURES an identity for
+  // later stages; a guest and a signed-in user get the identical app.
+  const auth = useAuth();
+  const [loginOpen, setLoginOpen] = useState(false);
+
   const [prompt, setPrompt] = useState("");
   // plain query inputs — NOT location services (deliberately deferred).
   // City prefilled visibly (never a silent fallback); address optional,
@@ -2072,6 +2082,48 @@ export default function Home() {
             live in CSS (.empty::before/::after); this is the wordmark glow */}
         <div className="empty__glow" aria-hidden="true" />
         <div className="empty__mark" aria-hidden="true">Itinerary</div>
+        {/* Account corner — mirrors the wordmark across the hero. It is an
+            ENTRY POINT, never a gate: the app has always worked with no
+            account and still does, so nothing below is locked behind it.
+            While auth is still resolving we render nothing rather than a
+            "Sign in" that might flip to a name a moment later. */}
+        {auth.status === "signed-in" && auth.user ? (
+          <div className="acct">
+            <div className="acct__who">
+              {auth.user.photoURL ? (
+                // eslint-disable-next-line @next/next/no-img-element -- provider avatar on an unconfigurable remote host
+                <img
+                  className="acct__avatar"
+                  src={auth.user.photoURL}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <span className="acct__initials" aria-hidden="true">
+                  {userInitials(auth.user)}
+                </span>
+              )}
+              <span className="acct__name">{userLabel(auth.user)}</span>
+            </div>
+            <button type="button" className="acct__out" onClick={() => void auth.signOut()}>
+              Sign out
+            </button>
+          </div>
+        ) : auth.status === "signed-out" ? (
+          <div className="acct">
+            <button
+              type="button"
+              className="acct__signin"
+              onClick={() => {
+                auth.clearError();
+                setLoginOpen(true);
+              }}
+            >
+              Sign in
+            </button>
+          </div>
+        ) : null}
+        {loginOpen && <LoginScreen auth={auth} onDismiss={() => setLoginOpen(false)} />}
         <h1 className="empty__title">Itinerary</h1>
         <div className="empty__sub">life moves simpler.</div>
         {/* ONE pill, three labelled sections. Exactly the same three inputs,

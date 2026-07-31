@@ -112,8 +112,9 @@ button { font-family: var(--grot); cursor: pointer; }
   pointer-events: none;
 }
 /* lift the real content above the decorative sky layers — but not the
-   absolutely-positioned corner mark, which sets its own placement */
-.empty > *:not(.empty__glow):not(.empty__mark) { position: relative; z-index: 2; }
+   absolutely-positioned corner mark, the account corner opposite it, or the
+   fixed login overlay, each of which sets its own placement */
+.empty > *:not(.empty__glow):not(.empty__mark):not(.acct):not(.auth) { position: relative; z-index: 2; }
 
 .empty__mark {
   position: absolute; top: 26px; left: 30px; z-index: 3;
@@ -650,11 +651,157 @@ button { font-family: var(--grot); cursor: pointer; }
 .dev button.ghost { background: transparent; color: #b3cdd8; border: 1px solid #2f5468; }
 .dev__collapsed { width: auto; padding: 8px 11px; cursor: pointer; }
 
+/* ────────────────  Accounts (Stage 1A — login only)  ────────────────
+   NOTE ON COLOUR: acid green (--live) is RESERVED for "happening now / just
+   changed" and appears nowhere in this section. Auth is chrome, not signal —
+   it uses the card/ink/accent language the rest of the app already speaks. */
+
+/* the hero's account corner, mirroring .empty__mark across the top */
+.acct {
+  position: absolute; top: 22px; right: 24px; z-index: 3;
+  display: flex; align-items: center; gap: 8px;
+}
+.acct__signin {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 38px; padding: 8px 15px;
+  background: rgba(255, 255, 255, 0.92); color: var(--ink);
+  border: 1px solid rgba(255, 255, 255, 0.9); border-radius: 999px;
+  font-family: var(--grot); font-size: 13px; font-weight: 500;
+  box-shadow: var(--shadow-card);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+.acct__signin:hover { background: #FFFFFF; box-shadow: var(--shadow-lift); transform: translateY(-1px); }
+.acct__signin:active { transform: translateY(0); }
+
+/* signed-in: avatar + name, with sign-out as a quiet sibling */
+.acct__who {
+  display: inline-flex; align-items: center; gap: 8px;
+  min-height: 38px; padding: 5px 14px 5px 5px;
+  background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 999px; box-shadow: var(--shadow-card);
+  max-width: min(46vw, 260px);
+}
+.acct__avatar {
+  width: 28px; height: 28px; border-radius: 50%; flex: none;
+  object-fit: cover; background: var(--accent-soft);
+}
+.acct__initials {
+  width: 28px; height: 28px; border-radius: 50%; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent); color: #FFFFFF;
+  font-family: var(--grot); font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+}
+.acct__name {
+  font-family: var(--grot); font-size: 13px; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.acct__out {
+  min-height: 38px; padding: 8px 13px;
+  background: rgba(255, 255, 255, 0.72); color: var(--ink-soft);
+  border: 1px solid rgba(255, 255, 255, 0.85); border-radius: 999px;
+  font-family: var(--grot); font-size: 12px; font-weight: 500;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.acct__out:hover { background: #FFFFFF; color: var(--ink); }
+
+/* ── the login screen: centred card over a dimmed hero ── */
+.auth {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(30, 58, 76, 0.42);
+  backdrop-filter: blur(3px);
+  animation: auth-in 0.18s ease-out;
+}
+.auth__card {
+  width: min(100%, 384px);
+  background: var(--card); border-radius: 20px;
+  padding: 34px 30px 26px;
+  box-shadow: var(--shadow-lift);
+  text-align: center;
+  animation: auth-card-in 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+@keyframes auth-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes auth-card-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.auth__brand { margin-bottom: 22px; }
+.auth__mark {
+  font-family: var(--grot); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.16em; text-transform: uppercase; color: var(--label);
+  margin-bottom: 12px;
+}
+.auth__title {
+  font-family: var(--disp); font-weight: 600; font-size: 30px;
+  letter-spacing: -0.02em; color: var(--ink); line-height: 1.1;
+}
+.auth__sub {
+  font-family: var(--disp); font-style: italic; font-weight: 400;
+  font-size: 15px; line-height: 1.5; color: var(--ink-soft);
+  margin-top: 9px;
+}
+
+.auth__google {
+  width: 100%; min-height: 48px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 11px;
+  background: #FFFFFF; color: var(--ink);
+  border: 1px solid var(--rule-strong); border-radius: 12px;
+  font-family: var(--grot); font-size: 15px; font-weight: 500;
+  box-shadow: var(--shadow-card);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+.auth__google:hover:not(:disabled) {
+  box-shadow: var(--shadow-lift); transform: translateY(-1px);
+  border-color: var(--accent);
+}
+.auth__google:active:not(:disabled) { transform: translateY(0); }
+.auth__google:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+.auth__g { width: 18px; height: 18px; flex: none; }
+
+.auth__note, .auth__fine {
+  font-family: var(--grot); font-size: 12px; line-height: 1.5;
+  color: var(--ink-faint); margin-top: 11px;
+}
+.auth__err {
+  font-family: var(--grot); font-size: 13px; line-height: 1.5;
+  color: #A3372F; margin-top: 11px;
+}
+
+/* a rule with "or" set into it — the guest path is an alternative, not a
+   footnote, so it gets a divider rather than small print */
+.auth__or {
+  display: flex; align-items: center; gap: 12px;
+  margin: 18px 0 14px;
+  font-family: var(--grot); font-size: 11px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.auth__or::before, .auth__or::after {
+  content: ""; flex: 1; height: 1px; background: var(--rule);
+}
+
+.auth__guest {
+  width: 100%; min-height: 44px;
+  background: transparent; color: var(--accent-deep);
+  border: 1px solid var(--rule-strong); border-radius: 12px;
+  font-family: var(--grot); font-size: 14px; font-weight: 500;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+.auth__guest:hover { background: var(--accent-soft); border-color: var(--accent); }
+.auth__fine { margin-top: 13px; }
+
 @media (max-width: 560px) {
   .empty {
     justify-content: flex-start; overflow-y: auto;
     padding: clamp(24px, 7vh, 52px) 12px 24px;
   }
+  /* the wordmark hides on mobile, but the account corner is functional, not
+     decorative — it stays, at a 44px target */
+  .acct { top: 12px; right: 12px; }
+  .acct__signin, .acct__out, .acct__who { min-height: 44px; }
+  .acct__name { max-width: 96px; }
+  .auth__card { padding: 28px 22px 22px; }
   .empty__title { font-size: clamp(42px, 16vw, 64px); }
   .empty__mark { display: none; }
   .prompt {
@@ -696,4 +843,6 @@ button { font-family: var(--grot); cursor: pointer; }
 
 @media (prefers-reduced-motion: reduce) {
   .chip, .ecard, .mk__dot, .leglab, .banner { transition: opacity 0.2s ease !important; }
+  .auth, .auth__card { animation: none !important; }
+  .acct__signin, .acct__out, .auth__google, .auth__guest { transition: none !important; }
 }
