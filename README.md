@@ -36,13 +36,14 @@ install, no keys, nothing to set up. **This is the main way to use it.**
    and named dates such as `August 15, 2026`, with or without a clock. A bare weekday means
    the nearest future occurrence: today when its requested clock is still ahead, otherwise
    the following week. `next Friday` is also the nearest future Friday, but when today is
-   Friday it means the Friday one week later. Nonexistent DST wall times and invalid dates
-   or clocks are rejected instead of being normalized. During a fall-back overlap, the
-   earlier occurrence is used deterministically.
+   Friday it means the Friday one week later. Nonexistent DST wall times and fall-back
+   overlaps have deterministic code-side policies (reject the gap; choose the earlier
+   overlap). A current audit follow-up covers malformed raw date/clock syntax on the new
+   planner path; see **Known limitations**.
 
-   A stated stop count is also enforced: "three coffee shops" becomes three distinct
-   coffee-shop slots. If one count spans several categories ("three stops: dinner and
-   drinks"), the planner asks how to split them rather than guessing.
+   The planner treats a stated stop count as authoritative, and downstream selection keeps
+   repeated slots distinct. A current audit follow-up is restoring a deterministic
+   raw-prompt count check so a malformed model response cannot silently ignore that count.
 
 4. **Swap a stop.** Click a stop card in the top strip to open its inline prompt, then try:
    - `somewhere cheaper` — swaps in a cheaper venue and holds the time slot (watch `$$$` → `$$`).
@@ -51,7 +52,8 @@ install, no keys, nothing to set up. **This is the main way to use it.**
    - `find a closer one` — ranks by real distance from where you're coming from, and says so
      honestly if nothing is actually closer.
 
-5. **Watch it reroute and heal.** Open the **Dev** panel (bottom-right corner):
+5. **Watch it reroute and heal.** In local development—or a demo build made with
+   `NEXT_PUBLIC_ENABLE_DEV_CONTROLS=true`—open the **Dev** panel (bottom-right corner):
    - Pick a **leg** in the dropdown and hit **cancel** → that transit leg is "cancelled" and
      the app replans: earlier stops stay exactly as they were, only the affected stop and what
      follows get new venues/times (old time struck through → new time settles in green).
@@ -80,15 +82,12 @@ install, no keys, nothing to set up. **This is the main way to use it.**
   steakhouse"), or unparseable input gets a specific reason and a suggested fix — never an
   empty map. When a hard constraint has no real match, it says so instead of suggesting a
   venue and telling you to "check with them".
-- **When something blocks a stop, you get a real choice**, not a dead end. One panel, four
+- **When something blocks a stop, you get a real choice**, not a dead end. One panel, three
   situations:
   - **A city or starting address has multiple matches** → choose the formatted address before
     any venue search runs; the planner never silently takes the provider's first result.
   - **A category came back empty** ("the only ramen nearby is permanently closed") → the
     honest reason, plus an offer to look further out or put something else in that slot.
-  - **The hour looks wrong** and you never named one ("it's 10:54 PM — late for a typical park
-    visit") → *Still want it* pushes past the guess, *Something else* switches direction. An
-    hour **you** typed still fails loud; only our own guess is overridable.
   - **Weather blocks it** ("rain likely at 3pm") → *Still want it* skips only the weather
     check (hours, rating, price, and closures all still apply), *Something else* swaps that
     one stop.
@@ -99,6 +98,19 @@ install, no keys, nothing to set up. **This is the main way to use it.**
   cannot price either mode, the planner shows an explicitly uncertain estimate (1.35× detour
   allowance plus a 20%, minimum-five-minute margin), draws no invented route line, and labels
   every real walking route with the required caution.
+- **The map fails soft.** If Maps JavaScript cannot load or authenticate, the itinerary and
+  deterministic fallback pins remain usable, with bounded retry/remount recovery; mock E2E
+  proves that path without a real browser key.
+
+### How the pipeline is divided
+
+City/address geocode runs first, establishing the plan's IANA timezone. The LLM planner then
+proposes the activity shape, questions, rough durations, and resolved intent. Code fetches
+weather and Places data, applies objective filters, validates the model's venue IDs and hard
+constraint evidence, computes Routes legs, and builds/checks the schedule against any stated
+window. Model output is always validated; a correction is validated again before a
+deterministic fallback. Planner, selection, and swap use separate ordered Groq model chains;
+only 429 and provider-side 5xx failures advance a chain.
 
 **Places request/cost boundary.** A normal named category uses one complete Text Search because
 hours, status, rating, price, card copy, and structured constraint evidence are all consumed
@@ -116,16 +128,16 @@ selected-place enrichment would add a Details request without a fact-safe cheape
 
 For real venues on your own machine. This calls paid/rate-limited APIs, so it needs keys.
 
-**Prerequisites:** Node.js **18.18+** (Next.js 14's requirement; the repo doesn't pin it —
-`node --version` to check) and npm.
+**Prerequisites:** Node.js **20.9+** (Next.js 16.2.11's declared minimum) and npm. The current
+application uses React / React DOM 19.2.8.
 
 ```bash
 git clone <your-repo-url>
-cd <repo>/itinerary
-npm install
+cd <repo-name>
+npm ci
 ```
 
-**Add your keys.** Copy the template and fill in the six values:
+**Add the required service keys.** Copy the template and fill in these six values:
 
 ```bash
 cp .env.example .env
@@ -143,15 +155,34 @@ NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=... # browser map tiles (Maps JavaScript API)
 
 Where to get them:
 
-- **Groq** — free key at <https://console.groq.com> (uses `llama-3.3-70b-versatile`).
+- **Groq** — free key at <https://console.groq.com>. Planner and selection default to
+  `llama-3.3-70b-versatile`; separate ordered fallback chains are defined in
+  `app/api/_shared/models.ts` and can be overridden per call type in deployment.
 - **The five Google keys** — [Google Cloud Console](https://console.cloud.google.com) →
   enable **Places API (New)**, **Geocoding API**, **Routes API**, **Weather API**, and
   **Maps JavaScript API**, then create keys under *APIs & Services → Credentials*. The code
   reads a dedicated `GOOGLE_GEOCODING_API_KEY`; in production, use a separately
   API-restricted server key for each Google service.
-- **Maps key referrer restriction** — the Maps key is the only one exposed to the browser.
+- **Maps key referrer restriction** — the Maps key is a browser-visible service credential.
   Restrict it (Cloud Console → the key → *Application restrictions → Websites*) to
   `http://localhost:3000/*` for local use.
+
+**Optional Google sign-in (Stage 1A).** Sign-in is not required and never gates the app. To
+enable it, add all six Firebase Web config values below; partial or missing configuration
+degrades to “sign-in unavailable” while guest planning keeps working. These are client config
+by design, not server secrets:
+
+```bash
+NEXT_PUBLIC_FIREBASE_API_KEY=...
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=...
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=...
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=...
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=...
+NEXT_PUBLIC_FIREBASE_APP_ID=...
+```
+
+Stage 1A captures client auth state only. Current `main` has no server-side token verification,
+owner-only itinerary mutation, account history/archive, or sharing contract.
 
 `.env` is gitignored, so your keys are never committed.
 
@@ -171,8 +202,10 @@ Not needed for local dev — listed so the full set is in one place.
 | `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | `app/api/itinerary/store.ts` | Accepted as aliases for the pair above. |
 | `VERCEL` | `app/api/itinerary/store.ts` | Set by the platform. On Vercel **without** KV configured, the store refuses loudly instead of serving silent 404s. |
 | `NEXT_PUBLIC_ENABLE_DEV_CONTROLS` | `app/page.tsx` | Optional build-time flag. Production hides the time/disruption simulator unless this is exactly `true`; local development keeps it available. Rebuild after changing it. |
+| `GROQ_MODELS_PLANNER` / `GROQ_MODELS_SELECT` / `GROQ_MODELS_SWAP` | `app/api/_shared/models.ts` | Optional comma-separated per-call model-chain overrides. Blank/unset uses the validated in-code defaults. |
+| `NEXT_PUBLIC_FIREBASE_*` (six values above) | `app/lib/firebase.ts` | Optional Firebase Web configuration for client-only Google sign-in. All six are required to enable it; they do not add server authorization. |
 | `E2E_MOCK` | `app/api/_mock/fixtures.ts` | `=1` swaps the pipeline's **data sources** (Groq, Places, Routes, Weather, geocode) for deterministic fixtures. Playwright sets it on its own server; never set it for real use. |
-| `TZ` | `app/api/places/search/route.ts` (log line only) | Printed in the `[schedule-resolve]` server log. Scheduling is per-plan zone-aware and no longer driven by server `TZ` — see the caveat in `CLAUDE.md`. |
+| `TZ` | Runtime compatibility / logs | Optional. Scheduling, hours checks, status math, and display are per-plan zone-aware and do not depend on the server wall clock. |
 
 Full deployment instructions (Vercel + Upstash, the env table, the Maps referrer
 restriction) live in **`DEPLOY.md`**.
@@ -193,11 +226,21 @@ npm run test:e2e:live     # run against a live dev server on :3000 (start `npm r
 
 Mock mode burns no API quota and never touches a server on :3000. The objective filter,
 scheduling, floor guards, and both the swap and reroute engines run **for real** over fixture
-data — only the data sources are swapped. `e2e/README.md` documents every fixture, including
+data — only the data sources are swapped. Non-local browser traffic is aborted, and the
+fixture seams prevent Groq/Google provider calls. `e2e/README.md` documents every fixture, including
 which venue names and prompts trigger which scenario.
 
-**Unit tests** are standalone files run directly with `tsx` (no aggregate script) — run any
-suite by path:
+**Project checks:**
+
+```bash
+npm run lint
+npm run typecheck
+npm run test:unit       # aggregate runner: every app/**/*.test.ts suite
+npm run build
+npm run check           # lint → typecheck → unit → build → mock E2E
+```
+
+Run an individual unit suite directly with `tsx` when investigating a focused behavior:
 
 ```bash
 npx tsx app/api/itinerary/swap.test.ts        # per-stop swap engine
@@ -206,7 +249,7 @@ npx tsx app/lib/planGuards.test.ts            # bad-input handling
 npx tsx app/lib/zoneTime.test.ts              # per-plan timezone math
 ```
 
-Every `*.test.ts` file under `app/` runs the same way.
+The aggregate runner discovers every `*.test.ts` file under `app/`.
 
 ---
 
@@ -225,7 +268,14 @@ this is the short version.
   an intentional demo deployment. There's no rideshare fallback.
 - **Movie runtimes are a placeholder** (a 2-hour assumption) — real showtimes need an
   external source.
-- **Rerouting and swaps skip the weather gate.** Only the initial plan checks the forecast.
+- **Authentication is login-only.** Guest and signed-in users currently have identical
+  itinerary access. Server-side ownership, migration, sharing, deletion, and history/archive
+  are unresolved Stage 1B product/security work.
+- **Planner raw-fact guards need restoration.** The new planner path does not yet
+  deterministically cross-check malformed raw date/clock syntax or a stated count against an
+  otherwise-valid model response. The audit tracker records these as `H8/M3-F1` and `M1-F1`.
+- **The source limiter is per process.** A public serverless deployment still needs a shared
+  edge/Redis/platform limiter plus Groq/Google quota caps and billing alerts; see `DEPLOY.md`.
 - **Stops can't be reordered** by hand, and pick reasons are written before the schedule is
   computed, so a reason never refers to a stop's final time.
 - **The dev `?now=` time picker reads your browser's zone**, so simulating time on a

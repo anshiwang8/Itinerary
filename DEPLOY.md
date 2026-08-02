@@ -18,49 +18,50 @@ refuses loudly with a message pointing here, instead of silent 404s
 mid-demo. The engines (swap/reroute) never touch the store and are
 unchanged.
 
-A second serverless gotcha: Vercel functions run in **UTC**, and some date
-math still reads the server's clock. Set `TZ` (below).
+Timezone handling is now per plan. Geocoding resolves an IANA zone and the
+shared `zoneTime.ts` layer owns scheduling, opening-hours checks, status
+math, and display labels. Vercel's UTC wall clock does not drive those
+results. `TZ=America/Toronto` may remain as an optional compatibility/logging
+default, but it is not a correctness requirement for multi-city scheduling.
 
-**The reason for this changed — read it before you decide to drop it.** The
-original rationale was that the scheduler did server-local date math. That
-is no longer true: since Phase 5 every plan carries its own IANA timezone
-and `schedule.ts` computes against *that*, so the headline scheduling path
-genuinely does not care what `TZ` says. The conclusion still holds anyway,
-for a narrower reason found in the 2026-07-18 audit (§1.1/§1.6): the swap
-engine's availability check and `buildSchedule`'s cursor arithmetic both
-read the server's wall clock. Group A of the audit fixes closed both, but
-`TZ=America/Toronto` remains cheap insurance against the next such leak,
-and the `[schedule-resolve]` log prints the server TZ on every plan so you
-can confirm it. Don't remove it just because the *old* explanation is
-stale.
+Build with Node.js **20.9 or newer** (the declared minimum for the pinned
+Next.js 16.2.11). The current runtime is React / React DOM 19.2.8.
 
 ## Environment variables (Vercel → Project → Settings → Environment Variables)
 
 | Variable | Value / purpose |
 | --- | --- |
 | `GROQ_API_KEY` | Groq (parse / select / swap interpret) — server-side only |
-| `GROQ_MODELS_PLANNER` | OPTIONAL. Comma-separated model chain for the planner, tried in order on a rate limit. Unset = the in-code default. |
+| `GROQ_MODELS_PLANNER` | OPTIONAL. Comma-separated planner chain, tried in order on 429/provider 5xx. Unset = the in-code default. |
 | `GROQ_MODELS_SELECT` | OPTIONAL. Same, for venue selection (used by /api/select, reroute and swap's replacement search). |
 | `GROQ_MODELS_SWAP` | OPTIONAL. Same, for swap-intent classification — deliberately a smaller primary so swap traffic doesn't spend the planner's per-model budget. |
-
-The three `GROQ_MODELS_*` vars exist so a chain can be changed on the host
-WITHOUT a deploy: a rate limit or a decommissioned model is discovered in
-production, and waiting for a build is the wrong shape for that. Blank or
-unset falls back to the in-code defaults, so a typo empties nothing. Verify
-any id against `GET https://api.groq.com/openai/v1/models` before setting it —
-`app/api/_shared/models.ts` records which candidates were rejected and why.
 | `GOOGLE_PLACES_API_KEY` | Places Text Search (venue search) — server-side only |
 | `GOOGLE_GEOCODING_API_KEY` | Geocoding API (typed city and starting-address resolution) — server-side only |
 | `GOOGLE_ROUTES_API_KEY` | Routes computeRoutes — server-side only |
 | `GOOGLE_WEATHER_API_KEY` | Weather hourly forecast — server-side only |
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Maps JS (browser-side by design — see referrer note) |
+| `NEXT_PUBLIC_FIREBASE_API_KEY` | OPTIONAL Firebase Web config for client-only Google sign-in; all six Firebase values are required together |
+| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | OPTIONAL Firebase Web config |
+| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | OPTIONAL Firebase Web config |
+| `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | OPTIONAL Firebase Web config |
+| `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | OPTIONAL Firebase Web config |
+| `NEXT_PUBLIC_FIREBASE_APP_ID` | OPTIONAL Firebase Web config |
 | `NEXT_PUBLIC_ENABLE_DEV_CONTROLS` | Optional build-time public flag. Leave unset/`false` to hide time travel and disruption simulation in production; set exactly `true` only for an intentional demo, then rebuild. |
-| `TZ` | `America/Toronto` — recommended; see the note above for what it does and does NOT do now |
+| `TZ` | Optional compatibility/logging default; scheduling correctness does not depend on it |
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | injected automatically when you connect Upstash Redis / Vercel KV storage (the `UPSTASH_REDIS_REST_URL`/`_TOKEN` names work too) |
 
-Of the service credentials, only the Maps key is ever exposed to the browser;
-the other five live inside the serverless functions. The optional development
-control flag is public but contains no secret. Never put `NEXT_PUBLIC_` on any
+The three `GROQ_MODELS_*` vars allow a chain to change without a build. Blank
+or unset falls back to the in-code defaults. Only upstream 429 and provider
+5xx failures advance the chain; auth/config/client errors fail immediately.
+Planner/select exhaustion returns a stable capacity response; swap falls back
+to its deterministic local parsers. Verify every override against Groq's live
+model list and the real JSON contract before deployment.
+
+Browser-visible configuration consists of the Maps JS key, the six optional
+Firebase Web values, and the optional development-control flag. Firebase Web
+values are client configuration by design; protect sign-in through Firebase
+authorized domains and Auth rules, not key secrecy. All Groq and Google
+server-service credentials remain server-only. Never put `NEXT_PUBLIC_` on a
 server credential.
 
 **Maps key referrer restriction (do this or the map breaks / the key leaks):**
@@ -70,6 +71,26 @@ Application restrictions → Websites: add your deployed domain, e.g.
 also want preview deployments to work — it's broader). Keep your
 `http://localhost:3000/*` entry for dev. The server-side keys should stay
 API-restricted to their one service each (existing policy).
+
+If Firebase sign-in is enabled, add the production and intended preview hosts
+to Firebase Authentication's authorized domains. Missing or partial Firebase
+configuration must be verified to degrade to guest mode, not a failed app.
+
+## Current pipeline and auth boundary
+
+The production order is geocode → LLM planner → optional one-round questions
+→ weather → Places search/filter → validated LLM venue selection → Routes →
+deterministic scheduling/window validation → map. Geocoding must run first so
+the planner receives the correct timezone-aware current instant. Model output
+proposes semantics and bounded estimates; code owns IDs, hours, prices,
+coordinates, travel, arithmetic, window fit, hard-constraint evidence, and
+persistence.
+
+Optional Google sign-in on current `main` is Stage 1A only. Guest users retain
+the full app; signing in captures client auth state but does not add
+server-side token verification, itinerary ownership, owner-only mutation,
+history/archive, deletion, or sharing. Do not describe or rely on Stage 1B
+behavior until it is merged.
 
 ## Provider call envelope
 
@@ -92,13 +113,12 @@ API-restricted to their one service each (existing policy).
 
 ## Deploy steps
 
-The app lives in the `itinerary/` subfolder of the repo and is currently
-**uncommitted** — commit it first.
+The application is at the repository root.
 
-1. Commit + push. `.env` is gitignored (`git check-ignore itinerary/.env`
+1. Commit + push. `.env` is gitignored (`git check-ignore .env`
    confirms) — `git status` must never list it. Never commit `.env`.
 2. vercel.com → **Add New… → Project** → import the GitHub repo.
-3. **Root Directory: `itinerary`** (Framework Preset auto-detects Next.js).
+3. Leave **Root Directory** at the repository root (Framework Preset detects Next.js).
 4. Add the env vars from the table (Production; add Preview too if you
    want preview URLs to work).
 5. Project → **Storage** → Create/connect **Upstash Redis** (free tier) —
@@ -130,6 +150,12 @@ Any `No itinerary with id …` 404 during this = the KV store isn't
 connected; a missing-KV deploy fails loudly at plan time with a message
 pointing at this file.
 
+Authentication smoke checks are separate from itinerary persistence: verify
+the app remains fully usable with all Firebase values absent; when all six
+are present, verify Google sign-in/sign-out and the production authorized
+domain. Do not infer owner enforcement from a successful login—current main
+does not implement it.
+
 Notes: production omits the dev strip by default. Enabling it is a public
 build-time choice and requires a rebuild/redeploy; leave it off for ordinary
 deployments. Usage still spends Groq / Google quota, so keep provider quota
@@ -146,6 +172,9 @@ deployment as abuse-resistant:
 - [ ] Keep the browser key restricted by HTTP referrer to the exact
   production and intended preview origins; restrict it to Maps JavaScript
   API only.
+- [ ] If Firebase sign-in is enabled, restrict its authorized domains to the
+  intended production/preview hosts and verify guest mode with config absent.
+  Remember that Stage 1A login does not authorize itinerary reads or writes.
 - [ ] Use separate server-side keys for Places, Routes, Weather, and
   Geocoding when that endpoint is enabled; API-restrict each key to its one
   service and never expose it through `NEXT_PUBLIC_`.
