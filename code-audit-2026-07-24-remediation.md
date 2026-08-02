@@ -19,6 +19,29 @@ against the current repository before implementation. Historical `DEVLOG.md` ent
 - Audit: failed with 2 high-severity dependency findings (Next.js and PostCSS)
 - Port 3000: untouched
 
+## Re-baseline — 2026-08-01 after Claude feature streams
+
+- Branch: `main`
+- Current local commit before this documentation pass: `04cc7401e44d5cb7c29a43b48178f1a9da1caeb2`
+- Fetched `origin/main`: `04cc7401e44d5cb7c29a43b48178f1a9da1caeb2` (local `main` matched exactly; no pull was needed)
+- Starting working tree: clean; no untracked files, merge/rebase state, or local-only commits
+- Branches: local `main` and `authentication`; remote `origin/main` and `origin/authentication`. Local `authentication` points at `04cc740`; `origin/authentication` points at Stage 1A commit `af511a6`. No Stage 1B branch is present locally or remotely.
+- Node: `v24.18.1`
+- npm: `11.16.0`
+- Next.js: `16.2.11`
+- React / React DOM: `19.2.8` / `19.2.8`
+- TypeScript: `5.9.3`; `npm run typecheck` passed
+- Deterministic install: `npm ci` passed (445 packages installed; lockfile unchanged)
+- Lint: passed with 0 errors and 11 warnings. The live warnings are 3 unused disable directives plus 8 unused variable/parameter warnings in `ItineraryMap.tsx`, `store.ts`, `swap.test.ts`, and `page.tsx`.
+- Unit tests: 459/459 across 36 suites via the aggregate `npm run test:unit` runner. The first sandboxed `tsx` startup failed before loading a suite because Node's `uv_os_get_passwd` returned `ENOMEM`; the same command passed outside that constrained process environment.
+- Production build: passed with Next.js 16.2.11 (Turbopack); TypeScript and all 10 static-page generation steps completed.
+- Mock E2E: **71/73 passed across 10 spec files; aggregate gate failed.** The two deterministic failures are the stated-window scenarios in `e2e/scenarios.spec.ts`: `dinner and drinks from 5-9pm` and the over-stuffed `dinner and drinks and dessert from 7-9pm` both fail loud with “Couldn't fit anything into your … window once travel time is counted”. A focused rerun reproduced both. This session is documentation-only, so no production or test fix was attempted.
+- Aggregate `npm run check`: failed at its final mock-E2E stage because of the two failures above; lint, typecheck, unit, and build passed when run in the same baseline investigation.
+- Mock-network boundary: no external browser requests were allowed (`e2e/test.ts` aborts every non-local HTTP(S) request unless live mode explicitly opts out), and mock fixtures replaced Groq, Geocoding, Places, Routes, and Weather provider calls. No external provider request was made by mock E2E.
+- `npm audit`: 1 high-severity development-tooling advisory (`brace-expansion` below 1.1.17 through ESLint dependency paths); dependencies were not changed.
+- `npm audit --omit=dev`: 0 vulnerabilities.
+- Port 3000: untouched. Mock E2E used its isolated server on port 3100.
+
 ## Finding tracker
 
 `SELF` in the commit column means the row was updated in the same commit as the change; exact
