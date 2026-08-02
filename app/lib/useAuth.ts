@@ -200,30 +200,41 @@ export function useAuth(): AuthState {
       // who is signed in, so the popup result never gets to disagree with it.
     } catch (caught) {
       const code = errorCode(caught);
-      logAuthFailure("google-sign-in", caught);
-      if (SILENT_CODES.has(code)) return;
+      if (SILENT_CODES.has(code)) {
+        logAuthFailure("google-sign-in", caught);
+        return;
+      }
 
       if (LINK_CONFLICT_CODES.has(code)) {
-        // THE GESTURE-GAP FIX.
+        // NOT A FAILURE — an EXPECTED control-flow signal.
         //
-        // This used to call signInWithPopup again here. That opens a SECOND
-        // popup after an await, which is outside the user activation window
-        // the click granted — browsers block it as `auth/popup-blocked`, and
-        // the block then fell through to the generic message. The bug looked
-        // like "Google sign-in is broken" and read like a COOP problem; it
-        // was a popup opened one tick too late.
+        // "This Google account already exists" is the normal answer for any
+        // returning user signing in from a guest session, and it is the
+        // question this branch exists to ask. Nothing is logged as failed
+        // here: doing so printed "[auth] google-sign-in failed" during a
+        // sign-in that then SUCCEEDED, tripped the dev error overlay, and —
+        // worse — made the one line that is supposed to identify a real fault
+        // indistinguishable from routine control flow. A log that cries wolf
+        // is worth less than no log.
         //
-        // The fix is to not open a second popup at all. The failed link
-        // ALREADY carries the Google credential the user just approved in the
-        // first popup, so exchanging it for a session needs no window and no
-        // gesture. Fewer moving parts than the bug it replaces.
+        // THE GESTURE-GAP FIX lives here too. This used to call
+        // signInWithPopup again, which opens a SECOND popup after an await,
+        // outside the user activation the click granted — browsers block that
+        // as `auth/popup-blocked`. The fix is to not open a second popup at
+        // all: the failed link ALREADY carries the credential the user
+        // approved in the first popup, so exchanging it needs no window and
+        // no gesture.
         const credential = GoogleAuthProvider.credentialFromError(caught as AuthError);
         if (credential) {
           try {
             await signInWithCredential(auth, credential);
-            // onAuthStateChanged reports the result, as everywhere else.
+            // Recovered in full. onAuthStateChanged reports the result, as
+            // everywhere else, and NOTHING is logged — a sign-in that
+            // succeeds must leave no failure line behind it.
             return;
           } catch (fallback) {
+            // The exchange itself failing IS a genuine failure: the expected
+            // recovery did not recover.
             logAuthFailure("google-sign-in:credential-exchange", fallback);
             if (SILENT_CODES.has(errorCode(fallback))) return;
             setError(
@@ -232,10 +243,16 @@ export function useAuth(): AuthState {
             return;
           }
         }
-        // No credential on the error means there is nothing to exchange —
-        // fall through to the generic message rather than guessing.
+        // A conflict with no credential to exchange is a real dead end —
+        // there is nothing left to try, so this one is logged.
         logAuthFailure("google-sign-in:no-credential-on-conflict", caught);
+        setError(friendly("Could not sign in with Google. Please try again.", code));
+        return;
       }
+
+      // Everything else — popup-blocked, unrecognised codes — is a genuine
+      // failure and is logged exactly as before.
+      logAuthFailure("google-sign-in", caught);
       setError(friendly("Could not sign in with Google. Please try again.", code));
     }
   }, []);
