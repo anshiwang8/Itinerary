@@ -16,11 +16,14 @@ import {
   linkWithPopup,
   onAuthStateChanged,
   signInAnonymously,
+  signInWithCredential,
   signInWithPopup,
   signOut as firebaseSignOut,
+  type AuthError,
 } from "firebase/auth";
 import { getFirebaseAuth, isFirebaseConfigured } from "./firebase";
 import { toAppUser, type AppUser } from "./authUser";
+import { shouldShowDevControls } from "./devControls";
 
 export type AuthStatus = "loading" | "signed-in" | "signed-out";
 
@@ -50,10 +53,66 @@ const SILENT_CODES = new Set([
   "auth/user-cancelled",
 ]);
 
+/**
+ * Linking an anonymous user to a Google account that ALREADY EXISTS. The
+ * anonymous uid cannot absorb an identity that is already someone else's, so
+ * the right outcome is to sign in as that existing (older) account — its
+ * history is the real one, and the guest's in-progress plan belongs to the
+ * guest, not to it.
+ */
+const LINK_CONFLICT_CODES = new Set([
+  "auth/credential-already-in-use",
+  "auth/email-already-in-use",
+]);
+
 function errorCode(error: unknown): string {
   return typeof error === "object" && error !== null && "code" in error
     ? String((error as { code: unknown }).code)
     : "";
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+/**
+ * The line that makes a future failure diagnosable.
+ *
+ * Every auth error used to collapse into one friendly sentence, so "sign-in
+ * is broken" carried no information at all — the actual `auth/…` code, the
+ * one thing that identifies the fault, was thrown away. It is always logged
+ * now, including the codes that are silent in the UI: a popup that reports
+ * itself closed when nobody closed it is exactly the kind of thing worth
+ * seeing in a console.
+ */
+function logAuthFailure(stage: string, error: unknown): void {
+  console.error(
+    `[auth] ${stage} failed — code=${errorCode(error) || "(none)"} message=${errorMessage(error)}`
+  );
+}
+
+/** Whether to show the raw code to the person looking at the screen. Same
+ *  gate the dev time-sim uses: automatic outside production, explicit opt-in
+ *  inside it. Users get a sentence; developers get the code too. */
+function devVisible(): boolean {
+  return shouldShowDevControls(
+    process.env.NODE_ENV,
+    process.env.NEXT_PUBLIC_ENABLE_DEV_CONTROLS
+  );
+}
+
+/** A blocked popup is the one auth failure the USER can actually fix, so it
+ *  earns its own sentence — "please try again" is useless advice when trying
+ *  again does the same thing. */
+const MESSAGE_BY_CODE: Record<string, string> = {
+  "auth/popup-blocked":
+    "Your browser blocked the sign-in window. Allow pop-ups for this site and try again.",
+};
+
+function friendly(base: string, code: string): string {
+  const message = MESSAGE_BY_CODE[code] ?? base;
+  return devVisible() && code ? `${message} (${code})` : message;
 }
 
 export function useAuth(): AuthState {
@@ -99,9 +158,12 @@ export function useAuth(): AuthState {
           // fully working pre-1B app — the plan just won't follow a refresh.
           setUser(null);
           setStatus("signed-out");
-          void signInAnonymously(auth).catch(() => {
-            // Deliberately silent: a guest never asked for this and must not
-            // be shown an error about an account they did not want.
+          void signInAnonymously(auth).catch((error: unknown) => {
+            // Silent to the USER — a guest never asked for this and must not
+            // be shown an error about an account they did not want — but NOT
+            // silent to the console. If this fails there is no identity, so
+            // no plan survives a refresh, and that is worth being able to see.
+            logAuthFailure("anonymous-sign-in", error);
           });
           return;
         }
@@ -137,21 +199,44 @@ export function useAuth(): AuthState {
       // No setState here: onAuthStateChanged is the single source of truth for
       // who is signed in, so the popup result never gets to disagree with it.
     } catch (caught) {
-      if (SILENT_CODES.has(errorCode(caught))) return;
-      // This Google account already exists, so there is nothing to link TO —
-      // the anonymous uid cannot absorb an identity that is already someone
-      // else's. Sign in as that existing account instead; the guest's
-      // in-progress plan does not carry over, which is correct: it belongs to
-      // the guest, and this is a different, older person.
-      if (errorCode(caught) === "auth/credential-already-in-use") {
-        try {
-          await signInWithPopup(auth, new GoogleAuthProvider());
-          return;
-        } catch (retry) {
-          if (SILENT_CODES.has(errorCode(retry))) return;
+      const code = errorCode(caught);
+      logAuthFailure("google-sign-in", caught);
+      if (SILENT_CODES.has(code)) return;
+
+      if (LINK_CONFLICT_CODES.has(code)) {
+        // THE GESTURE-GAP FIX.
+        //
+        // This used to call signInWithPopup again here. That opens a SECOND
+        // popup after an await, which is outside the user activation window
+        // the click granted — browsers block it as `auth/popup-blocked`, and
+        // the block then fell through to the generic message. The bug looked
+        // like "Google sign-in is broken" and read like a COOP problem; it
+        // was a popup opened one tick too late.
+        //
+        // The fix is to not open a second popup at all. The failed link
+        // ALREADY carries the Google credential the user just approved in the
+        // first popup, so exchanging it for a session needs no window and no
+        // gesture. Fewer moving parts than the bug it replaces.
+        const credential = GoogleAuthProvider.credentialFromError(caught as AuthError);
+        if (credential) {
+          try {
+            await signInWithCredential(auth, credential);
+            // onAuthStateChanged reports the result, as everywhere else.
+            return;
+          } catch (fallback) {
+            logAuthFailure("google-sign-in:credential-exchange", fallback);
+            if (SILENT_CODES.has(errorCode(fallback))) return;
+            setError(
+              friendly("Could not sign in with Google. Please try again.", errorCode(fallback))
+            );
+            return;
+          }
         }
+        // No credential on the error means there is nothing to exchange —
+        // fall through to the generic message rather than guessing.
+        logAuthFailure("google-sign-in:no-credential-on-conflict", caught);
       }
-      setError("Could not sign in with Google. Please try again.");
+      setError(friendly("Could not sign in with Google. Please try again.", code));
     }
   }, []);
 
@@ -160,8 +245,9 @@ export function useAuth(): AuthState {
     if (!auth) return;
     try {
       await firebaseSignOut(auth);
-    } catch {
-      setError("Could not sign out. Please try again.");
+    } catch (caught) {
+      logAuthFailure("sign-out", caught);
+      setError(friendly("Could not sign out. Please try again.", errorCode(caught)));
     }
   }, []);
 
