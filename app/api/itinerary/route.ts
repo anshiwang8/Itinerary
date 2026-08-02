@@ -1,5 +1,14 @@
 import { NextRequest } from "next/server";
-import { createItinerary, saveItinerary } from "./store";
+import {
+  activeItineraryIdForOwner,
+  createItinerary,
+  loadItinerary,
+  saveItinerary,
+  setActiveItineraryForOwner,
+  withStatuses,
+} from "./store";
+import { isResumable, ownsItinerary, stampOwner } from "./ownership";
+import { verifyCaller } from "../_shared/caller";
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
 import { HomePoint } from "../schedule/home";
@@ -10,6 +19,7 @@ import {
   apiJson,
   enforceRateLimit,
   isRecord,
+  logEvent,
   readJsonBody,
   requestContext,
 } from "../_shared/http";
@@ -41,13 +51,71 @@ export async function POST(request: NextRequest) {
     const home: HomePoint | undefined = parseHomePoint(body.home);
     const timeZone = parseOptionalTimeZone(body.timeZone);
 
-    const itinerary = createItinerary(stops, legs, parsed, homeLeg, home, timeZone);
+    // WHO is creating this, verified from the token — never from the body.
+    // Null (mock e2e, no Admin credentials, guest before anonymous sign-in
+    // lands) simply produces an unowned plan, which behaves exactly as plans
+    // did before this slice.
+    const caller = await verifyCaller(request);
+    const itinerary = stampOwner(
+      createItinerary(stops, legs, parsed, homeLeg, home, timeZone),
+      caller
+    );
     const stored = await saveItinerary(itinerary);
+    // Point the owner at their new plan so a refresh can find it again. AFTER
+    // the save, and deliberately non-fatal: the plan exists and is usable
+    // whether or not the pointer lands, so a failed index write must not fail
+    // a successful creation.
+    if (caller) {
+      try {
+        await setActiveItineraryForOwner(caller.uid, stored.id);
+      } catch (indexError) {
+        logEvent("error", "owner_index_write_failed", {
+          itineraryId: stored.id,
+          detail: indexError instanceof Error ? indexError.message : String(indexError),
+        });
+      }
+    }
     return apiJson(
       ctx,
       { id: stored.id, version: stored.version },
       { headers: { ETag: `"${stored.version}"` } }
     );
+  } catch (err) {
+    return apiError(ctx, err);
+  }
+}
+
+// GET /api/itinerary — the caller's ACTIVE plan, or null.
+//
+// This is the fix for "refresh loses my plan". The plan was never lost: it
+// sits in Redis for seven days. The PAGE forgot which id it was showing,
+// because the itinerary lived in React state and nothing else. So the answer
+// is a lookup, not more persistence.
+export async function GET(request: NextRequest) {
+  const ctx = requestContext(request, "itinerary_active");
+  try {
+    enforceRateLimit(ctx, 120);
+    const caller = await verifyCaller(request);
+    // No verified caller = nothing to resume. Not an error: this is every
+    // mock-e2e request and every visit before anonymous sign-in resolves.
+    if (!caller) return apiJson(ctx, { itinerary: null });
+
+    const activeId = await activeItineraryIdForOwner(caller.uid);
+    if (!activeId) return apiJson(ctx, { itinerary: null });
+
+    const stored = await loadItinerary(activeId);
+    // A pointer can outlive its plan (TTL, manual deletion). Degrade to "no
+    // active plan" rather than 404-ing a page load.
+    if (!stored) return apiJson(ctx, { itinerary: null });
+
+    // Statuses are derived against the real clock, exactly as the by-id read
+    // does it, so "is this still going" is answered by the same code.
+    const withDerived = withStatuses(stored, new Date());
+    if (!isResumable(withDerived)) return apiJson(ctx, { itinerary: null });
+    // Guard against a stale pointer to someone else's plan.
+    if (!ownsItinerary(withDerived, caller)) return apiJson(ctx, { itinerary: null });
+
+    return apiJson(ctx, { itinerary: withDerived });
   } catch (err) {
     return apiError(ctx, err);
   }

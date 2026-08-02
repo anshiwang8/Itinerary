@@ -2,10 +2,13 @@ import assert from "node:assert";
 import { ScheduledStop } from "../schedule/schedule";
 import {
   ItineraryConflictError,
+  activeItineraryIdForOwner,
+  clearActiveItineraryForOwner,
   compareAndSetItinerary,
   createItinerary,
   loadItinerary,
   saveItinerary,
+  setActiveItineraryForOwner,
   updateItinerary,
   withStatuses,
 } from "./store";
@@ -244,6 +247,51 @@ const cases: Array<[string, () => Promise<void>]> = [
       );
       assert.strictEqual(result!.itinerary.version, 1);
       assert.strictEqual((await loadItinerary(itinerary.id))!.version, 1);
+    },
+  ],
+
+  // ── the owner index (Stage 1B): uid → that user's current plan ──
+  //
+  // This is the round-trip that makes resume-on-refresh possible. The plan
+  // itself was never the problem — it survives in the store either way — so
+  // what is worth proving is that the POINTER is set, found, and dropped.
+  [
+    "owner index round-trips: a user is pointed at their plan and can find it again",
+    async () => {
+      const itinerary = await saveItinerary(createItinerary(mkStops(), []));
+      await setActiveItineraryForOwner("uid-alpha", itinerary.id);
+      assert.strictEqual(await activeItineraryIdForOwner("uid-alpha"), itinerary.id);
+      // and the plan itself still loads through the normal path
+      assert.strictEqual((await loadItinerary(itinerary.id))!.id, itinerary.id);
+    },
+  ],
+  [
+    "the index is per user, and an unknown user has nothing to resume",
+    async () => {
+      const mine = await saveItinerary(createItinerary(mkStops(), []));
+      await setActiveItineraryForOwner("uid-beta", mine.id);
+      assert.strictEqual(await activeItineraryIdForOwner("uid-gamma"), undefined);
+      assert.strictEqual(await activeItineraryIdForOwner("uid-beta"), mine.id);
+    },
+  ],
+  [
+    "clearing the pointer stops a concluded plan resuming over the landing page",
+    async () => {
+      const itinerary = await saveItinerary(createItinerary(mkStops(), []));
+      await setActiveItineraryForOwner("uid-delta", itinerary.id);
+      await clearActiveItineraryForOwner("uid-delta");
+      assert.strictEqual(await activeItineraryIdForOwner("uid-delta"), undefined);
+      // the PLAN is untouched — only the pointer went away
+      assert.ok(await loadItinerary(itinerary.id), "clearing the index must not delete the plan");
+    },
+  ],
+  [
+    "a blank uid is not a key — it must never become a shared bucket",
+    async () => {
+      const itinerary = await saveItinerary(createItinerary(mkStops(), []));
+      await setActiveItineraryForOwner("   ", itinerary.id);
+      assert.strictEqual(await activeItineraryIdForOwner("   "), undefined);
+      assert.strictEqual(await activeItineraryIdForOwner(""), undefined);
     },
   ],
 ];

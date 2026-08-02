@@ -49,12 +49,32 @@ export interface Itinerary {
   timeZone?: string;
   /** original parse output — the reroute engine re-runs the pipeline with it */
   parsed?: ParsedPrompt;
+  /**
+   * The verified uid this plan belongs to (anonymous guest OR real account).
+   * OPTIONAL on purpose: plans created before Stage 1B have none, and mock
+   * e2e runs with no Firebase at all. Absent = unowned, which is readable and
+   * mutable exactly as before — keep-on-missing-data applies to owners too.
+   * Never set from a browser-supplied value; see `_shared/caller.ts`.
+   */
+  ownerUid?: string;
+  /** Whether that owner is a Firebase ANONYMOUS user. Recorded at creation
+   *  from the verified token rather than looked up later, because the archive
+   *  decision happens long after the request that knew the answer. */
+  ownerIsAnonymous?: boolean;
+  /** Set once, when the concluded plan was written to history. Its presence
+   *  is what stops a derived-on-every-read conclusion from re-archiving. */
+  archivedAt?: string;
 }
 
 // Survive Next dev hot-reloads: module state resets on recompile, the
 // globalThis slot doesn't.
-const g = globalThis as { __itineraryStore?: Map<string, Itinerary> };
+const g = globalThis as {
+  __itineraryStore?: Map<string, Itinerary>;
+  __itineraryOwnerIndex?: Map<string, string>;
+};
 const store: Map<string, Itinerary> = (g.__itineraryStore ??= new Map());
+/** uid → current plan id, for the memory (dev/e2e) mode of the owner index. */
+const ownerIndex: Map<string, string> = (g.__itineraryOwnerIndex ??= new Map());
 
 // ── Persistence seam (same discipline as the mock layer: a data-source
 // swap, not a rewrite). The in-memory Map is fine for dev/e2e where one
@@ -121,6 +141,12 @@ async function redis(cmd: (string | number)[]): Promise<unknown> {
 }
 
 const kvKey = (id: string) => `itin:${id}`;
+// The owner index: uid → the id of that user's current plan. This is what
+// makes "resume on refresh" possible at all — the page holds the itinerary in
+// React state only, so a reload forgets the id while the plan itself is still
+// sitting in Redis. Storing the id under the user is the missing link, not
+// more persistence for the plan.
+const ownerKey = (uid: string) => `owner:${uid}:active`;
 
 // Redis compares the stored version and writes the complete proposal in one
 // server-side operation. KEEPTTL is load-bearing: a mutation must not refresh
@@ -208,6 +234,50 @@ export async function saveItinerary(itinerary: Itinerary): Promise<Itinerary> {
   if (store.has(initial.id)) throw new ItineraryConflictError();
   store.set(initial.id, cloneItinerary(initial));
   return cloneItinerary(initial);
+}
+
+// ── Owner index (uid → that user's current plan id) ───────────────────────
+//
+// A pointer, never a second copy of the plan: the itinerary itself stays the
+// single source of truth under `itin:<id>`, and this only records which one a
+// user was last given. It shares the plan's TTL so the pointer can never
+// outlive what it points at — and `activeItineraryIdForOwner` re-loads
+// through the normal path anyway, so a dangling pointer degrades to "no
+// active plan" rather than an error.
+
+/** Point a user at their current plan. Best-effort by design: failing to
+ *  write the pointer must not fail the plan that was just created. */
+export async function setActiveItineraryForOwner(uid: string, id: string): Promise<void> {
+  const owner = uid.trim();
+  if (owner.length === 0) return;
+  if (kvConfigured()) {
+    await redis(["SET", ownerKey(owner), id, "EX", KV_TTL_SECONDS]);
+    return;
+  }
+  ownerIndex.set(owner, id);
+}
+
+/** The id this user was last pointed at, or undefined. */
+export async function activeItineraryIdForOwner(uid: string): Promise<string | undefined> {
+  const owner = uid.trim();
+  if (owner.length === 0) return undefined;
+  if (kvConfigured()) {
+    const raw = await redis(["GET", ownerKey(owner)]);
+    return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+  }
+  return ownerIndex.get(owner);
+}
+
+/** Drop the pointer once its plan has concluded, so a finished outing does
+ *  not keep resuming over the landing page. The plan itself is untouched. */
+export async function clearActiveItineraryForOwner(uid: string): Promise<void> {
+  const owner = uid.trim();
+  if (owner.length === 0) return;
+  if (kvConfigured()) {
+    await redis(["DEL", ownerKey(owner)]);
+    return;
+  }
+  ownerIndex.delete(owner);
 }
 
 /** Atomically replace exactly one known version and preserve its TTL. */

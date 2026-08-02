@@ -48,7 +48,10 @@ export default function LoginScreen({
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
   const guestRef = useRef<HTMLButtonElement>(null);
-  const signedIn = auth.status === "signed-in";
+  // A REAL account, not the anonymous session every visitor now gets on load.
+  // Keying off `status === "signed-in"` alone would make this screen dismiss
+  // itself the instant it opened, since a guest is already signed in.
+  const signedIn = auth.status === "signed-in" && auth.user?.isAnonymous === false;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

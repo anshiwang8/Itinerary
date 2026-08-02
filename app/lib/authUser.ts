@@ -12,6 +12,20 @@ export interface AppUser {
   displayName: string | null;
   email: string | null;
   photoURL: string | null;
+  /**
+   * Firebase ANONYMOUS sign-in — i.e. a guest. Since Stage 1B every visitor
+   * is signed in, so "is there a user" no longer distinguishes guest from
+   * account; THIS does. It gates exactly one thing (history archiving) and
+   * whether the account chip is shown. It gates no app functionality:
+   * anonymous users get the entire product, including a plan that survives
+   * refresh.
+   *
+   * Defaults to true when the provider does not say. That direction is
+   * deliberate: mistaking an account for a guest costs a history entry,
+   * mistaking a guest for an account would file a stranger's outing under a
+   * real person's uid.
+   */
+  isAnonymous: boolean;
 }
 
 /** Only the fields this slice needs, all `unknown` because a provider payload
@@ -22,6 +36,7 @@ export interface FirebaseUserLike {
   displayName?: unknown;
   email?: unknown;
   photoURL?: unknown;
+  isAnonymous?: unknown;
 }
 
 /** A present-but-blank string is absent. Google returns "" for a missing
@@ -48,6 +63,11 @@ export function toAppUser(user: FirebaseUserLike | null | undefined): AppUser | 
     displayName: text(user.displayName),
     email: text(user.email),
     photoURL: text(user.photoURL),
+    // Only an EXPLICIT false makes someone a real account. Anything else —
+    // absent, undefined, a non-boolean — reads as a guest, because the safe
+    // failure is losing a history entry, not filing a stranger's night out
+    // under someone's name.
+    isAnonymous: user.isAnonymous !== false,
   };
 }
 

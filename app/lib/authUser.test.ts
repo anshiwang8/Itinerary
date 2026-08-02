@@ -14,14 +14,37 @@ const cases: Array<[string, () => void]> = [
           displayName: "Anshi Wang",
           email: "anshi@example.com",
           photoURL: "https://lh3.googleusercontent.com/a/photo",
+          isAnonymous: false,
         }),
         {
           uid: "abc123",
           displayName: "Anshi Wang",
           email: "anshi@example.com",
           photoURL: "https://lh3.googleusercontent.com/a/photo",
+          isAnonymous: false,
         }
       );
+    },
+  ],
+  [
+    "anonymity: only an explicit false is a real account",
+    () => {
+      // The safe failure is losing a history entry, NOT filing a stranger's
+      // night out under a real person's uid — so anything that isn't an
+      // explicit `false` reads as a guest.
+      assert.strictEqual(toAppUser({ uid: "u", isAnonymous: false })!.isAnonymous, false);
+      assert.strictEqual(toAppUser({ uid: "u", isAnonymous: true })!.isAnonymous, true);
+      assert.strictEqual(
+        toAppUser({ uid: "u" })!.isAnonymous,
+        true,
+        "absent means guest, never account"
+      );
+      assert.strictEqual(
+        toAppUser({ uid: "u", isAnonymous: "false" })!.isAnonymous,
+        true,
+        "a non-boolean is not an explicit false"
+      );
+      assert.strictEqual(toAppUser({ uid: "u", isAnonymous: 0 })!.isAnonymous, true);
     },
   ],
   [
@@ -52,35 +75,48 @@ const cases: Array<[string, () => void]> = [
         displayName: "",
         email: "   ",
         photoURL: "",
+        isAnonymous: false,
       });
       assert.deepStrictEqual(user, {
         uid: "u1",
         displayName: null,
         email: null,
         photoURL: null,
+        isAnonymous: false,
       });
     },
   ],
   [
     "surrounding whitespace is trimmed off every field",
     () => {
-      assert.deepStrictEqual(toAppUser({ uid: "  u2  ", displayName: "  Ada L  " }), {
-        uid: "u2",
-        displayName: "Ada L",
-        email: null,
-        photoURL: null,
-      });
+      assert.deepStrictEqual(
+        toAppUser({ uid: "  u2  ", displayName: "  Ada L  ", isAnonymous: false }),
+        {
+          uid: "u2",
+          displayName: "Ada L",
+          email: null,
+          photoURL: null,
+          isAnonymous: false,
+        }
+      );
     },
   ],
   [
     "non-string fields are dropped rather than coerced",
     () => {
-      const user = toAppUser({ uid: "u3", displayName: 42, email: {}, photoURL: [] });
+      const user = toAppUser({
+        uid: "u3",
+        displayName: 42,
+        email: {},
+        photoURL: [],
+        isAnonymous: false,
+      });
       assert.deepStrictEqual(user, {
         uid: "u3",
         displayName: null,
         email: null,
         photoURL: null,
+        isAnonymous: false,
       });
     },
   ],

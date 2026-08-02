@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildSchedule,
   checkWindowFit,
@@ -264,12 +264,35 @@ function stopsFromItinerary(it: Itinerary): MapStop[] {
 }
 
 export default function Home() {
-  // ── accounts (Stage 1A: login only) ──
-  // Deliberately inert with respect to everything below it: no pipeline call,
-  // no request, no stored plan reads this. Signing in CAPTURES an identity for
-  // later stages; a guest and a signed-in user get the identical app.
+  // ── accounts (Stage 1A login; Stage 1B identity + resume) ──
+  // Every visitor now has a uid: signed-in users their real one, guests an
+  // ANONYMOUS one created silently on load. One id path, not two branches.
+  // The app still behaves identically for both — the uid buys a plan that
+  // survives a refresh, and (for real accounts only) a history entry when the
+  // plan concludes. Nothing here gates a feature.
   const auth = useAuth();
   const [loginOpen, setLoginOpen] = useState(false);
+  // A real account, as opposed to a silently-signed-in guest. This is what
+  // the account chip keys off — showing "Signed in" to someone who never
+  // signed in would be a lie the anonymous uid makes easy to tell.
+  const signedInForReal = auth.status === "signed-in" && auth.user?.isAnonymous === false;
+  // Guards the one-shot resume so a re-render or a token refresh cannot
+  // yank a user back to a plan they have already moved on from.
+  const resumeAttempted = useRef(false);
+  // Mirrors `itinerary` for the resume effect, which must be able to check
+  // "is the user already looking at a plan" without taking `itinerary` as a
+  // dependency — that would re-run it on every mutation.
+  const itineraryRef = useRef<Itinerary | null>(null);
+
+  const { getIdToken } = auth;
+  /** Authorization header for our own API, or undefined when there is no
+   *  session. Undefined is a supported state everywhere: routes treat an
+   *  unauthenticated request as guest-level rather than rejecting it, which
+   *  is also what keeps mock e2e (no Firebase at all) working unchanged. */
+  const authHeaders = useCallback(async (): Promise<Record<string, string> | undefined> => {
+    const token = await getIdToken();
+    return token ? { Authorization: `Bearer ${token}` } : undefined;
+  }, [getIdToken]);
 
   const [prompt, setPrompt] = useState("");
   // plain query inputs — NOT location services (deliberately deferred).
@@ -1443,7 +1466,10 @@ export default function Home() {
     try {
       const data = await fetchJson("/api/itinerary", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // The token is what lets the server stamp an owner and remember this
+        // plan for the next refresh. Without it the plan is simply unowned —
+        // exactly how plans behaved before this slice.
+        headers: { "Content-Type": "application/json", ...((await authHeaders()) ?? {}) },
         body: JSON.stringify({
           stops: enriched,
           legs,
@@ -1471,7 +1497,13 @@ export default function Home() {
   async function readItinerary(id: string, simValue: string): Promise<Itinerary> {
     const nowISO = simValue ? new Date(simValue).toISOString() : "";
     const url = `/api/itinerary/${id}${nowISO ? `?now=${encodeURIComponent(nowISO)}` : ""}`;
-    return fetchJson<Itinerary>(url, { parse: parseItineraryPayload });
+    return fetchJson<Itinerary>(url, {
+      // Carries identity so the server can archive on conclusion. Absent when
+      // there is no session; the route treats that as guest-level, so this is
+      // additive rather than a new requirement.
+      headers: await authHeaders(),
+      parse: parseItineraryPayload,
+    });
   }
 
   async function refreshItinerary(id: string, simValue: string) {
@@ -1512,6 +1544,52 @@ export default function Home() {
     setMapStops(stopsFromItinerary(it));
     setHomeLeg(it.homeLeg ?? null);
   }
+
+  useEffect(() => {
+    itineraryRef.current = itinerary;
+  }, [itinerary]);
+
+  // ── resume the caller's active plan on load ──
+  //
+  // THE BUG THIS FIXES, precisely: the plan was never lost. It sits in Redis
+  // for seven days. `itinerary` lived in React state and nothing else, so a
+  // refresh forgot which ID it was showing and fell back to the landing page.
+  // The server now records uid → current plan id, and this asks for it.
+  //
+  // Identical for guests and signed-in users — persistence is core function,
+  // never gated on having an account.
+  useEffect(() => {
+    // Wait for auth to settle: firing before the anonymous sign-in lands
+    // would send no token and resume nothing.
+    if (auth.status !== "signed-in") return;
+    if (resumeAttempted.current) return;
+    resumeAttempted.current = true;
+    // Never stomp on work in progress — someone who started planning while
+    // the token was resolving keeps what they are doing.
+    if (itineraryRef.current) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const headers = await authHeaders();
+        if (!headers) return;
+        const data = await fetchJson<{ itinerary: unknown }>("/api/itinerary", { headers });
+        if (cancelled || !data.itinerary) return;
+        const stored = parseItineraryPayload(data.itinerary);
+        if (itineraryRef.current) return;
+        applyItinerary(stored);
+        const active = stored.stops.find((s) => s.status === "active");
+        if (active?.id) setSelected(active.id);
+      } catch {
+        // A failed resume leaves the landing page — the pre-1B behaviour, and
+        // a working app. Never an error banner for something the user did not
+        // ask for.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth.status, authHeaders]);
 
   function mutationOutcomeMayBeAmbiguous(err: unknown): boolean {
     if (!(err instanceof ClientFetchError)) return true;
@@ -2087,7 +2165,7 @@ export default function Home() {
             account and still does, so nothing below is locked behind it.
             While auth is still resolving we render nothing rather than a
             "Sign in" that might flip to a name a moment later. */}
-        {auth.status === "signed-in" && auth.user ? (
+        {signedInForReal && auth.user ? (
           <div className="acct">
             <div className="acct__who">
               {auth.user.photoURL ? (
@@ -2109,7 +2187,11 @@ export default function Home() {
               Sign out
             </button>
           </div>
-        ) : auth.status === "signed-out" ? (
+        ) : auth.status !== "loading" ? (
+          // A guest is now signed in ANONYMOUSLY rather than not signed in at
+          // all, so this can no longer key off "signed-out" — that state is
+          // reached only when Firebase is unavailable. Both cases offer the
+          // same thing: a way in, with nothing gated behind it.
           <div className="acct">
             <button
               type="button"
