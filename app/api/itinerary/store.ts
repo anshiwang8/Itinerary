@@ -64,6 +64,17 @@ export interface Itinerary {
   /** Set once, when the concluded plan was written to history. Its presence
    *  is what stops a derived-on-every-read conclusion from re-archiving. */
   archivedAt?: string;
+  /**
+   * Set when the USER ended this plan from the stop control, as opposed to it
+   * running out the clock.
+   *
+   * It has to be persisted rather than expressed as `status: "completed"`,
+   * because `withStatuses` RE-DERIVES status from the clock on every read — a
+   * status written here would simply be recomputed back to "active" on the
+   * next GET. This marker is the one thing that says "a person decided this
+   * was over", and `isResumable` reads it so an ended plan cannot come back.
+   */
+  endedAt?: string;
 }
 
 // Survive Next dev hot-reloads: module state resets on recompile, the

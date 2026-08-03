@@ -57,11 +57,25 @@ export function ownsItinerary(itinerary: Itinerary, caller: CallerIdentity | nul
   return owner !== null && owner === caller.uid.trim();
 }
 
-/** A plan is resumable while it has not concluded. `withStatuses` derives
- *  "completed" from the clock, so this reads the derived status rather than
- *  re-deciding it — code owns that arithmetic in exactly one place. */
+/**
+ * A plan is resumable until it has concluded — by the clock OR by choice.
+ *
+ * `withStatuses` derives "completed" from the clock, so this reads the derived
+ * status rather than re-deciding it; code owns that arithmetic in one place.
+ * `endedAt` is the second route: a plan someone stopped on purpose is over
+ * even though its stops may still be in the future, and it must not reappear
+ * on the next refresh. Clearing the owner pointer is what normally prevents
+ * that, but this makes it true of the plan ITSELF, so a stale pointer cannot
+ * resurrect something the user deliberately finished.
+ */
 export function isResumable(itinerary: Itinerary): boolean {
+  if (hasBeenEnded(itinerary)) return false;
   return itinerary.status !== "completed";
+}
+
+/** Whether a person explicitly ended this plan. */
+export function hasBeenEnded(itinerary: Itinerary): boolean {
+  return typeof itinerary.endedAt === "string" && itinerary.endedAt.trim().length > 0;
 }
 
 /**

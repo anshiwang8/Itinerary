@@ -791,11 +791,80 @@ button { font-family: var(--grot); cursor: pointer; }
 .auth__guest:hover { background: var(--accent-soft); border-color: var(--accent); }
 .auth__fine { margin-top: 13px; }
 
+/* ────────────────  Ending a plan (stop itinerary)  ────────────────
+   NOTE ON COLOUR: --live (acid green) means "happening now / just changed".
+   Ending a plan is the opposite of live, so nothing here borrows it. The
+   destructive action is warm-red, the keep-it action is the teal accent. */
+
+/* Quiet sibling to Replan in the stage topbar. Visually lighter than
+   .topbar__go, but the SAME 44px target — it is a primary stage control and
+   the mobile suite enforces that for every `.topbar button`. Being the
+   less-used action buys a softer colour, not a smaller tap area. */
+.topbar__stop {
+  flex: none; min-width: 44px; min-height: 44px; padding: 8px 14px;
+  background: transparent; color: var(--ink-soft);
+  border: 1px solid var(--rule-strong); border-radius: 999px;
+  font-family: var(--grot); font-size: 13px; font-weight: 500; white-space: nowrap;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+.topbar__stop:hover { background: rgba(163, 55, 47, 0.08); color: #A3372F; border-color: #A3372F; }
+
+.stopdlg {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(30, 58, 76, 0.42);
+  backdrop-filter: blur(3px);
+  animation: auth-in 0.18s ease-out;
+}
+.stopdlg__card {
+  width: min(100%, 420px);
+  background: var(--card); border-radius: 20px;
+  padding: 30px 28px 24px;
+  box-shadow: var(--shadow-lift);
+  text-align: center;
+  animation: auth-card-in 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+.stopdlg__title {
+  font-family: var(--disp); font-weight: 600; font-size: 22px;
+  letter-spacing: -0.015em; color: var(--ink); line-height: 1.25;
+}
+.stopdlg__sub {
+  font-family: var(--grot); font-size: 13px; line-height: 1.55;
+  color: var(--ink-soft); margin-top: 10px;
+}
+.stopdlg__err {
+  font-family: var(--grot); font-size: 13px; line-height: 1.5;
+  color: #A3372F; margin-top: 12px;
+}
+.stopdlg__actions {
+  display: flex; flex-direction: column; gap: 9px; margin-top: 20px;
+}
+.stopdlg__btn {
+  width: 100%; min-height: 44px;
+  background: #FFFFFF; color: #A3372F;
+  border: 1px solid var(--rule-strong); border-radius: 12px;
+  font-family: var(--grot); font-size: 14px; font-weight: 500;
+  transition: background 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
+}
+.stopdlg__btn:hover:not(:disabled) { background: rgba(163, 55, 47, 0.07); border-color: #A3372F; }
+.stopdlg__btn:disabled { opacity: 0.55; cursor: not-allowed; }
+/* keeping a copy is the constructive option, so it reads in the app's accent
+   rather than the destructive red */
+.stopdlg__btn--save { color: var(--accent-deep); }
+.stopdlg__btn--save:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+/* Cancel is the safe way out and is ordered last, but it must not read as the
+   dangerous one */
+.stopdlg__btn--cancel { color: var(--ink); border-color: var(--rule); }
+.stopdlg__btn--cancel:hover { background: var(--paper-2); border-color: var(--rule-strong); }
+
 @media (max-width: 560px) {
   .empty {
     justify-content: flex-start; overflow-y: auto;
     padding: clamp(24px, 7vh, 52px) 12px 24px;
   }
+  .stopdlg__card { padding: 24px 20px 20px; }
+  .stopdlg__title { font-size: 19px; }
   /* the wordmark hides on mobile, but the account corner is functional, not
      decorative — it stays, at a 44px target */
   .acct { top: 12px; right: 12px; }
@@ -845,4 +914,6 @@ button { font-family: var(--grot); cursor: pointer; }
   .chip, .ecard, .mk__dot, .leglab, .banner { transition: opacity 0.2s ease !important; }
   .auth, .auth__card { animation: none !important; }
   .acct__signin, .acct__out, .auth__google, .auth__guest { transition: none !important; }
+  .stopdlg, .stopdlg__card { animation: none !important; }
+  .stopdlg__btn, .topbar__stop { transition: none !important; }
 }

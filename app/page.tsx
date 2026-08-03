@@ -61,6 +61,8 @@ import { shouldShowDevControls } from "./lib/devControls";
 import { useAuth } from "./lib/useAuth";
 import { userInitials, userLabel } from "./lib/authUser";
 import LoginScreen from "./LoginScreen";
+import StopItineraryDialog from "./StopItineraryDialog";
+import type { StopChoice } from "./api/itinerary/stopPlan";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, {
   StripFocusRequest,
@@ -272,6 +274,11 @@ export default function Home() {
   // plan concludes. Nothing here gates a feature.
   const auth = useAuth();
   const [loginOpen, setLoginOpen] = useState(false);
+  // The stop-itinerary confirmation. Its own busy/error state, because ending
+  // must not be blocked by (or blocked on) the pipeline's `busy`.
+  const [stopOpen, setStopOpen] = useState(false);
+  const [stopBusy, setStopBusy] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   // A real account, as opposed to a silently-signed-in guest. This is what
   // the account chip keys off — showing "Signed in" to someone who never
   // signed in would be a lie the anonymous uid makes easy to tell.
@@ -1545,6 +1552,69 @@ export default function Home() {
     setHomeLeg(it.homeLeg ?? null);
   }
 
+  // ── ending a plan on purpose ──
+  //
+  // The inverse of applyItinerary: drop every piece of derived stage state so
+  // the render falls back to the empty/landing branch, exactly as a fresh
+  // visit does. `itinerary = null` is what actually switches screens; the rest
+  // stops a finished outing's pins, legs and banners bleeding into the next
+  // plan.
+  function clearItineraryState() {
+    setItinerary(null);
+    setSchedule(null);
+    setMapStops([]);
+    setHomeLeg(null);
+    setSelected(null);
+    setBanner(null);
+    setChangedIds(new Set());
+    setOldStarts({});
+    setWeatherBlocks([]);
+    setSwapError(null);
+    setError(null);
+    // The resume effect is one-shot per load, but a plan ended in this session
+    // must not be re-fetched if anything ever re-triggers it.
+    resumeAttempted.current = true;
+    itineraryRef.current = null;
+  }
+
+  async function chooseStop(choice: StopChoice) {
+    if (choice === "cancel") {
+      setStopOpen(false);
+      setStopError(null);
+      return;
+    }
+    const current = itinerary;
+    if (!current) {
+      setStopOpen(false);
+      return;
+    }
+    setStopBusy(true);
+    setStopError(null);
+    try {
+      const headers = await authHeaders();
+      if (!headers) {
+        // No verified identity means the server cannot know this plan is
+        // yours, and it will refuse. Say so rather than appearing to hang.
+        setStopError("Couldn't confirm who you are. Refresh and try again.");
+        return;
+      }
+      await fetchJson("/api/itinerary/" + current.id + "/end", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ choice }),
+      });
+      setStopOpen(false);
+      clearItineraryState();
+    } catch (err) {
+      // Plan-then-commit, same as a failed swap: if the server did not end it,
+      // the user keeps the plan they are looking at rather than losing it to a
+      // half-applied action.
+      setStopError(clientErrorMessage(err, "Couldn't end the itinerary. Please try again."));
+    } finally {
+      setStopBusy(false);
+    }
+  }
+
   useEffect(() => {
     itineraryRef.current = itinerary;
   }, [itinerary]);
@@ -2347,7 +2417,30 @@ export default function Home() {
         <button type="submit" className="topbar__go" disabled={busy || !prompt.trim()}>
           {busy ? "…" : "Replan"}
         </button>
+        {/* Ending is a real outcome, not a destructive edge case, so it sits
+            beside Replan rather than hidden in a menu — but styled quieter,
+            because it is the rarer of the two. type="button" is load-bearing:
+            inside this form a default submit would replan instead. */}
+        <button
+          type="button"
+          className="topbar__stop"
+          onClick={() => {
+            setStopError(null);
+            setStopOpen(true);
+          }}
+        >
+          End
+        </button>
       </form>
+
+      {stopOpen && (
+        <StopItineraryDialog
+          isAnonymous={auth.user?.isAnonymous !== false}
+          busy={stopBusy}
+          error={stopError}
+          onChoose={(choice) => void chooseStop(choice)}
+        />
+      )}
 
       {loadingText && (
         <div className="loading" role="status" aria-live="polite" aria-atomic="true">
