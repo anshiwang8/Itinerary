@@ -62,6 +62,8 @@ import { useAuth } from "./lib/useAuth";
 import { userInitials, userLabel } from "./lib/authUser";
 import LoginScreen from "./LoginScreen";
 import StopItineraryDialog from "./StopItineraryDialog";
+import HistoryPanel from "./HistoryPanel";
+import { parseHistoryResponse, type HistoryResponseView } from "./lib/historyView";
 import type { StopChoice } from "./api/itinerary/stopPlan";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, {
@@ -274,6 +276,9 @@ export default function Home() {
   // plan concludes. Nothing here gates a feature.
   const auth = useAuth();
   const [loginOpen, setLoginOpen] = useState(false);
+  // Stage 2: the view-only history screen. An overlay like the login card, so
+  // it mounts and unmounts without touching the planning stage underneath.
+  const [historyOpen, setHistoryOpen] = useState(false);
   // The stop-itinerary confirmation. Its own busy/error state, because ending
   // must not be blocked by (or blocked on) the pipeline's `busy`.
   const [stopOpen, setStopOpen] = useState(false);
@@ -300,6 +305,16 @@ export default function Home() {
     const token = await getIdToken();
     return token ? { Authorization: `Bearer ${token}` } : undefined;
   }, [getIdToken]);
+
+  /** The caller's archived plans. Read-only, and scoped by the SERVER to the
+   *  verified token — there is no uid to send and nothing here can ask for
+   *  someone else's. The panel gets this as a prop so it never touches auth. */
+  const loadHistory = useCallback(async (): Promise<HistoryResponseView> => {
+    const payload = await fetchJson<unknown>("/api/history", {
+      headers: await authHeaders(),
+    });
+    return parseHistoryResponse(payload);
+  }, [authHeaders]);
 
   const [prompt, setPrompt] = useState("");
   // plain query inputs — NOT location services (deliberately deferred).
@@ -2235,46 +2250,74 @@ export default function Home() {
             account and still does, so nothing below is locked behind it.
             While auth is still resolving we render nothing rather than a
             "Sign in" that might flip to a name a moment later. */}
-        {signedInForReal && auth.user ? (
+        {auth.status !== "loading" && (
           <div className="acct">
-            <div className="acct__who">
-              {auth.user.photoURL ? (
-                // eslint-disable-next-line @next/next/no-img-element -- provider avatar on an unconfigurable remote host
-                <img
-                  className="acct__avatar"
-                  src={auth.user.photoURL}
-                  alt=""
-                  referrerPolicy="no-referrer"
-                />
-              ) : (
-                <span className="acct__initials" aria-hidden="true">
-                  {userInitials(auth.user)}
-                </span>
-              )}
-              <span className="acct__name">{userLabel(auth.user)}</span>
-            </div>
-            <button type="button" className="acct__out" onClick={() => void auth.signOut()}>
-              Sign out
-            </button>
-          </div>
-        ) : auth.status !== "loading" ? (
-          // A guest is now signed in ANONYMOUSLY rather than not signed in at
-          // all, so this can no longer key off "signed-out" — that state is
-          // reached only when Firebase is unavailable. Both cases offer the
-          // same thing: a way in, with nothing gated behind it.
-          <div className="acct">
+            {/* History is offered to EVERYONE, not only to accounts. A guest
+                who opens it meets the reason to sign in — that empty state is
+                the nudge, and hiding the door would make it unreachable by
+                exactly the people it is written for. */}
             <button
               type="button"
-              className="acct__signin"
-              onClick={() => {
-                auth.clearError();
-                setLoginOpen(true);
-              }}
+              className="acct__hist"
+              onClick={() => setHistoryOpen(true)}
             >
-              Sign in
+              History
             </button>
+            {signedInForReal && auth.user ? (
+              <>
+                <div className="acct__who">
+                  {auth.user.photoURL ? (
+                    // eslint-disable-next-line @next/next/no-img-element -- provider avatar on an unconfigurable remote host
+                    <img
+                      className="acct__avatar"
+                      src={auth.user.photoURL}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <span className="acct__initials" aria-hidden="true">
+                      {userInitials(auth.user)}
+                    </span>
+                  )}
+                  <span className="acct__name">{userLabel(auth.user)}</span>
+                </div>
+                <button type="button" className="acct__out" onClick={() => void auth.signOut()}>
+                  Sign out
+                </button>
+              </>
+            ) : (
+              // A guest is now signed in ANONYMOUSLY rather than not signed in
+              // at all, so this can no longer key off "signed-out" — that
+              // state is reached only when Firebase is unavailable. Both cases
+              // offer the same thing: a way in, with nothing gated behind it.
+              <button
+                type="button"
+                className="acct__signin"
+                onClick={() => {
+                  auth.clearError();
+                  setLoginOpen(true);
+                }}
+              >
+                Sign in
+              </button>
+            )}
           </div>
-        ) : null}
+        )}
+        {historyOpen && (
+          <HistoryPanel
+            // A silently-signed-in guest is NOT an account: their plans were
+            // never archived, so they get the nudge rather than an empty list.
+            isGuest={!signedInForReal}
+            canSignIn={auth.available}
+            onSignIn={() => {
+              setHistoryOpen(false);
+              auth.clearError();
+              setLoginOpen(true);
+            }}
+            onDismiss={() => setHistoryOpen(false)}
+            load={loadHistory}
+          />
+        )}
         {loginOpen && <LoginScreen auth={auth} onDismiss={() => setLoginOpen(false)} />}
         <h1 className="empty__title">Itinerary</h1>
         <div className="empty__sub">life moves simpler.</div>

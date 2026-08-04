@@ -113,8 +113,11 @@ button { font-family: var(--grot); cursor: pointer; }
 }
 /* lift the real content above the decorative sky layers — but not the
    absolutely-positioned corner mark, the account corner opposite it, or the
-   fixed login overlay, each of which sets its own placement */
-.empty > *:not(.empty__glow):not(.empty__mark):not(.acct):not(.auth) { position: relative; z-index: 2; }
+   fixed overlays (login, history), each of which sets its own placement.
+   This selector outranks a plain `.hist`/`.auth` rule, so a new full-screen
+   overlay mounted here MUST be added to the exclusions or it is quietly
+   demoted to `position: relative` and stops covering the page. */
+.empty > *:not(.empty__glow):not(.empty__mark):not(.acct):not(.auth):not(.hist) { position: relative; z-index: 2; }
 
 .empty__mark {
   position: absolute; top: 26px; left: 30px; z-index: 3;
@@ -858,6 +861,164 @@ button { font-family: var(--grot); cursor: pointer; }
 .stopdlg__btn--cancel { color: var(--ink); border-color: var(--rule); }
 .stopdlg__btn--cancel:hover { background: var(--paper-2); border-color: var(--rule-strong); }
 
+/* ────────────────  History (view-only archive)  ────────────────
+   Same card language as the login and stop dialogs — white surface, ink type,
+   teal accent — but taller and scrollable, because this one holds a list.
+   NOTE ON COLOUR: --live is reserved for "happening now / just changed".
+   Everything in here has already happened, so nothing borrows it. */
+
+/* the entry point, beside Sign in / Sign out in the account corner */
+.acct__hist {
+  min-height: 38px; padding: 8px 15px;
+  background: rgba(255, 255, 255, 0.72); color: var(--ink-soft);
+  border: 1px solid rgba(255, 255, 255, 0.85); border-radius: 999px;
+  font-family: var(--grot); font-size: 13px; font-weight: 500; white-space: nowrap;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.acct__hist:hover { background: #FFFFFF; color: var(--ink); }
+
+.hist {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(30, 58, 76, 0.42);
+  backdrop-filter: blur(3px);
+  animation: auth-in 0.18s ease-out;
+}
+.hist__card {
+  width: min(100%, 520px); max-height: min(78vh, 680px);
+  display: flex; flex-direction: column;
+  background: var(--card); border-radius: 20px;
+  box-shadow: var(--shadow-lift);
+  animation: auth-card-in 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
+  overflow: hidden;
+  /* The landing hero centres its text and this card is mounted inside it, so
+     records would inherit that and float away from the timeline rail. A list
+     of things that happened reads left-aligned; only the empty states below
+     opt back into centring. */
+  text-align: left;
+}
+.hist__head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 20px 18px 14px 24px;
+  border-bottom: 1px solid var(--rule);
+}
+.hist__title {
+  font-family: var(--disp); font-weight: 600; font-size: 22px;
+  letter-spacing: -0.015em; color: var(--ink); line-height: 1.25;
+  margin-right: auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hist__back {
+  order: -1; flex: none;
+  min-height: 34px; padding: 6px 12px;
+  background: transparent; color: var(--accent-deep);
+  border: 1px solid var(--rule); border-radius: 999px;
+  font-family: var(--grot); font-size: 12.5px; font-weight: 500; white-space: nowrap;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+.hist__back:hover { background: var(--accent-soft); border-color: var(--accent); }
+.hist__close {
+  flex: none;
+  width: 34px; height: 34px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--ink-soft);
+  border: 1px solid var(--rule); border-radius: 50%;
+  font-family: var(--grot); font-size: 13px; line-height: 1;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+.hist__close:hover { background: var(--paper-2); color: var(--ink); border-color: var(--rule-strong); }
+
+.hist__body {
+  padding: 16px 24px 24px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.hist__note, .hist__err {
+  font-family: var(--grot); font-size: 13px; line-height: 1.55;
+  color: var(--ink-soft); margin: 6px 0;
+}
+.hist__err { color: #A3372F; }
+
+.hist__empty { text-align: center; padding: 18px 4px 8px; }
+.hist__emptyTitle {
+  font-family: var(--disp); font-weight: 600; font-size: 19px;
+  letter-spacing: -0.01em; color: var(--ink);
+}
+.hist__emptyText {
+  font-family: var(--grot); font-size: 13px; line-height: 1.6;
+  color: var(--ink-soft); margin-top: 9px;
+}
+.hist__cta {
+  margin-top: 18px; min-height: 44px; padding: 10px 22px;
+  background: var(--accent); color: #FFFFFF;
+  border: 1px solid var(--accent); border-radius: 12px;
+  font-family: var(--grot); font-size: 14px; font-weight: 500;
+  transition: background 0.16s ease, transform 0.16s ease;
+}
+.hist__cta:hover { background: var(--accent-deep); transform: translateY(-1px); }
+.hist__cta:active { transform: translateY(0); }
+
+.hist__list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+/* Each past plan is one selection target — the whole row, not a link inside
+   a card, so the hit area matches what looks clickable. */
+.hist__row {
+  width: 100%; min-height: 44px;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 13px 16px; text-align: left;
+  background: var(--card-2); color: var(--ink);
+  border: 1px solid var(--rule); border-radius: 14px;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+.hist__row:hover {
+  background: #FFFFFF; border-color: var(--accent); transform: translateY(-1px);
+}
+.hist__row:active { transform: translateY(0); }
+.hist__rowDate {
+  font-family: var(--disp); font-weight: 600; font-size: 16px;
+  letter-spacing: -0.01em; color: var(--ink);
+}
+.hist__rowMeta {
+  font-family: var(--grot); font-size: 12px; color: var(--label);
+  letter-spacing: 0.04em;
+}
+.hist__rowStops {
+  font-family: var(--grot); font-size: 13px; line-height: 1.5;
+  color: var(--ink-soft);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.hist__detailMeta {
+  font-family: var(--grot); font-size: 12.5px; color: var(--label);
+  letter-spacing: 0.04em; margin-bottom: 14px;
+}
+.hist__stops { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+/* A read-only timeline: a rule down the left, a node per stop. Static on
+   purpose — nothing here is selectable, because nothing here is actionable. */
+.hist__stop {
+  position: relative;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 10px 0 14px 22px;
+  border-left: 1px solid var(--rule);
+}
+.hist__stop:last-child { border-left-color: transparent; }
+.hist__stop::before {
+  content: ""; position: absolute; left: -4.5px; top: 15px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+}
+.hist__stop--skipped::before { background: var(--rule-strong); }
+.hist__stop--skipped .hist__stopName { color: var(--ink-faint); }
+.hist__stopCat { display: block; }
+.hist__stopName {
+  font-family: var(--disp); font-weight: 600; font-size: 16px;
+  letter-spacing: -0.01em; color: var(--ink); line-height: 1.3;
+}
+.hist__stopTime {
+  font-family: var(--grot); font-size: 12.5px; color: var(--ink-soft);
+}
+
 @media (max-width: 560px) {
   .empty {
     justify-content: flex-start; overflow-y: auto;
@@ -868,8 +1029,13 @@ button { font-family: var(--grot); cursor: pointer; }
   /* the wordmark hides on mobile, but the account corner is functional, not
      decorative — it stays, at a 44px target */
   .acct { top: 12px; right: 12px; }
-  .acct__signin, .acct__out, .acct__who { min-height: 44px; }
+  .acct__signin, .acct__out, .acct__who, .acct__hist { min-height: 44px; }
   .acct__name { max-width: 96px; }
+  /* the card goes near-full-height on a phone: a list needs the room */
+  .hist__card { max-height: 88vh; }
+  .hist__head { padding: 16px 14px 12px 18px; }
+  .hist__title { font-size: 19px; }
+  .hist__body { padding: 14px 18px 20px; }
   .auth__card { padding: 28px 22px 22px; }
   .empty__title { font-size: clamp(42px, 16vw, 64px); }
   .empty__mark { display: none; }
@@ -916,4 +1082,9 @@ button { font-family: var(--grot); cursor: pointer; }
   .acct__signin, .acct__out, .auth__google, .auth__guest { transition: none !important; }
   .stopdlg, .stopdlg__card { animation: none !important; }
   .stopdlg__btn, .topbar__stop { transition: none !important; }
+  .hist, .hist__card { animation: none !important; }
+  .hist__row, .hist__cta, .hist__back, .hist__close, .acct__hist {
+    transition: none !important;
+  }
+  .hist__row:hover, .hist__cta:hover { transform: none !important; }
 }
