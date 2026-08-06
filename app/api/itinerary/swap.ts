@@ -28,6 +28,11 @@ import { withModelFallback } from "../_shared/modelFallback";
 import { getDuration } from "../schedule/durations";
 import { toZonedISO } from "../schedule/schedule";
 import { isParkLike } from "../../lib/categoryTraits";
+import {
+  parsePriceDirection,
+  priceDirectionSearchTerm,
+  rankByPriceDirection,
+} from "../../lib/budget";
 import { DEFAULT_ZONE, instantAtWallClock, wallClockParts } from "../../lib/zoneTime";
 import { isRecord, logEvent } from "../_shared/http";
 import {
@@ -415,20 +420,32 @@ export async function interpretRefinement(
   currentStartISO: string,
   refinement: string
 ): Promise<SwapInterpretation> {
+  // Trust the local parsers as the floor — the model can only refine
+  // arithmetic requests, never lose them. Duration wins over time.
+  const localDuration = parseDurationExpr(refinement);
+  const localTime = parseTimeExpr(refinement, category);
+  // Price direction is deterministic too, and unlike the two above it is
+  // never handed to the model at all — `venueSwap` re-reads it from the raw
+  // refinement and does the ranking itself.
+  const localPrice = parsePriceDirection(refinement);
   const fallback: SwapInterpretation = {
     intent: "venue",
     path: "refilter",
     category,
     aesthetic: parsed.aesthetic,
     budget: parsed.budget,
-    constraints: [...(parsed.constraints ?? []), refinement],
+    // A price phrase must NEVER land in `constraints`. Constraints are proved
+    // from six provider booleans (`constraintEvidence`), so a "fancier" in
+    // there makes `placeMeetsAllConstraints` false for EVERY venue and turns
+    // the swap into a permanent unmet_constraint refusal. This fallback is
+    // the path a Groq failure takes, so without the guard a busy model would
+    // make every price swap fail loud for the wrong reason.
+    constraints: localPrice
+      ? [...(parsed.constraints ?? [])]
+      : [...(parsed.constraints ?? []), refinement],
     time: null,
     duration: null,
   };
-  // Trust the local parsers as the floor — the model can only refine
-  // arithmetic requests, never lose them. Duration wins over time.
-  const localDuration = parseDurationExpr(refinement);
-  const localTime = parseTimeExpr(refinement, category);
   const localFallback = (): SwapInterpretation =>
     localDuration && localTime
       ? { ...fallback, intent: "time", time: localTime, duration: localDuration }
@@ -502,6 +519,13 @@ export async function interpretRefinement(
     if (localDuration && localTime) intent = "time";
     else if (localDuration) intent = "duration";
     else if (localTime) intent = "time";
+    // A price phrase with no clock/length phrase in it is a VENUE request and
+    // must never be allowed to move the stop's time. "venue" and "constraint"
+    // both land in venueSwap, so only a time/duration misclassification is
+    // wrong here — leave a genuine constraint reading alone.
+    else if (localPrice && (intent === "time" || intent === "duration")) {
+      intent = "venue";
+    }
 
     let time: TimeShift | null = null;
     if (intent === "time") {
@@ -1030,11 +1054,76 @@ async function venueSwap(
   weather: WeatherHour[] | null
 ): Promise<SwapResult> {
   const poolKey = interp.path === "research" ? interp.category : target.category;
+
+  // A "fancier"/"cheaper" refinement is a PRICE request, read from the RAW
+  // text for exactly the reason the distance and time parsers are: price is a
+  // field comparison, so the direction can never depend on the model. It is
+  // deliberately NOT taken from `interp.budget` — that is the model's echo,
+  // and gating on it would apply the plan's own budget to every swap.
+  const priceDirection = parsePriceDirection(refinement);
+
+  // LAYER 2 (the helper): the refilter path otherwise re-runs the ORIGINAL
+  // query, so a "ramen" search returns the same same-tier pool with nothing
+  // pricier in it to rank. `aesthetic` is the one buildQuery input that
+  // reaches the Places text query verbatim, so the direction term rides in
+  // there. This only IMPROVES the candidate pool — Google's notion of
+  // "upscale" is fuzzy and may still return same-tier venues, which is why
+  // the rank-and-refuse below is mandatory rather than an optimisation.
+  const searchAesthetic = (existing: string): string => {
+    if (!priceDirection) return existing;
+    const term = priceDirectionSearchTerm(priceDirection);
+    const kept = existing && existing.toLowerCase() !== "unspecified" ? existing : "";
+    return kept ? `${term} ${kept}` : term;
+  };
+
+  // A price word the model folded into `constraints` has to come out of BOTH
+  // consumers, and for two DIFFERENT reasons:
+  //  - the JUDGE: constraints are proved from six provider booleans, so a
+  //    "nicer" in there makes `placeMeetsAllConstraints` false for every venue
+  //    — a permanent unmet_constraint refusal.
+  //  - the SEARCH: `buildQuery` splices constraints into the Places text query
+  //    verbatim, so "nicer" becomes literal query noise. Observed live:
+  //    "somewhere nicer" produced constraints ["nicer"] and the query
+  //    "upscale nicer ramen Toronto", whose results collapsed back to ordinary
+  //    mid-tier ramen and made a genuine direction request refuse.
+  // The prompt already forbids this; a model leaking a term into constraints
+  // is something this codebase has watched happen, so it is a strip, not a
+  // hope. Only the MODEL's constraints are filtered — the plan's own stated
+  // constraints are its intent, not a leak from this refinement.
+  const interpConstraints = priceDirection
+    ? (interp.constraints ?? []).filter(
+        (constraint) => parsePriceDirection(constraint) === null
+      )
+    : interp.constraints;
+
   const searchParsed =
     interp.path === "refilter"
-      ? scoped(base, {}, poolKey)
-      : scoped(base, { aesthetic: interp.aesthetic, budget: interp.budget, constraints: interp.constraints }, poolKey);
-  const judgeParsed = scoped(base, { aesthetic: interp.aesthetic, budget: interp.budget, constraints: interp.constraints }, poolKey);
+      ? scoped(base, { aesthetic: searchAesthetic(base.aesthetic) }, poolKey)
+      : scoped(
+          base,
+          {
+            aesthetic: searchAesthetic(interp.aesthetic),
+            budget: interp.budget,
+            constraints: interpConstraints,
+          },
+          poolKey
+        );
+
+  // The judge keeps the model's reading, minus those constraints and minus its
+  // BUDGET on a direction swap: "cheaper" makes the model emit budget "cheap",
+  // which `parseBudget` turns into a flat ≤$$ CAP. That is what made "cheaper"
+  // a ceiling instead of a decrease — on a $$$$ stop it hid the genuinely
+  // cheaper $$$ options entirely. The relative rule below is the price rule for
+  // these swaps; the plan's OWN stated budget still applies.
+  const judgeParsed = scoped(
+    base,
+    {
+      aesthetic: interp.aesthetic,
+      budget: priceDirection ? base.budget : interp.budget,
+      constraints: interpConstraints,
+    },
+    poolKey
+  );
 
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const rawPools = await deps.searchPools(searchParsed, [poolKey]);
@@ -1089,6 +1178,50 @@ async function venueSwap(
       };
     }
     candidates = closer;
+  }
+
+  // LAYER 1 (the guarantee): CODE-side price ranking against the CURRENT
+  // stop's own priceLevel — the same shape as the distance block above, for
+  // the same reason. Only candidates STRICTLY in the requested direction
+  // survive; when none do the swap refuses honestly instead of shuffling in a
+  // same-tier venue, which is precisely what made repeated "fancier" swaps
+  // ping-pong A→B→A. The model then judges FIT among options already proven
+  // to move the right way — it never compares prices.
+  if (priceDirection) {
+    const { ranked, unpriced, bestEffort } = rankByPriceDirection(
+      candidates,
+      target.priceLevel,
+      priceDirection
+    );
+    // Keep-on-missing: a venue Places has no price for is never DROPPED for
+    // that. It is a LAST RESORT — used only when nothing is known to move the
+    // right way, because "unknown" must not outrank "proven".
+    const eligible = ranked.length > 0 ? ranked : unpriced;
+    // Logged on BOTH outcomes, and before the refusal returns: a refusal is
+    // the MORE interesting event here (it is the one a user notices), and
+    // "how big was the pool we ranked" is the first thing to look at when a
+    // direction swap refuses more than it should.
+    logEvent("info", "swap_price_direction", {
+      direction: priceDirection,
+      currentPriceLevel: target.priceLevel ?? null,
+      // no price on the CURRENT venue → nothing to compare against, so this
+      // hands back the most extreme priced candidate rather than refusing
+      bestEffort,
+      candidates: candidates.length,
+      rankedCount: ranked.length,
+      unpricedCount: unpriced.length,
+      outcome: eligible.length === 0 ? "refused" : ranked.length === 0 ? "unpriced_fallback" : "ranked",
+    });
+    if (eligible.length === 0) {
+      return {
+        swapped: false,
+        reason:
+          priceDirection === "up"
+            ? `Couldn't find a ${poolKey} pricier than ${target.name} — it's already the priciest one I can find nearby.`
+            : `Couldn't find a ${poolKey} cheaper than ${target.name} — it's already the cheapest one I can find nearby.`,
+      };
+    }
+    candidates = eligible;
   }
 
   const selections = await deps.selectVenues(judgeParsed, { [poolKey]: candidates });

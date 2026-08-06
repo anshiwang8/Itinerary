@@ -27,9 +27,13 @@ test("price refresh: a 'cheaper' swap moves the dollar signs $$$ → $$ @mock", 
   await swapOn(page, "Velvet Fig", "cheaper");
   const corner = stripCard(page, "The Corner Table");
   await expect(corner).toBeVisible({ timeout: 15_000 });
-  // the indicator must reflect the SWAPPED venue's price — it rides on the
-  // stop itself, not the (stale) plan-time pools lookup
+  // Two guards in one. (1) The indicator must reflect the SWAPPED venue's
+  // price — it rides on the stop itself, not the (stale) plan-time pools
+  // lookup. (2) "cheaper" is a DIRECTION relative to the current venue, so
+  // the result must be STRICTLY fewer dollar signs than the $$$ it replaced —
+  // not merely "some other venue under a flat ≤$$ cap".
   await expect(corner.locator(".lstrip__price")).toHaveText("$$");
+  await expect(stripCard(page, "Velvet Fig")).toHaveCount(0);
   await expectStripMatchesPin(page, "The Corner Table");
   await expectStripMatchesPin(page, "Ten O'Clock Curfew");
 });
@@ -70,25 +74,52 @@ test("swap input accepts spaces (real keystrokes) @mock", async ({ page }) => {
   await expect(input).toHaveValue("a bit cheaper");
 });
 
-test("repeated swaps on one stop: cheaper → fancier → cheaper @mock", async ({ page }) => {
+test("price direction: repeated swaps move strictly, and refuse rather than ping-pong @mock", async ({ page }) => {
+  // The dinner fixtures top out at $$$ (Velvet Fig AND Brass and Bone), with
+  // The Corner Table at $$ and two $ spots. So "fancier" on Velvet Fig has
+  // genuinely nowhere UP to go — and the same-tier Brass and Bone is the trap:
+  // the old behaviour handed back "any candidate not currently in the plan",
+  // and a gate that allowed same-tier would hand back Brass and Bone.
   await planEvening(page, "dinner and drinks");
+  await expect(stripCard(page, "Velvet Fig").locator(".lstrip__price")).toHaveText("$$$");
 
+  // 1. "fancier" at the top of the pool REFUSES honestly. Before the fix this
+  //    returned The Corner Table — a CHEAPER venue, for a "fancier" request.
+  await swapOn(page, "Velvet Fig", "fancier");
+  await expect(page.locator(".banner--show")).toContainText(/already the priciest/i, {
+    timeout: 15_000,
+  });
+  await expect(stripCard(page, "Velvet Fig").locator(".lstrip__price")).toHaveText("$$$");
+  await expect(stripCard(page, "The Corner Table")).toHaveCount(0);
+  // the same-tier trap: a $$$ sibling is NOT "fancier" than a $$$ venue
+  await expect(stripCard(page, "Brass and Bone")).toHaveCount(0);
+  await expectStripMatchesPin(page, "Velvet Fig");
+
+  // 2. "cheaper" moves STRICTLY down.
   await swapOn(page, "Velvet Fig", "cheaper");
   await expect(stripCard(page, "The Corner Table")).toBeVisible({ timeout: 15_000 });
   await expect(stripCard(page, "The Corner Table").locator(".lstrip__price")).toHaveText("$$");
   await expectStripMatchesPin(page, "The Corner Table");
 
-  // "fancier" re-filters with no budget cap → top-rated Velvet Fig returns
-  // (the previous venue is excluded, the one before that is fair game)
+  // 3. "fancier" moves STRICTLY up — $$$ is the only tier above $$, so
+  //    returning to Velvet Fig here is the CORRECT answer, not a bounce.
   await swapOn(page, "The Corner Table", "fancier");
   await expect(stripCard(page, "Velvet Fig")).toBeVisible({ timeout: 15_000 });
   await expect(stripCard(page, "Velvet Fig").locator(".lstrip__price")).toHaveText("$$$");
   await expectStripMatchesPin(page, "Velvet Fig");
 
-  await swapOn(page, "Velvet Fig", "cheaper");
-  await expect(stripCard(page, "The Corner Table")).toBeVisible({ timeout: 15_000 });
-  await expect(stripCard(page, "The Corner Table").locator(".lstrip__price")).toHaveText("$$");
-  await expectStripMatchesPin(page, "The Corner Table");
+  // 4. THE PING-PONG PIN: "fancier" twice in a row must never walk back down.
+  //    The old engine returned The Corner Table again here, cycling A→B→A
+  //    forever; the direction rule refuses instead and keeps the venue.
+  await swapOn(page, "Velvet Fig", "fancier");
+  await expect(page.locator(".banner--show")).toContainText(/already the priciest/i, {
+    timeout: 15_000,
+  });
+  await expect(stripCard(page, "Velvet Fig").locator(".lstrip__price")).toHaveText("$$$");
+  await expect(stripCard(page, "The Corner Table")).toHaveCount(0);
+  // the same-tier trap: a $$$ sibling is NOT "fancier" than a $$$ venue
+  await expect(stripCard(page, "Brass and Bone")).toHaveCount(0);
+  await expectStripMatchesPin(page, "Velvet Fig");
   await expectStripMatchesPin(page, "Ten O'Clock Curfew");
 });
 

@@ -79,6 +79,28 @@ function mkVenue(id: string, name = `New ${id}`): Place {
   };
 }
 
+// ── price-direction fixtures ──
+const FREE = "PRICE_LEVEL_FREE";
+const CHEAP = "PRICE_LEVEL_INEXPENSIVE";
+const MID = "PRICE_LEVEL_MODERATE";
+const DEAR = "PRICE_LEVEL_EXPENSIVE";
+const DEAREST = "PRICE_LEVEL_VERY_EXPENSIVE";
+
+/** a candidate at a known tier; `undefined` is the no-price-data case, which
+ *  keep-on-missing says must never be dropped for lacking a price */
+function priced(id: string, priceLevel: string | undefined): Place {
+  const base = mkVenue(id);
+  return priceLevel ? { ...base, priceLevel } : base;
+}
+
+/** the standard itinerary with the BAR stop (index 1) at a known tier — the
+ *  swap target every price case below aims at */
+function pricedItinerary(priceLevel: string) {
+  const it = mkItinerary();
+  it.stops[1].priceLevel = priceLevel;
+  return it;
+}
+
 interface Opts {
   intent?: "venue" | "time" | "constraint" | "duration";
   time?: TimeShift;
@@ -91,8 +113,16 @@ interface Opts {
   legMin?: number;
   /** ids treated as closed by the availability seam (forces adapt) */
   unusableIds?: string[];
-  onSearch?: (parsed: { constraints: string[]; category_signals: string[]; budget: string | null }) => void;
+  onSearch?: (parsed: {
+    constraints: string[];
+    category_signals: string[];
+    budget: string | null;
+    aesthetic: string;
+  }) => void;
   onSelect?: (pools: Record<string, Place[]>) => void;
+  /** the parse the SELECTOR is judged against (budget/constraints/aesthetic
+   *  after the engine's own corrections) — distinct from the SEARCH parse */
+  onJudge?: (parsed: { constraints: string[]; budget: string | null; aesthetic: string }) => void;
   /** forecast handed to the swap engine (§7.6); default null = no gate */
   weather?: WeatherHour[] | null;
 }
@@ -146,6 +176,7 @@ function mkDeps(opts: Opts = {}): SwapDeps {
       return { [key]: opts.pool ?? [mkVenue(`${key}_fresh`)] };
     },
     selectVenues: async (_parsed, pools) => {
+      opts.onJudge?.(_parsed as never);
       opts.onSelect?.(pools);
       return Object.entries(pools).map(([category, arr]) =>
         arr.length
@@ -1315,6 +1346,289 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(res.path, "time");
       assert.strictEqual(it.stops[2].start_time, T(23, 20));
       assert.strictEqual(it.stops[2].id, "s1"); // kept, not adapted
+    },
+  ],
+
+  // ── PRICE DIRECTION ("fancier" / "cheaper") ──────────────────────────────
+  // Layer 1 is the guarantee: strictly-in-direction versus the CURRENT stop's
+  // own priceLevel, or an honest refusal. Before this, every one of these
+  // refinements was a no-op that returned "any candidate not already in the
+  // plan" — which ping-pongs A→B→A between same-tier venues.
+  [
+    "PRICE: 'fancier' offers ONLY strictly pricier candidates, priciest first",
+    async () => {
+      const it = pricedItinerary(MID);
+      let offered: Place[] = [];
+      const res = await swapStop(it, 1, "somewhere fancier", new Date(T(18, 0)), mkDeps({
+        pool: [priced("cheap", CHEAP), priced("same", MID), priced("dear", DEAR), priced("dearest", DEAREST)],
+        onSelect: (pools) => { offered = pools["bar"] ?? []; },
+        legMin: 10,
+      }));
+      assert.ok(res.swapped, res.swapped ? "" : res.reason);
+      // cheaper and SAME-TIER never even reach the model — code decided this
+      assert.deepStrictEqual(offered.map((p) => p.id), ["dearest", "dear"]);
+      assert.strictEqual(it.stops[1].id, "dearest");
+      assert.strictEqual(it.stops[1].priceLevel, DEAREST);
+    },
+  ],
+  [
+    "PRICE: 'fancier' with nothing pricier REFUSES honestly and changes nothing",
+    async () => {
+      const it = pricedItinerary(DEAREST);
+      const res = await swapStop(it, 1, "fancier", new Date(T(18, 0)), mkDeps({
+        pool: [priced("cheap", CHEAP), priced("dear", DEAR)],
+        legMin: 10,
+      }));
+      assert.ok(!res.swapped, "a same-tier-or-lower pool must not produce a swap");
+      if (res.swapped) return;
+      assert.match(res.reason, /already the priciest/i);
+      assert.match(res.reason, /Bar Spot/);
+      // plan-then-commit: the refusal left the itinerary untouched
+      assert.strictEqual(it.stops[1].id, "b1");
+      assert.strictEqual(it.stops[1].start_time, T(21, 0));
+    },
+  ],
+  [
+    "PRICE: THE PING-PONG — a second 'fancier' refuses instead of returning the original",
+    async () => {
+      // the reported bug, pinned: swap 1 moved $$ → $$$; swap 2 used to hand
+      // back the $$ venue purely because it was no longer in the plan.
+      const it = pricedItinerary(MID);
+      const pool = [priced("mid", MID), priced("dear", DEAR)];
+      const first = await swapStop(it, 1, "fancier", new Date(T(18, 0)), mkDeps({ pool, legMin: 10 }));
+      assert.ok(first.swapped, first.swapped ? "" : first.reason);
+      assert.strictEqual(it.stops[1].id, "dear");
+      assert.strictEqual(it.stops[1].priceLevel, DEAR);
+
+      const second = await swapStop(it, 1, "fancier", new Date(T(18, 0)), mkDeps({ pool, legMin: 10 }));
+      assert.ok(!second.swapped, "the second 'fancier' must not walk back down");
+      assert.strictEqual(it.stops[1].id, "dear", "ping-pong: returned to the original");
+      assert.strictEqual(it.stops[1].priceLevel, DEAR);
+    },
+  ],
+  [
+    "PRICE: 'cheaper' is relative to the current venue, NOT a flat ≤$$ cap",
+    async () => {
+      // the old behaviour: the model emits budget "cheap", parseBudget makes
+      // it a hard ≤MODERATE ceiling, and the genuinely-cheaper $$$ option is
+      // dropped by the objective filter before anything can rank it.
+      const it = pricedItinerary(DEAREST);
+      let offered: Place[] = [];
+      const res = await swapStop(it, 1, "somewhere cheaper", new Date(T(18, 0)), mkDeps({
+        pool: [priced("dear", DEAR)],
+        onSelect: (pools) => { offered = pools["bar"] ?? []; },
+        legMin: 10,
+      }));
+      assert.ok(res.swapped, res.swapped ? "" : res.reason);
+      assert.deepStrictEqual(offered.map((p) => p.id), ["dear"]);
+      assert.strictEqual(it.stops[1].priceLevel, DEAR);
+    },
+  ],
+  [
+    "PRICE: 'cheaper' offers ONLY strictly cheaper candidates, cheapest first",
+    async () => {
+      const it = pricedItinerary(MID);
+      let offered: Place[] = [];
+      const res = await swapStop(it, 1, "cheaper", new Date(T(18, 0)), mkDeps({
+        pool: [priced("dear", DEAR), priced("same", MID), priced("cheap", CHEAP), priced("free", FREE)],
+        onSelect: (pools) => { offered = pools["bar"] ?? []; },
+        legMin: 10,
+      }));
+      assert.ok(res.swapped, res.swapped ? "" : res.reason);
+      assert.deepStrictEqual(offered.map((p) => p.id), ["free", "cheap"]);
+      assert.strictEqual(it.stops[1].id, "free");
+    },
+  ],
+  [
+    "PRICE: no price on the CURRENT venue is BEST EFFORT, never a refusal",
+    async () => {
+      // mkItinerary's stops carry no priceLevel at all — the ordinary case for
+      // a non-food category. Refusing here would be refusing BECAUSE of
+      // missing data, which keep-on-missing forbids.
+      const it = mkItinerary();
+      assert.strictEqual(it.stops[1].priceLevel, undefined);
+      const res = await swapStop(it, 1, "fancier", new Date(T(18, 0)), mkDeps({
+        pool: [priced("cheap", CHEAP), priced("dearest", DEAREST), priced("mid", MID)],
+        legMin: 10,
+      }));
+      assert.ok(res.swapped, res.swapped ? "" : res.reason);
+      assert.strictEqual(it.stops[1].id, "dearest", "best effort = the priciest available");
+
+      const down = mkItinerary();
+      const cheaper = await swapStop(down, 1, "cheaper", new Date(T(18, 0)), mkDeps({
+        pool: [priced("cheap", CHEAP), priced("dearest", DEAREST), priced("mid", MID)],
+        legMin: 10,
+      }));
+      assert.ok(cheaper.swapped, cheaper.swapped ? "" : cheaper.reason);
+      assert.strictEqual(down.stops[1].id, "cheap");
+    },
+  ],
+  [
+    "PRICE: KEEP-ON-MISSING — an unpriced candidate is a last resort, never dropped",
+    async () => {
+      // a venue Places has no price for cannot be shown to move the right
+      // way, so a PROVEN one outranks it...
+      const withProven = pricedItinerary(MID);
+      let offered: Place[] = [];
+      const res = await swapStop(withProven, 1, "fancier", new Date(T(18, 0)), mkDeps({
+        pool: [priced("noprice", undefined), priced("dear", DEAR)],
+        onSelect: (pools) => { offered = pools["bar"] ?? []; },
+        legMin: 10,
+      }));
+      assert.ok(res.swapped, res.swapped ? "" : res.reason);
+      assert.deepStrictEqual(offered.map((p) => p.id), ["dear"]);
+
+      // ...but when NOTHING is proven, the unpriced candidates are used
+      // rather than the swap refusing over absent data
+      const noProven = pricedItinerary(DEAREST);
+      let fallbackOffered: Place[] = [];
+      const best = await swapStop(noProven, 1, "fancier", new Date(T(18, 0)), mkDeps({
+        pool: [priced("noprice", undefined), priced("dear", DEAR)],
+        onSelect: (pools) => { fallbackOffered = pools["bar"] ?? []; },
+        legMin: 10,
+      }));
+      assert.ok(best.swapped, best.swapped ? "" : best.reason);
+      assert.deepStrictEqual(fallbackOffered.map((p) => p.id), ["noprice"]);
+      assert.strictEqual(noProven.stops[1].id, "noprice");
+    },
+  ],
+  [
+    "PRICE: the SEARCH is broadened toward the direction (layer 2 feeds layer 1)",
+    async () => {
+      const up = pricedItinerary(MID);
+      let upQuery: { aesthetic: string } | null = null;
+      await swapStop(up, 1, "fancier", new Date(T(18, 0)), mkDeps({
+        pool: [priced("dear", DEAR)],
+        onSearch: (parsed) => { upQuery = parsed; },
+        legMin: 10,
+      }));
+      // buildQuery puts `aesthetic` into the Places text query verbatim
+      assert.match(upQuery!.aesthetic, /upscale/);
+      // ...without discarding the plan's own aesthetic
+      assert.match(upQuery!.aesthetic, /lively/);
+
+      const down = pricedItinerary(MID);
+      let downQuery: { aesthetic: string } | null = null;
+      await swapStop(down, 1, "cheaper", new Date(T(18, 0)), mkDeps({
+        pool: [priced("cheap", CHEAP)],
+        onSearch: (parsed) => { downQuery = parsed; },
+        legMin: 10,
+      }));
+      assert.match(downQuery!.aesthetic, /cheap casual/);
+      assert.match(downQuery!.aesthetic, /lively/);
+    },
+  ],
+  [
+    "PRICE: a plain swap with NO price word takes the untouched path",
+    async () => {
+      const it = pricedItinerary(MID);
+      let offered: Place[] = [];
+      let query: { aesthetic: string } | null = null;
+      const res = await swapStop(it, 1, "don't like it", new Date(T(18, 0)), mkDeps({
+        pool: [priced("cheap", CHEAP), priced("same", MID), priced("dear", DEAR)],
+        onSelect: (pools) => { offered = pools["bar"] ?? []; },
+        onSearch: (parsed) => { query = parsed; },
+        legMin: 10,
+      }));
+      assert.ok(res.swapped, res.swapped ? "" : res.reason);
+      // no narrowing at all — every candidate still reaches the model, in
+      // pool order, exactly as before this feature existed
+      assert.deepStrictEqual(offered.map((p) => p.id), ["cheap", "same", "dear"]);
+      // ...and the search query is byte-identical to the plan's own
+      assert.strictEqual(query!.aesthetic, "lively");
+    },
+  ],
+  [
+    "PRICE: a price word LEAKED into constraints is stripped before the judge",
+    async () => {
+      // constraintEvidence only emits six provider booleans, so "fancier" as
+      // a constraint makes placeMeetsAllConstraints false for EVERY venue —
+      // a permanent unmet_constraint refusal. The prompt forbids it; this is
+      // the code-side strip, because a leak has been seen in this codebase.
+      const it = pricedItinerary(MID);
+      let judged: { constraints: string[]; budget: string | null } | null = null;
+      const res = await swapStop(it, 1, "fancier", new Date(T(18, 0)), mkDeps({
+        pool: [priced("dear", DEAR)],
+        constraints: ["fancier", "upscale", "patio"],
+        onJudge: (parsed) => { judged = parsed; },
+        legMin: 10,
+      }));
+      assert.ok(res.swapped, res.swapped ? "" : res.reason);
+      // the real feature constraint survives; the price words do not
+      assert.deepStrictEqual(judged!.constraints, ["patio"]);
+      // and the model's budget echo never becomes a cap on a direction swap
+      assert.strictEqual(judged!.budget, null);
+    },
+  ],
+  [
+    "PRICE: a leaked price constraint is stripped from the SEARCH QUERY too",
+    async () => {
+      // Found live, not by unit testing: "somewhere nicer" came back as
+      // intent=constraint with constraints ["nicer"], and buildQuery splices
+      // constraints into the Places text query verbatim — so the query became
+      // "upscale nicer ramen Toronto" and the results collapsed back to
+      // mid-tier ramen. Stripping only the JUDGE left the SEARCH poisoned.
+      const it = pricedItinerary(MID);
+      let searched: { constraints: string[]; aesthetic: string } | null = null;
+      const res = await swapStop(it, 1, "somewhere nicer", new Date(T(18, 0)), mkDeps({
+        intent: "constraint",
+        path: "research",
+        constraints: ["nicer", "patio"],
+        pool: [priced("dear", DEAR)],
+        onSearch: (parsed) => { searched = parsed; },
+        legMin: 10,
+      }));
+      assert.ok(res.swapped, res.swapped ? "" : res.reason);
+      assert.deepStrictEqual(searched!.constraints, ["patio"], "price word reached the query");
+      assert.match(searched!.aesthetic, /upscale/);
+    },
+  ],
+  [
+    "PRICE: the interpret floor keeps a price phrase out of constraints and off the clock",
+    async () => {
+      const realFetch = globalThis.fetch;
+      const parsed = {
+        time_window: "evening", stop_count: null, aesthetic: "lively",
+        category_signals: ["bar"], group_context: "date",
+        budget: null, constraints: [], location: "Ossington",
+      };
+      try {
+        // (a) Groq unavailable → localFallback. A price refinement must NOT
+        // be appended to constraints there, or a busy model turns every
+        // price swap into an unmet_constraint refusal.
+        globalThis.fetch = (async () =>
+          new Response("upstream down", { status: 500 })) as typeof fetch;
+        const down = await interpretRefinement("k", parsed, "bar", T(21, 0), "fancier");
+        assert.strictEqual(down.intent, "venue");
+        assert.deepStrictEqual(down.constraints, []);
+        // a NON-price refinement still becomes a constraint, exactly as before
+        const other = await interpretRefinement("k", parsed, "bar", T(21, 0), "somewhere with a patio");
+        assert.deepStrictEqual(other.constraints, ["somewhere with a patio"]);
+
+        // (b) the model misclassifies "fancier" as a TIME request → the
+        // deterministic floor forces it back to a venue swap, so a price
+        // word can never move the stop's clock
+        globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+          if (String(url).includes("api.groq.com")) {
+            return new Response(
+              JSON.stringify({
+                choices: [{ message: { content: JSON.stringify({
+                  intent: "time", path: "refilter", category: "bar",
+                  aesthetic: "lively", budget: null, constraints: [],
+                  time: { mode: "absolute", targetTime: "23:00" }, duration: null,
+                }) } }],
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          return realFetch(url as never, init);
+        }) as typeof fetch;
+        const forced = await interpretRefinement("k", parsed, "bar", T(21, 0), "fancier");
+        assert.strictEqual(forced.intent, "venue");
+        assert.strictEqual(forced.time, null);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
     },
   ],
 ];

@@ -39,6 +39,18 @@ straight map polyline.
 - Dinner pick is **Velvet Fig** (4.8, $$$) — a "cheaper" swap lands on
   **The Corner Table** (4.5, $$), and the strip's dollar signs must go
   $$$ → $$ (the price rides on the stop, not a pools lookup).
+- **Brass and Bone** (4.0, $$$, 17–23) is the dinner pool's SAME-TIER
+  sibling for Velvet Fig, and exists only for price-direction tests: a
+  "fancier" swap off Velvet Fig must NOT return it, because $$$ is not
+  fancier than $$$. Without a same-price sibling the pool just runs out
+  and a broken strictness gate looks identical to a working one. It is
+  the lowest-rated dinner fixture and shares Velvet Fig's hours, so it
+  never displaces a pick another spec pins.
+- **Price direction is code, not the model**: "fancier"/"cheaper" is
+  parsed from the RAW refinement and ranked against the CURRENT stop's
+  own `priceLevel`. Only strictly-higher/lower candidates reach the
+  selector; when none exist the swap REFUSES ("already the priciest one I
+  can find nearby") rather than shuffling in a same-tier venue.
 - Drinks pick is **Ten O'Clock Curfew** (4.7, closes 22:00) — pushing
   drinks past 10 PM fires the ADAPT path (→ The Standing Room, open to 2).
   **Night Owl** (4.1, NO listed hours) is the bar pool's any-hour

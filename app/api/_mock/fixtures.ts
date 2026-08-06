@@ -109,6 +109,15 @@ const DINNER: Place[] = [
   // closes at 8 PM → late dinners drop it / adapt away from it
   venue("fx_dinner_early", "Early Bird Diner", 43.6468, -79.4186, 4.1, "PRICE_LEVEL_INEXPENSIVE", 8, 20,
     "Sunny all-day diner that packs it in early."),
+  // SAME TIER as Velvet Fig ($$$) and nothing else about it is special. It
+  // exists so a "fancier" swap off Velvet Fig has a same-price sibling to
+  // wrongly return — without one, a price-direction bug is invisible to e2e
+  // because the pool simply runs out. Deliberately the LOWEST-rated dinner
+  // fixture and on Velvet Fig's own 17–23 hours, so it can never displace a
+  // pick another spec pins (rating sorts put it last; the 3 PM recovery
+  // scenario still sees it closed).
+  venue("fx_dinner_brass", "Brass and Bone", 43.6483, -79.4198, 4.0, "PRICE_LEVEL_EXPENSIVE", 17, 23,
+    "Chophouse with a long marble bar and a longer wine list."),
 ];
 const BAR: Place[] = [
   // top-rated but closes 10 PM → pushing drinks later fires the adapt path
