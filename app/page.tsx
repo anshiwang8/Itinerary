@@ -63,6 +63,13 @@ import { userInitials, userLabel } from "./lib/authUser";
 import LoginScreen from "./LoginScreen";
 import StopItineraryDialog from "./StopItineraryDialog";
 import HistoryPanel from "./HistoryPanel";
+import TasteSurvey from "./TasteSurvey";
+import {
+  profileGateState,
+  shouldShowSurvey,
+  type ProfileGateState,
+  type TasteAnswers,
+} from "./lib/tastePreferences";
 import { parseHistoryResponse, type HistoryResponseView } from "./lib/historyView";
 import type { StopChoice } from "./api/itinerary/stopPlan";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
@@ -315,6 +322,87 @@ export default function Home() {
     });
     return parseHistoryResponse(payload);
   }, [authHeaders]);
+
+  // ── Stage 3A: the onboarding taste survey (CAPTURE ONLY) ──
+  // Asked once, of a brand-new signed-in user. Nothing downstream reads the
+  // answers — no planner, no search, no selection. Spending them is 3B.
+  const [profileGate, setProfileGate] = useState<ProfileGateState>("unknown");
+  const [surveyOpen, setSurveyOpen] = useState(false);
+  // The survey is offered ONCE per session, whatever the profile write does.
+  // Without this, the gap between closing the survey and the write landing is a
+  // window in which the effect below would mount it a second time.
+  const surveyOffered = useRef(false);
+
+  // Does this person already have a profile? Asked once, and only of a REAL
+  // account: a guest's profile is never written, so asking about one is a round
+  // trip with a known answer — the same call HistoryPanel declines to make.
+  useEffect(() => {
+    if (!signedInForReal) return;
+    if (profileGate !== "unknown") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const payload = await fetchJson<unknown>("/api/profile", {
+          headers: await authHeaders(),
+        });
+        if (!cancelled) setProfileGate(profileGateState(payload).state);
+      } catch {
+        // The route answers 200 even with nothing to say, so reaching here
+        // means the request never landed. That is a FAILED read, and the gate
+        // treats it as "do not ask" — showing the survey on a failed read
+        // would re-ask a returning user and then overwrite real answers.
+        if (!cancelled) setProfileGate("failed");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [signedInForReal, profileGate, authHeaders]);
+
+  // The decision itself lives in `shouldShowSurvey`, not here: guest, returning
+  // user, mid-read and failed-read are four distinct "no"s, and they are worth
+  // testing without a browser.
+  useEffect(() => {
+    const show = shouldShowSurvey({
+      authStatus: auth.status,
+      isAnonymous: auth.user ? auth.user.isAnonymous : null,
+      profile: profileGate,
+      alreadyShown: surveyOffered.current,
+    });
+    if (!show) return;
+    surveyOffered.current = true;
+    setSurveyOpen(true);
+  }, [auth.status, auth.user, profileGate]);
+
+  /** File the survey result — answers on submit, an empty set on skip. BOTH
+   *  write, because a skip that recorded nothing would mean "ask me again every
+   *  login". Fire-and-forget: the route answers 200 even when there is nowhere
+   *  to write (guest, no Firebase), so there is no failure for a screen that is
+   *  already closing to report. */
+  const saveTasteProfile = useCallback(
+    (answers: TasteAnswers, completed: boolean) => {
+      // Locally, the profile now exists. Set before the request so a re-render
+      // during the write cannot re-open the survey.
+      setProfileGate("present");
+      void (async () => {
+        try {
+          await fetchJson<unknown>("/api/profile", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...((await authHeaders()) ?? {}),
+            },
+            body: JSON.stringify({ answers, completed }),
+          });
+        } catch {
+          // Swallowed on purpose. The user has finished with this screen; an
+          // error toast about a preference that failed to save would be the
+          // most annoying possible thing to show next.
+        }
+      })();
+    },
+    [authHeaders]
+  );
 
   const [prompt, setPrompt] = useState("");
   // plain query inputs — NOT location services (deliberately deferred).
@@ -2319,6 +2407,19 @@ export default function Home() {
           />
         )}
         {loginOpen && <LoginScreen auth={auth} onDismiss={() => setLoginOpen(false)} />}
+        {/* Stage 3A. Mounted here beside the other overlays, and gated by
+            `shouldShowSurvey` rather than by anything in this JSX — sign-in is
+            only reachable from this landing screen, so this is the only place
+            a brand-new account can appear. `.taste` is in the
+            `.empty > *:not(…)` exclusion list; without that it would be
+            demoted to position: relative and stop covering the page. */}
+        {surveyOpen && (
+          <TasteSurvey
+            onSubmit={(answers) => saveTasteProfile(answers, true)}
+            onSkip={() => saveTasteProfile({ style: [], foods: [], dietary: [] }, false)}
+            onClose={() => setSurveyOpen(false)}
+          />
+        )}
         <h1 className="empty__title">Itinerary</h1>
         <div className="empty__sub">life moves simpler.</div>
         {/* ONE pill, three labelled sections. Exactly the same three inputs,

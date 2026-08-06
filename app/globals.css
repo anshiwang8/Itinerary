@@ -117,7 +117,7 @@ button { font-family: var(--grot); cursor: pointer; }
    This selector outranks a plain `.hist`/`.auth` rule, so a new full-screen
    overlay mounted here MUST be added to the exclusions or it is quietly
    demoted to `position: relative` and stops covering the page. */
-.empty > *:not(.empty__glow):not(.empty__mark):not(.acct):not(.auth):not(.hist) { position: relative; z-index: 2; }
+.empty > *:not(.empty__glow):not(.empty__mark):not(.acct):not(.auth):not(.hist):not(.taste) { position: relative; z-index: 2; }
 
 .empty__mark {
   position: absolute; top: 26px; left: 30px; z-index: 3;
@@ -1019,6 +1019,148 @@ button { font-family: var(--grot); cursor: pointer; }
   font-family: var(--grot); font-size: 12.5px; color: var(--ink-soft);
 }
 
+/* ────────────────  Onboarding taste survey (Stage 3A)  ────────────────
+   NOTE ON COLOUR: --live (acid green) means "happening now / just changed".
+   A stored preference is neither, and the confirmation's celebration is a
+   send-off, not a live event — so the whole screen, sparks included, stays
+   on the teal accent. Same overlay geometry as .auth and .hist. */
+
+.taste {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(30, 58, 76, 0.42);
+  backdrop-filter: blur(3px);
+  animation: auth-in 0.18s ease-out;
+}
+.taste__card {
+  width: min(100%, 540px); max-height: min(84vh, 720px);
+  display: flex; flex-direction: column;
+  background: var(--card); border-radius: 20px;
+  box-shadow: var(--shadow-lift);
+  animation: auth-card-in 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
+  overflow: hidden;
+}
+
+.taste__head {
+  padding: 28px 28px 18px;
+  border-bottom: 1px solid var(--rule);
+  text-align: center;
+}
+.taste__mark {
+  font-family: var(--grot); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.16em; text-transform: uppercase; color: var(--label);
+  margin-bottom: 10px;
+}
+.taste__title {
+  font-family: var(--disp); font-weight: 600; font-size: 27px;
+  letter-spacing: -0.02em; color: var(--ink); line-height: 1.15;
+}
+.taste__sub {
+  font-family: var(--disp); font-style: italic; font-weight: 400;
+  font-size: 14.5px; line-height: 1.5; color: var(--ink-soft);
+  margin-top: 8px;
+}
+
+.taste__body {
+  padding: 20px 28px 8px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.taste__q { border: 0; margin-bottom: 20px; }
+.taste__qLabel {
+  font-family: var(--grot); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.16em; text-transform: uppercase; color: var(--label);
+  margin-bottom: 11px; padding: 0;
+}
+.taste__opts { display: flex; flex-wrap: wrap; gap: 8px; }
+/* A multi-select chip: unselected is a quiet outline, selected fills with the
+   accent. Nothing here borrows the reserved acid green. */
+.taste__opt {
+  min-height: 38px; padding: 8px 15px;
+  background: var(--card-2); color: var(--ink);
+  border: 1px solid var(--rule); border-radius: 999px;
+  font-family: var(--grot); font-size: 13.5px; font-weight: 500;
+  text-align: left;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+.taste__opt:hover { background: var(--accent-soft); border-color: var(--accent); }
+.taste__opt--on {
+  background: var(--accent); color: #FFFFFF; border-color: var(--accent);
+}
+.taste__opt--on:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
+
+.taste__foot {
+  display: flex; align-items: center; gap: 12px;
+  padding: 16px 28px 24px;
+  border-top: 1px solid var(--rule);
+}
+.taste__skip {
+  min-height: 44px; padding: 10px 18px;
+  background: transparent; color: var(--accent-deep);
+  border: 1px solid var(--rule-strong); border-radius: 12px;
+  font-family: var(--grot); font-size: 14px; font-weight: 500;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+.taste__skip:hover { background: var(--accent-soft); border-color: var(--accent); }
+.taste__save {
+  flex: 1; min-height: 44px; padding: 10px 22px;
+  background: var(--accent); color: #FFFFFF;
+  border: 1px solid var(--accent); border-radius: 12px;
+  font-family: var(--grot); font-size: 14px; font-weight: 500;
+  transition: background 0.16s ease, transform 0.16s ease;
+}
+.taste__save:hover { background: var(--accent-deep); transform: translateY(-1px); }
+.taste__save:active { transform: translateY(0); }
+
+/* the send-off — a tick, three sparks, and nothing to press */
+.taste__card--done {
+  align-items: center; text-align: center;
+  padding: 44px 32px 40px;
+}
+.taste__burst {
+  position: relative;
+  width: 66px; height: 66px; margin-bottom: 20px;
+}
+.taste__check {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent-deep);
+  border: 1px solid var(--accent); border-radius: 50%;
+  font-size: 29px; line-height: 1;
+  animation: taste-pop 0.34s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+.taste__spark {
+  position: absolute; top: 50%; left: 50%;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  opacity: 0;
+  animation: taste-spark 0.72s ease-out forwards;
+}
+.taste__spark--a { animation-delay: 0.10s; --tx: -46px; --ty: -30px; }
+.taste__spark--b { animation-delay: 0.16s; --tx: 44px; --ty: -34px; }
+.taste__spark--c { animation-delay: 0.22s; --tx: 6px; --ty: -52px; }
+.taste__done {
+  font-family: var(--disp); font-weight: 600; font-size: 25px;
+  letter-spacing: -0.02em; color: var(--ink); line-height: 1.2;
+}
+.taste__doneSub {
+  font-family: var(--grot); font-size: 13px; line-height: 1.55;
+  color: var(--ink-soft); margin-top: 9px;
+}
+@keyframes taste-pop {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes taste-spark {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+  35% { opacity: 1; }
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--tx)), calc(-50% + var(--ty))) scale(0.9);
+  }
+}
+
 @media (max-width: 560px) {
   .empty {
     justify-content: flex-start; overflow-y: auto;
@@ -1087,4 +1229,11 @@ button { font-family: var(--grot); cursor: pointer; }
     transition: none !important;
   }
   .hist__row:hover, .hist__cta:hover { transform: none !important; }
+  /* The confirmation still SAYS "you're all set" and still auto-closes — only
+     the motion goes. The tick and sparks are decoration on a message that is
+     carried by text. */
+  .taste, .taste__card, .taste__check, .taste__spark { animation: none !important; }
+  .taste__spark { display: none; }
+  .taste__opt, .taste__skip, .taste__save { transition: none !important; }
+  .taste__save:hover { transform: none !important; }
 }
