@@ -14,6 +14,9 @@ import {
 import { fetchProvider, readProviderJson, requireProviderRecord } from "../_shared/provider";
 import { withModelFallback } from "../_shared/modelFallback";
 import { parsePlannerBody } from "../_shared/schemas";
+import { verifyCaller } from "../_shared/caller";
+import { readTasteProfile } from "../profile/profileStore";
+import { toPlannerPreferences, type PlannerPreferences } from "./plannerPreferences";
 import { DEFAULT_ZONE, normalizeZone } from "../../lib/zoneTime";
 import { applyTimeFloors, buildPlannerMessages, planToParsed, planWithModel } from "./planner";
 
@@ -26,6 +29,39 @@ import { applyTimeFloors, buildPlannerMessages, planToParsed, planWithModel } fr
 // the current instant in the plan's timezone. Every rule the planner proposes
 // is checked in planner.ts before it can reach a user.
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+
+/**
+ * Stage 3B — the caller's stored taste, or nothing.
+ *
+ * THE UID IS THE VERIFIED ONE OR THERE ISN'T ONE. This route has never known
+ * about auth before, and what it learns here is deliberately minimal: it reads
+ * a profile for the uid inside a signed token and has no other way to name a
+ * user. There is no `?uid=`, nothing in the body is consulted, and a caller who
+ * sends someone else's uid is simply a caller with no identity.
+ *
+ * ANONYMOUS CALLERS SKIP THE READ, and that is a cost decision rather than a
+ * second safety gate: `/api/profile` refuses the WRITE for a guest, so a
+ * guest's profile is empty by construction and the query has a known answer.
+ * The history reader declines to double-gate for exactly that reason — the
+ * difference here is that this one sits on the planning hot path, and a
+ * Firestore round-trip with a known-empty result is latency every guest (and
+ * every mock-e2e request) would pay for nothing.
+ *
+ * NOTHING HERE CAN FAIL A PLAN. `verifyCaller` returns null for a missing,
+ * unverifiable or uncheckable token, `readTasteProfile` never throws and
+ * reports a broken query as no profile, and `toPlannerPreferences` maps every
+ * one of those to null — which the planner treats as "no preferences were
+ * mentioned". A person's dinner does not fail because a profile lookup did.
+ */
+async function callerPreferences(
+  request: NextRequest,
+  prompt: string
+): Promise<PlannerPreferences | null> {
+  const caller = await verifyCaller(request);
+  if (!caller || caller.isAnonymous) return null;
+  const { profile } = await readTasteProfile(caller.uid);
+  return toPlannerPreferences(profile, prompt);
+}
 
 // the model is a PARAMETER now — withModelFallback picks it from the
 // planner's chain and re-runs this whole call on the next entry if the
@@ -79,9 +115,13 @@ export async function POST(request: NextRequest) {
     const { prompt } = body;
     const timeZone = normalizeZone(body.timeZone ?? DEFAULT_ZONE);
     const now = body.nowISO ? new Date(body.nowISO) : new Date();
+    // Stage 3B. Both passes get it: an answered second pass is still this
+    // person's plan, and the preferences are the same background for it.
+    const preferences = await callerPreferences(request, prompt);
     const messages = buildPlannerMessages(prompt, now, timeZone, {
       city: body.city,
       answers: body.answers,
+      preferences,
     });
 
     // e2e fixture seam — deterministic planner, no Groq call, no key needed.
@@ -122,6 +162,11 @@ export async function POST(request: NextRequest) {
       questions: plan.questions.length,
       timeKind: plan.timeIntent.kind,
       hasEnd: plan.timeIntent.endISO !== null,
+      // WHETHER a profile shaped this plan, never WHICH preferences did. The
+      // owner needs to tell a personalized plan from an ordinary one while
+      // tuning; a log line naming someone's dietary restriction is a different
+      // thing entirely, and this file is not where that gets written down.
+      personalized: preferences !== null,
       ...(problems.length > 0 ? { problems: problems.slice(0, 6) } : {}),
     });
     return apiJson(ctx, { plan, parsed: planToParsed(plan) });

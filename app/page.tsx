@@ -685,7 +685,11 @@ export default function Home() {
     setLoadingText("Shaping your day…");
     const { plan, parsed } = await fetchJson("/api/parse", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // Stage 3B: the token is how the SERVER learns whose taste profile to
+      // read — there is no uid in this body and never should be. Absent for a
+      // guest and for mock e2e (no Firebase), which is the un-personalized
+      // path and stays exactly as it was.
+      headers: { "Content-Type": "application/json", ...((await authHeaders()) ?? {}) },
       body: JSON.stringify({
         prompt: rawPrompt,
         timeZone: place.planZone,

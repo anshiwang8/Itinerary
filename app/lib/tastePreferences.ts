@@ -6,11 +6,13 @@
 // asked at all, and what exactly do we file — are ordinary branching, so they
 // live here where `tastePreferences.test.ts` can pin them.
 //
-// CAPTURE ONLY (Stage 3A). Nothing here is read by the planner, the pipeline or
-// venue selection, and nothing here should be until 3B says so. The survey
-// records taste; it does not yet spend it. That boundary is the whole point of
-// splitting the stage, and the fact that this module exports no "apply" of any
-// kind is what keeps it honest.
+// CAPTURE ONLY — still true of THIS FILE, and no longer true of the profile.
+// Stage 3B opened the boundary 3A drew here: the planner is now told what a
+// signed-in user likes. What did NOT move is where that decision lives. This
+// module still exports no "apply" of any kind; the projection from a stored
+// profile to what the model is handed is `api/parse/plannerPreferences.ts`,
+// beside the planner that spends it, so "what the survey means" and "what the
+// survey stores" stay two separate, separately-testable things.
 //
 // Both sides use this file, exactly as `historyView` is used by both: the
 // SERVER normalises a submission before it writes and a document before it goes

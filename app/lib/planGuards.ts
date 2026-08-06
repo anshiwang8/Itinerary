@@ -114,6 +114,27 @@ const DIETARY_ACCOMMODATION =
   /\b(?:vegan|vegetarian|plant[- ]based|halal|kosher|gluten[- ]free)[\s-]+(?:options?|friendly|friend|choices?|dishes?|menu|alternatives?|selections?)\b/gi;
 
 /**
+ * Does a dietary term pull against a venue type the PROMPT ITSELF names?
+ *
+ * Stage 3B's use, and the reason this is exported rather than inlined at the
+ * call site: a STORED dietary preference must never become the contradiction
+ * below. "vegetarian" and "the best steakhouse" is a real conflict when the
+ * user stated both — it is not a conflict when they only stated the steakhouse
+ * and the vegetarian came from a profile they filled in months ago. So the
+ * preference is dropped BEFORE the planner is told about it, using the same
+ * table that decides the contradiction; a second copy of these pairs, drifting
+ * from this one, is exactly how a suppressed case would start failing loud
+ * again.
+ *
+ * Takes the RAW prompt, not the parse: this runs before there is one.
+ */
+export function dietaryConflictsWithPrompt(diet: string, prompt: string): boolean {
+  return DIETARY_VENUE_CONFLICTS.some(
+    ([dietPattern, venuePattern]) => dietPattern.test(diet) && venuePattern.test(prompt)
+  );
+}
+
+/**
  * Contradiction guard: two stated wants that can't both hold — say so
  * instead of returning an empty, silently filtered map. Covers a budget vs
  * aesthetic clash ("cheap fancy dinner") and a hard dietary requirement vs
