@@ -50,7 +50,12 @@ straight map polyline.
   parsed from the RAW refinement and ranked against the CURRENT stop's
   own `priceLevel`. Only strictly-higher/lower candidates reach the
   selector; when none exist the swap REFUSES ("already the priciest one I
-  can find nearby") rather than shuffling in a same-tier venue.
+  can find nearby") rather than shuffling in a same-tier venue. An
+  UNPRICED candidate is never the answer either — every fixture venue
+  carries a `priceLevel`, so if you add one without a price, a
+  price-direction swap will decline it and may refuse with the other
+  message ("can't compare prices for this <category>"). That is the rule,
+  not a fixture bug: keep-on-missing still applies to ordinary swaps.
 - Drinks pick is **Ten O'Clock Curfew** (4.7, closes 22:00) — pushing
   drinks past 10 PM fires the ADAPT path (→ The Standing Room, open to 2).
   **Night Owl** (4.1, NO listed hours) is the bar pool's any-hour

@@ -146,13 +146,23 @@ export interface PriceDirectionRanking<T> {
   /** STRICTLY in the requested direction versus the current venue, most
    *  extreme first. Empty means nothing genuinely moves that way. */
   ranked: T[];
-  /** Places has no price for these. Keep-on-missing is non-negotiable, so
-   *  they are never dropped — but they are a LAST RESORT, because a venue
-   *  known to move in the requested direction always beats an unknown. */
+  /** Places has no price for these. They are reported rather than dropped —
+   *  but they are NOT a fallback ANSWER: a venue with no price cannot be
+   *  shown to move in the requested direction, so handing one back AS the
+   *  fancier/cheaper result is a claim nothing supports. The caller uses this
+   *  to log, and to word its refusal. Keep-on-missing still governs every
+   *  other rule and every ordinary swap — a venue is only set aside here
+   *  because price is the very question being asked. */
   unpriced: T[];
   /** the CURRENT venue has no price either, so there was nothing to compare
    *  against and `ranked` is every priced candidate, most extreme first */
   bestEffort: boolean;
+  /** at least one CANDIDATE carried a usable price, so a real comparison
+   *  happened. When this is false an empty `ranked` cannot honestly be
+   *  reported as "already the priciest" — nothing was priced to compare
+   *  against, which is a different fact from a pool with nothing above the
+   *  current tier. */
+  comparable: boolean;
 }
 
 /**
@@ -162,7 +172,8 @@ export interface PriceDirectionRanking<T> {
  * caller reads `ranked`/`unpriced` and chooses. Missing price on a candidate
  * lands it in `unpriced`; missing price on the CURRENT venue means no
  * comparison is possible at all, which is best-effort rather than a refusal
- * (refusing there would be refusing BECAUSE of missing data).
+ * (refusing there would be refusing BECAUSE of missing data) — but ONLY when
+ * some candidate is priced, which is what `comparable` reports.
  */
 export function rankByPriceDirection<T extends PricedCandidate>(
   candidates: readonly T[],
@@ -187,5 +198,5 @@ export function rankByPriceDirection<T extends PricedCandidate>(
     .slice()
     .sort((a, b) => (direction === "up" ? b.rank - a.rank : a.rank - b.rank))
     .map(({ item }) => item);
-  return { ranked, unpriced, bestEffort };
+  return { ranked, unpriced, bestEffort, comparable: priced.length > 0 };
 }

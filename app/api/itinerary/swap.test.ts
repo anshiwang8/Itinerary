@@ -101,6 +101,16 @@ function pricedItinerary(priceLevel: string) {
   return it;
 }
 
+/** the same itinerary with a PARK in the middle slot: Places populates
+ *  priceLevel for food and drink and leaves parks and attractions blank, so
+ *  nothing on either side of a price comparison has a price at all */
+function parkItinerary() {
+  const it = mkItinerary();
+  it.stops[1].category = "park";
+  it.stops[1].name = "Riverside Common";
+  return it;
+}
+
 interface Opts {
   intent?: "venue" | "time" | "constraint" | "duration";
   time?: TimeShift;
@@ -198,8 +208,11 @@ const cases: Array<[string, () => Promise<void>]> = [
     async () => {
       const it = mkItinerary();
       const now = new Date(T(18, 0)); // all upcoming
-      // refilter "cheaper", same category/duration (bar 70), 10-min outbound
-      const res = await swapStop(it, 1, "somewhere cheaper", now, mkDeps({ legMin: 10 }));
+      // plain refilter, same category/duration (bar 70), 10-min outbound.
+      // Deliberately NOT a price word: "cheaper" would route into the
+      // price-direction path, which is a different subject and has its own
+      // cases below — a slot-mechanics test should not depend on it.
+      const res = await swapStop(it, 1, "somewhere else", now, mkDeps({ legMin: 10 }));
       assert.ok(res.swapped);
       if (!res.swapped) return;
       assert.strictEqual(res.path, "refilter");
@@ -275,7 +288,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       const it1 = mkItinerary();
       let refilterSearch: string[] | null = null;
       const r1 = await swapStop(
-        it1, 1, "somewhere cheaper", new Date(T(18, 0)),
+        it1, 1, "somewhere else", new Date(T(18, 0)),
         mkDeps({ onSearch: (p) => (refilterSearch = p.constraints) })
       );
       assert.ok(r1.swapped && r1.path === "refilter");
@@ -657,9 +670,9 @@ const cases: Array<[string, () => Promise<void>]> = [
       const r1 = await swapStop(it, 0, "make it 2 hours", now, mkDeps({ legMin: 10 }));
       assert.ok(r1.swapped);
       assert.strictEqual(it.stops[0].durationMinutes?.total, 120);
-      // venue swap "cheaper" (refilter, same category) — the WHOLE slot
-      // holds, length included
-      const r2 = await swapStop(it, 0, "somewhere cheaper", now, mkDeps({ legMin: 10 }));
+      // plain venue swap (refilter, same category) — the WHOLE slot holds,
+      // length included
+      const r2 = await swapStop(it, 0, "somewhere else", now, mkDeps({ legMin: 10 }));
       assert.ok(r2.swapped);
       if (!r2.swapped) return;
       assert.strictEqual(r2.path, "refilter");
@@ -933,7 +946,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       // venue swap (finalize path): the new stop's description is the
       // candidate's Places editorialSummary — never the Groq reason
       const it = mkItinerary();
-      const res = await swapStop(it, 1, "somewhere cheaper", new Date(T(18, 0)), mkDeps({ legMin: 10 }));
+      const res = await swapStop(it, 1, "somewhere else", new Date(T(18, 0)), mkDeps({ legMin: 10 }));
       assert.ok(res.swapped);
       const s = it.stops[1];
       assert.strictEqual(s.description, "New bar_fresh, a real spot on the strip.");
@@ -1124,7 +1137,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       delete it.parsed; // pre-multi-city itinerary
       let searchedLocation: string | null = null;
       const deps = mkDeps({ legMin: 10 });
-      const res = await swapStop(it, 1, "somewhere cheaper", new Date(T(18, 0)), {
+      const res = await swapStop(it, 1, "somewhere else", new Date(T(18, 0)), {
         ...deps,
         searchPools: async (parsed, cats) => {
           searchedLocation = parsed.location;
@@ -1464,7 +1477,7 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "PRICE: KEEP-ON-MISSING — an unpriced candidate is a last resort, never dropped",
+    "PRICE: an unpriced candidate is never OFFERED as the price-direction result",
     async () => {
       // a venue Places has no price for cannot be shown to move the right
       // way, so a PROVEN one outranks it...
@@ -1478,18 +1491,84 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.ok(res.swapped, res.swapped ? "" : res.reason);
       assert.deepStrictEqual(offered.map((p) => p.id), ["dear"]);
 
-      // ...but when NOTHING is proven, the unpriced candidates are used
-      // rather than the swap refusing over absent data
+      // ...and when nothing is proven it is not a FALLBACK either: handing
+      // back a venue with no price as the "fancier" one is an answer nothing
+      // supports, and it is how a price swap returned an arbitrary venue.
+      // Keep-on-missing forbids DROPPING a venue for a missing field — it
+      // does not require answering a price question with a priceless venue.
+      // (The plain-swap case below pins that an ordinary swap still sees
+      // exactly these candidates, untouched.)
       const noProven = pricedItinerary(DEAREST);
-      let fallbackOffered: Place[] = [];
+      const offeredIds: string[] = [];
       const best = await swapStop(noProven, 1, "fancier", new Date(T(18, 0)), mkDeps({
         pool: [priced("noprice", undefined), priced("dear", DEAR)],
-        onSelect: (pools) => { fallbackOffered = pools["bar"] ?? []; },
+        onSelect: (pools) => { offeredIds.push(...(pools["bar"] ?? []).map((p) => p.id)); },
         legMin: 10,
       }));
-      assert.ok(best.swapped, best.swapped ? "" : best.reason);
-      assert.deepStrictEqual(fallbackOffered.map((p) => p.id), ["noprice"]);
-      assert.strictEqual(noProven.stops[1].id, "noprice");
+      assert.ok(!best.swapped, "an unpriced venue must not answer a price request");
+      if (best.swapped) return;
+      // $$$ WAS priced and simply isn't pricier than $$$$, so a real price
+      // comparison happened — the honest refusal here is the "top of the
+      // pool" one, not the can't-compare one
+      assert.match(best.reason, /already the priciest/i);
+      assert.deepStrictEqual(offeredIds, [], "the unpriced venue reached the selector");
+      assert.strictEqual(noProven.stops[1].id, "b1", "the refusal must change nothing");
+    },
+  ],
+  [
+    "PRICE: no price data ANYWHERE refuses honestly — never a random venue",
+    async () => {
+      // THE REGRESSION. Places prices food and drink and leaves parks and
+      // attractions blank, so a "fancier" park swap has nothing priced on
+      // either side. The old `ranked.length > 0 ? ranked : unpriced` fallback
+      // handed the whole unpriced pool to the model, whose pick came back as
+      // the "fancier" answer — an arbitrary venue wearing a price claim.
+      const it = parkItinerary();
+      assert.strictEqual(it.stops[1].priceLevel, undefined);
+      const offeredIds: string[] = [];
+      const res = await swapStop(it, 1, "somewhere fancier", new Date(T(18, 0)), mkDeps({
+        pool: [priced("green", undefined), priced("commons", undefined), priced("quay", undefined)],
+        onSelect: (pools) => { offeredIds.push(...(pools["park"] ?? []).map((p) => p.id)); },
+        legMin: 10,
+      }));
+      assert.ok(!res.swapped, "an all-unpriced pool must not produce a price swap");
+      if (res.swapped) return;
+      // the refusal says the true thing. "It's already the priciest" would be
+      // a claim about prices that nothing in this comparison has.
+      assert.match(res.reason, /can't compare prices/i);
+      assert.doesNotMatch(res.reason, /already the priciest/i);
+      assert.match(res.reason, /Riverside Common/);
+      // and code refused BEFORE the judge — the model was never handed a set
+      // it could only pick from arbitrarily
+      assert.deepStrictEqual(offeredIds, [], "unpriced candidates reached the selector");
+      // plan-then-commit: nothing moved
+      assert.strictEqual(it.stops[1].id, "b1");
+      assert.strictEqual(it.stops[1].start_time, T(21, 0));
+
+      // symmetric downward
+      const down = parkItinerary();
+      const cheaper = await swapStop(down, 1, "cheaper", new Date(T(18, 0)), mkDeps({
+        pool: [priced("green", undefined), priced("commons", undefined)],
+        legMin: 10,
+      }));
+      assert.ok(!cheaper.swapped, "'cheaper' must refuse on the same pool");
+      if (cheaper.swapped) return;
+      assert.match(cheaper.reason, /can't compare prices/i);
+      assert.strictEqual(down.stops[1].id, "b1");
+
+      // a KNOWN current price does not rescue it — knowing what you have says
+      // nothing about what is on offer. Telling someone their $$ bar is
+      // "already the priciest" because the alternatives are unlisted is the
+      // same false claim, so this refuses the same way.
+      const known = pricedItinerary(MID);
+      const stuck = await swapStop(known, 1, "fancier", new Date(T(18, 0)), mkDeps({
+        pool: [priced("nolisting", undefined), priced("alsonone", undefined)],
+        legMin: 10,
+      }));
+      assert.ok(!stuck.swapped, "an all-unpriced pool must refuse for a priced stop too");
+      if (stuck.swapped) return;
+      assert.match(stuck.reason, /can't compare prices/i);
+      assert.strictEqual(known.stops[1].id, "b1");
     },
   ],
   [
@@ -1525,7 +1604,13 @@ const cases: Array<[string, () => Promise<void>]> = [
       let offered: Place[] = [];
       let query: { aesthetic: string } | null = null;
       const res = await swapStop(it, 1, "don't like it", new Date(T(18, 0)), mkDeps({
-        pool: [priced("cheap", CHEAP), priced("same", MID), priced("dear", DEAR)],
+        pool: [
+          priced("cheap", CHEAP), priced("same", MID),
+          // KEEP-ON-MISSING, the ordinary case: an unpriced venue is set
+          // aside only when PRICE is the question asked. A plain swap never
+          // asked about price, so it must still see this one.
+          priced("noprice", undefined), priced("dear", DEAR),
+        ],
         onSelect: (pools) => { offered = pools["bar"] ?? []; },
         onSearch: (parsed) => { query = parsed; },
         legMin: 10,
@@ -1533,7 +1618,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.ok(res.swapped, res.swapped ? "" : res.reason);
       // no narrowing at all — every candidate still reaches the model, in
       // pool order, exactly as before this feature existed
-      assert.deepStrictEqual(offered.map((p) => p.id), ["cheap", "same", "dear"]);
+      assert.deepStrictEqual(offered.map((p) => p.id), ["cheap", "same", "noprice", "dear"]);
       // ...and the search query is byte-identical to the plan's own
       assert.strictEqual(query!.aesthetic, "lively");
     },

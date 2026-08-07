@@ -1188,40 +1188,61 @@ async function venueSwap(
   // ping-pong A→B→A. The model then judges FIT among options already proven
   // to move the right way — it never compares prices.
   if (priceDirection) {
-    const { ranked, unpriced, bestEffort } = rankByPriceDirection(
+    const { ranked, unpriced, bestEffort, comparable } = rankByPriceDirection(
       candidates,
       target.priceLevel,
       priceDirection
     );
-    // Keep-on-missing: a venue Places has no price for is never DROPPED for
-    // that. It is a LAST RESORT — used only when nothing is known to move the
-    // right way, because "unknown" must not outrank "proven".
-    const eligible = ranked.length > 0 ? ranked : unpriced;
-    // Logged on BOTH outcomes, and before the refusal returns: a refusal is
-    // the MORE interesting event here (it is the one a user notices), and
-    // "how big was the pool we ranked" is the first thing to look at when a
-    // direction swap refuses more than it should.
+    // `ranked` is the WHOLE eligible set: a venue Places has no price for is
+    // never handed back AS the pricier/cheaper answer, because nothing shows
+    // it moves that way — the swap would be presenting an arbitrary venue as
+    // a price result. This is NOT a keep-on-missing violation: that rule
+    // forbids DROPPING a venue for a missing field, and it still governs
+    // every ordinary swap and every filter rule (a plain "swap this" sees
+    // these venues untouched, one case below pins it). Here price is the
+    // question the user actually asked, so an unpriced venue is set aside for
+    // being unanswerable, not for being incomplete.
+    //
+    // The earlier `ranked.length > 0 ? ranked : unpriced` fallback did hand
+    // them back, and on a category Places prices for nobody — a park, an
+    // attraction — EVERY candidate is unpriced, so "fancier" degraded to "any
+    // venue at all": the exact arbitrary answer this block exists to prevent.
     logEvent("info", "swap_price_direction", {
       direction: priceDirection,
       currentPriceLevel: target.priceLevel ?? null,
       // no price on the CURRENT venue → nothing to compare against, so this
-      // hands back the most extreme priced candidate rather than refusing
+      // ranks every PRICED candidate by how extreme it is rather than refusing
       bestEffort,
+      // ...which only works while some candidate is priced; `comparable`
+      // false is the park case, and the first thing to check when a direction
+      // swap refuses on a category that should have had prices
+      comparable,
       candidates: candidates.length,
       rankedCount: ranked.length,
       unpricedCount: unpriced.length,
-      outcome: eligible.length === 0 ? "refused" : ranked.length === 0 ? "unpriced_fallback" : "ranked",
+      outcome:
+        ranked.length > 0
+          ? "ranked"
+          : comparable
+          ? "refused_none_in_direction"
+          : "refused_no_price_data",
     });
-    if (eligible.length === 0) {
+    if (ranked.length === 0) {
+      const wanted = priceDirection === "up" ? "pricier" : "cheaper";
       return {
         swapped: false,
-        reason:
-          priceDirection === "up"
-            ? `Couldn't find a ${poolKey} pricier than ${target.name} — it's already the priciest one I can find nearby.`
-            : `Couldn't find a ${poolKey} cheaper than ${target.name} — it's already the cheapest one I can find nearby.`,
+        // TWO refusals, because they report two different facts and only one
+        // of them is a statement about price. With nothing priced to compare
+        // against, "it's already the priciest" would be an assertion about
+        // data we never had — and it reads as an outright lie on a $ venue.
+        reason: !comparable
+          ? `Can't compare prices for this ${poolKey} — none of the nearby options have a price listed, so I can't show you a ${wanted} one. Keeping ${target.name}.`
+          : priceDirection === "up"
+          ? `Couldn't find a ${poolKey} pricier than ${target.name} — it's already the priciest one I can find nearby.`
+          : `Couldn't find a ${poolKey} cheaper than ${target.name} — it's already the cheapest one I can find nearby.`,
       };
     }
-    candidates = eligible;
+    candidates = ranked;
   }
 
   const selections = await deps.selectVenues(judgeParsed, { [poolKey]: candidates });

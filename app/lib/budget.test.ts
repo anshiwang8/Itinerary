@@ -282,13 +282,53 @@ const cases: Array<[string, () => void]> = [
       const { ranked, unpriced } = rankByPriceDirection(pool, MID, "up");
       // proven-in-direction only
       assert.deepStrictEqual(ids(ranked), ["dear"]);
-      // ...but the unpriced ones survive as an explicit last resort, in pool
-      // order, rather than being filtered out for lacking data
+      // ...but the unpriced ones are reported, in pool order, rather than
+      // being filtered out for lacking data. Reported is not RANKED: the
+      // caller may log or explain them, never answer a price request with one.
       assert.deepStrictEqual(ids(unpriced), ["noprice", "alsonone"]);
       // even when NOTHING is in direction, they are still handed back
       const stuck = rankByPriceDirection(pool, DEAREST, "up");
       assert.deepStrictEqual(ids(stuck.ranked), []);
       assert.deepStrictEqual(ids(stuck.unpriced), ["noprice", "alsonone"]);
+      // and that refusal IS about price: two candidates were priced and
+      // neither beat $$$$, which is a different fact from "nothing had a price"
+      assert.strictEqual(stuck.comparable, true);
+    },
+  ],
+  [
+    "COMPARABLE: nothing priced to compare against is its own fact — the park case",
+    () => {
+      // Places populates priceLevel for food and drink and leaves parks and
+      // attractions blank, so a direction request on one of those has no
+      // price signal on EITHER side: no fancier/cheaper to deliver, and no
+      // honest "it's already the priciest" to say either.
+      const parks = [v("green"), v("commons"), v("quay")];
+      const none = rankByPriceDirection(parks, undefined, "up");
+      assert.strictEqual(none.comparable, false);
+      assert.strictEqual(none.bestEffort, true);
+      assert.deepStrictEqual(ids(none.ranked), []);
+      // nothing was dropped — they are all still here, just unanswerable
+      assert.deepStrictEqual(ids(none.unpriced), ["green", "commons", "quay"]);
+
+      // a KNOWN current price does not make the pool comparable: knowing what
+      // you have says nothing about what is on offer
+      const currentOnly = rankByPriceDirection(parks, MID, "up");
+      assert.strictEqual(currentOnly.comparable, false);
+      assert.deepStrictEqual(ids(currentOnly.ranked), []);
+
+      // ONE priced candidate is enough for a real comparison — strictly...
+      assert.strictEqual(
+        rankByPriceDirection([v("a"), v("b", MID)], DEAR, "down").comparable,
+        true
+      );
+      // ...and on the best-effort path, where it is also what keeps that path
+      // working: a priced candidate is exactly what `ranked` is drawn from
+      const effort = rankByPriceDirection([v("a"), v("b", MID)], undefined, "up");
+      assert.strictEqual(effort.comparable, true);
+      assert.deepStrictEqual(ids(effort.ranked), ["b"]);
+
+      // an empty pool compares nothing
+      assert.strictEqual(rankByPriceDirection([], MID, "up").comparable, false);
     },
   ],
   [
