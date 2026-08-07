@@ -1144,6 +1144,21 @@ export function mockWeather(): WeatherHour[] {
 
 // ── engine deps. The deterministic time/duration parsers are injected by
 // swap.ts (they live there; injecting avoids a runtime import cycle). ──
+/**
+ * Refinements that NAME a different kind of place, and the kind they name.
+ *
+ * This is the fixture standing in for the MODEL's judgment, the same way
+ * MOCK_VAGUE_RULES stands in for the planner's: REFINE_SYSTEM asks the model
+ * to set `category` when a complaint names a new kind, so the fixture does
+ * exactly that. Plain dissatisfaction ("somewhere else", "cheaper") is
+ * deliberately absent — those must stay same-category, and the e2e specs that
+ * swap with them are the proof.
+ */
+const MOCK_CATEGORY_CHANGES: Array<[RegExp, string]> = [
+  [/\bboard games?\b/i, "board game cafe"],
+  [/\bcoffee instead\b/i, "coffee shop"],
+];
+
 export function mockSwapDeps(
   parseTime: (s: string) => TimeShift | null,
   parseDuration: (s: string) => DurationShift | null,
@@ -1156,6 +1171,36 @@ export function mockSwapDeps(
     interpret: async (parsed, category, _startISO, refinement) => {
       const duration = parseDuration(refinement);
       const time = parseTime(refinement);
+      // A CATEGORY CHANGE, behind the same deterministic floors the real
+      // interpret puts first: an arithmetic phrase is never a new kind.
+      const newKind =
+        !time && !duration
+          ? MOCK_CATEGORY_CHANGES.find(([pattern]) => pattern.test(refinement))?.[1]
+          : undefined;
+      if (newKind) {
+        // Deliberately the shape a real model has been SEEN to return, not the
+        // tidy one REFINE_SYSTEM asks for, because that is what production has
+        // to survive:
+        //  - path "refilter", i.e. its classification disagreeing with its own
+        //    answer. The engine must honour the ANSWER, or the change is
+        //    silently discarded and this swap hands back another dinner.
+        //  - the new kind ALSO leaked into `constraints`, which is what the
+        //    prompt's constraint branch invites. A kind of place is unprovable
+        //    from provider booleans, so unless the engine strips it,
+        //    `mockSelect` — which runs the REAL placeMeetsAllConstraints —
+        //    answers unmet_constraint and the swap refuses forever.
+        // A fixture emitting the tidy shape would prove neither guarantee.
+        return {
+          intent: "venue",
+          path: "refilter",
+          category: newKind,
+          aesthetic: parsed.aesthetic,
+          budget: parsed.budget,
+          constraints: [...(parsed.constraints ?? []), newKind],
+          time: null,
+          duration: null,
+        };
+      }
       const constraintish = /patio|outdoor|rooftop|terrace|near /i.test(refinement);
       const cheap = /cheap|budget/i.test(refinement);
       // same routing as the real interpret: both halves ("start at 6pm for

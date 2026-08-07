@@ -10,6 +10,7 @@ import {
   parseTimeExpr,
   parseDurationExpr,
   usableByHours,
+  REFINE_SYSTEM,
   TimeShift,
   DurationShift,
 } from "./swap";
@@ -17,6 +18,7 @@ import { Place, WeatherHour } from "../places/search/filter";
 import { buildSchedule, ScheduledStop } from "../schedule/schedule";
 import type { CurrentOpeningHours } from "../places/search/hours";
 import { TravelLeg } from "../schedule/travel";
+import { placeMeetsAllConstraints } from "../../lib/constraints";
 
 const T = (h: number, m: number) =>
   `2026-07-03T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00-04:00`;
@@ -76,6 +78,21 @@ function mkVenue(id: string, name = `New ${id}`): Place {
     // the factual Places editorial — swap-produced stops must carry it as
     // `description`, distinct from the pick-justification `reason`
     editorialSummary: { text: `${name}, a real spot on the strip.` },
+  };
+}
+
+/** Same hours every day of the week, so a case never depends on which weekday
+ *  the fixture date lands on. `closeH <= openH` wraps past midnight. */
+function openHours(openH: number, closeH: number, closeM = 0): CurrentOpeningHours {
+  return {
+    periods: Array.from({ length: 7 }, (_, day) => ({
+      open: { day, hour: openH, minute: 0 },
+      close: {
+        day: closeH <= openH ? (day + 1) % 7 : day,
+        hour: closeH % 24,
+        minute: closeM,
+      },
+    })),
   };
 }
 
@@ -1713,6 +1730,297 @@ const cases: Array<[string, () => Promise<void>]> = [
         assert.strictEqual(forced.time, null);
       } finally {
         globalThis.fetch = realFetch;
+      }
+    },
+  ],
+
+  // ── CATEGORY-CHANGING SWAPS ──────────────────────────────────────────────
+  [
+    // THE REGRESSION PIN. Teaching the engine to change categories is only
+    // safe if plain dissatisfaction still means "a different venue of the SAME
+    // kind" — these are the phrases the rest of this suite and every e2e
+    // scenario swap with, and turning one of them into a category change would
+    // silently rewrite the user's day.
+    //
+    // This pins the ENGINE half: given an interpretation that kept the
+    // category (what the prompt instructs for these phrases), nothing in the
+    // category-change path may hijack the swap. The `path` assertion is the
+    // load-bearing one — it proves `changesCategory` did NOT fire and force
+    // the research path.
+    "CATEGORY PIN: dissatisfaction phrases stay in the SAME category",
+    async () => {
+      for (const phrase of ["something different", "surprise me", "somewhere else"]) {
+        const it = mkItinerary();
+        let searchedFor: string[] = [];
+        const res = await swapStop(it, 1, phrase, new Date(T(18, 0)), mkDeps({
+          legMin: 10,
+          onSearch: (parsed) => {
+            searchedFor = parsed.category_signals;
+          },
+        }));
+        assert.ok(res.swapped, `"${phrase}" should still swap: ${JSON.stringify(res)}`);
+        if (!res.swapped) return;
+        assert.strictEqual(
+          res.path,
+          "refilter",
+          `"${phrase}" must NOT be forced onto the research path — that would mean a category change fired`
+        );
+        assert.strictEqual(
+          it.stops[1].category,
+          "bar",
+          `"${phrase}" must leave the stop's category alone`
+        );
+        assert.deepStrictEqual(
+          searchedFor,
+          ["bar"],
+          `"${phrase}" must re-search the ORIGINAL category`
+        );
+        // it is still a real swap: a different venue in the same slot
+        assert.notStrictEqual(it.stops[1].id, "b1", `"${phrase}" should replace the venue`);
+        assert.strictEqual(it.stops[1].start_time, T(21, 0), "the slot is held");
+        assert.strictEqual(
+          it.stops[1].durationMinutes?.total,
+          70,
+          "a same-category swap holds the whole slot, length included"
+        );
+      }
+    },
+  ],
+  [
+    // The PROMPT half of the same guardrail. The instruction that keeps these
+    // phrases same-category exists nowhere but REFINE_SYSTEM, so a rewrite
+    // that drops it is invisible to every other test in this file. This
+    // cannot pin the live model's judgment — only that we are still asking.
+    "CATEGORY PIN: REFINE_SYSTEM still carries the same-category guardrail",
+    async () => {
+      for (const phrase of [
+        "something different",
+        "surprise me",
+        "somewhere else",
+        "something more chill",
+      ]) {
+        assert.ok(
+          REFINE_SYSTEM.includes(`"${phrase}"`),
+          `REFINE_SYSTEM must still name "${phrase}" as a SAME-category request`
+        );
+      }
+      // and it must still forbid the constraint leak the strip cleans up
+      assert.match(
+        REFINE_SYSTEM,
+        /NEVER also put it in "constraints"/,
+        "REFINE_SYSTEM must still forbid putting the new kind into constraints"
+      );
+    },
+  ],
+  [
+    "CATEGORY CHANGE: a named new kind re-searches THAT pool and re-kinds the stop",
+    async () => {
+      const it = mkItinerary();
+      let searchedFor: string[] = [];
+      // path "refilter" ON PURPOSE: the model classified the path one way and
+      // answered with a different category. The answer must win, or the
+      // request is silently discarded (the seam this closes).
+      const res = await swapStop(it, 1, "board games instead", new Date(T(18, 0)), mkDeps({
+        path: "refilter",
+        newCategory: "board game cafe",
+        legMin: 10,
+        onSearch: (parsed) => {
+          searchedFor = parsed.category_signals;
+        },
+      }));
+      assert.ok(res.swapped, `expected a swap, got: ${JSON.stringify(res)}`);
+      if (!res.swapped) return;
+      assert.strictEqual(
+        res.path,
+        "research",
+        "a category change must be forced onto the research path even when the model said refilter"
+      );
+      assert.deepStrictEqual(
+        searchedFor,
+        ["board game cafe"],
+        "the NEW kind is what gets searched"
+      );
+      assert.strictEqual(it.stops[1].category, "board game cafe", "the stop takes the new kind");
+      assert.strictEqual(it.stops[1].id, "board game cafe_fresh", "a venue from the new pool");
+      // the slot START is held; the LENGTH is the new kind's default (honest
+      // length, not the old slot's) — "board game cafe" resolves through the
+      // duration table's cafe rule to 50+10
+      assert.strictEqual(it.stops[1].start_time, T(21, 0), "the slot start is held");
+      assert.strictEqual(
+        it.stops[1].durationMinutes?.total,
+        60,
+        "a category change takes the NEW category's default length"
+      );
+      assert.strictEqual(ms(it.stops[1].end_time), ms(T(22, 0)));
+    },
+  ],
+  [
+    // THE TRAP. REFINE_SYSTEM's constraint branch invites the model to fold a
+    // different KIND of venue into `constraints`; `constraintEvidence` proves
+    // constraints from six provider booleans, so a kind of place is unprovable
+    // by construction and every candidate fails the judge — a permanent
+    // unmet_constraint refusal. The strip removes the duplicate; a genuine,
+    // provable constraint alongside it must survive untouched.
+    "CATEGORY CHANGE: the new kind is stripped from constraints, a real one survives",
+    async () => {
+      const it = mkItinerary();
+      let judged: string[] = [];
+      let searched: string[] = [];
+      const patioVenue: Place = { ...mkVenue("bgc1"), outdoorSeating: true };
+      const res = await swapStop(it, 1, "board games instead", new Date(T(18, 0)), mkDeps({
+        path: "research",
+        newCategory: "board game cafe",
+        // the leak, exactly as the model emits it, next to a genuine constraint
+        constraints: ["board game cafe", "patio"],
+        pool: [patioVenue],
+        legMin: 10,
+        onJudge: (parsed) => {
+          judged = parsed.constraints;
+        },
+        onSearch: (parsed) => {
+          searched = parsed.constraints;
+        },
+      }));
+      assert.ok(res.swapped, `expected a swap, got: ${JSON.stringify(res)}`);
+      assert.deepStrictEqual(
+        judged,
+        ["patio"],
+        "the kind must not reach the judge as a hard constraint; the real one must"
+      );
+      assert.deepStrictEqual(
+        searched,
+        ["patio"],
+        "and it must not become literal Places query noise either"
+      );
+      // the decisive proof, through the REAL constraint machinery: with the
+      // kind left in, this is false for every venue that exists, which is the
+      // permanent refusal. With it stripped, the candidate genuinely qualifies.
+      assert.ok(
+        placeMeetsAllConstraints(patioVenue, judged),
+        "the candidate must be able to satisfy what the judge was given"
+      );
+      assert.ok(
+        !placeMeetsAllConstraints(patioVenue, ["board game cafe", "patio"]),
+        "sanity: the unstripped set is unsatisfiable — that IS the trap"
+      );
+    },
+  ],
+  [
+    "CATEGORY CHANGE: nothing found refuses naming the REQUESTED kind, plan untouched",
+    async () => {
+      const it = mkItinerary();
+      const before = JSON.stringify(it);
+      const res = await swapStop(it, 1, "board games instead", new Date(T(18, 0)), mkDeps({
+        path: "research",
+        newCategory: "board game cafe",
+        pool: [],
+        legMin: 10,
+      }));
+      assert.ok(!res.swapped, "an empty pool must refuse");
+      if (res.swapped) return;
+      assert.match(
+        res.reason,
+        /Couldn't find a board game cafe that fits/,
+        `the refusal must name the REQUESTED kind, not the old one: ${res.reason}`
+      );
+      assert.ok(
+        !/another bar/.test(res.reason),
+        `the refusal must not call it "another bar": ${res.reason}`
+      );
+      assert.strictEqual(JSON.stringify(it), before, "a refused swap leaves the plan untouched");
+    },
+  ],
+  [
+    // A category change brings a NEW duration the old slot was never sized
+    // for. When that honest length strands a downstream stop, the answer is a
+    // refusal — not moving anyone's committed times to force the fit.
+    "CATEGORY CHANGE: a new length that strands a locked downstream stop refuses",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(20, 0)); // the bar (21:00) is still upcoming
+      withStatuses(it, now);
+      it.stops[2].locked = true; // dessert's 22:20 boundary is committed
+      const before = JSON.stringify(it);
+      const res = await swapStop(it, 1, "make it a long museum visit instead", now, mkDeps({
+        path: "research",
+        // museum is 105 + 15 = 120 → 21:00–23:00, straight through dessert's 22:20
+        newCategory: "museum",
+        legMin: 10,
+      }));
+      assert.ok(!res.swapped, `expected an honest refusal, got: ${JSON.stringify(res)}`);
+      if (res.swapped) return;
+      assert.match(res.reason, /locked stop/i, `refusal should name the collision: ${res.reason}`);
+      // the deferred feature is "push the later stops back"; this one refuses
+      assert.strictEqual(JSON.stringify(it), before, "plan-then-commit: nothing was written");
+    },
+  ],
+
+  // ── OPEN THROUGH THE WHOLE SLOT ──────────────────────────────────────────
+  [
+    // Openness used to be judged at the slot's START and nowhere else, so a
+    // venue that closed MID-SLOT was a legal answer. The bar slot starts at
+    // 21:00 and OCCUPIES 60 minutes (70 total, less the table's 10-minute
+    // scheduling buffer), so a venue shutting at 21:30 is open on arrival and
+    // shut with half the stop still to go.
+    "OPEN-AT-END: a venue that closes mid-slot is rejected",
+    async () => {
+      const it = mkItinerary();
+      const closesEarly: Place = {
+        ...mkVenue("closes2130"),
+        currentOpeningHours: openHours(17, 21, 30),
+      };
+      const res = await swapStop(it, 1, "somewhere else", new Date(T(18, 0)), {
+        ...mkDeps({ pool: [closesEarly], legMin: 10 }),
+        // the REAL hours-based availability seam, not the id-based test double
+        isUsableAt: usableByHours,
+      });
+      assert.ok(
+        !res.swapped,
+        `a venue closing at 21:30 must not fill a stop occupying 21:00–22:00: ${JSON.stringify(res)}`
+      );
+      assert.strictEqual(it.stops[1].id, "b1", "the original venue is kept");
+    },
+  ],
+  [
+    "OPEN-AT-END: open past the end, closing at the end, buffer-only overhang, and unknown hours all pass",
+    async () => {
+      const cases: Array<[string, Place, string]> = [
+        [
+          "open well past the end",
+          { ...mkVenue("closes23"), currentOpeningHours: openHours(17, 23) },
+          "a venue open to 23:00 covers a stop occupying 21:00–22:00",
+        ],
+        [
+          // the boundary the -1 minute exists for: occupancy is [start,end),
+          // so closing exactly when you leave is a normal plan, not a conflict
+          "closes exactly at the occupancy end",
+          { ...mkVenue("closes2200"), currentOpeningHours: openHours(17, 22) },
+          "closing exactly at 22:00 must NOT be read as closing mid-stop",
+        ],
+        [
+          // THE REGRESSION THIS DISTINCTION EXISTS FOR. The stop's TOTAL runs
+          // to 22:10, but the last 10 minutes are the table's scheduling
+          // margin, not time inside the door. Judging against the total
+          // adapted a genuinely-fine venue away.
+          "closes inside the trailing BUFFER only",
+          { ...mkVenue("closes2205"), currentOpeningHours: openHours(17, 22, 5) },
+          "the buffer is transition time — a venue need not stay open through it",
+        ],
+        [
+          // keep-on-missing: unknown hours never fail a venue, anywhere
+          "no hours data at all",
+          mkVenue("nohours"),
+          "keep-on-missing must still hold at the end instant",
+        ],
+      ];
+      for (const [label, venue, why] of cases) {
+        const it = mkItinerary();
+        const res = await swapStop(it, 1, "somewhere else", new Date(T(18, 0)), {
+          ...mkDeps({ pool: [venue], legMin: 10 }),
+          isUsableAt: usableByHours,
+        });
+        assert.ok(res.swapped, `${label}: ${why} — got ${JSON.stringify(res)}`);
+        assert.strictEqual(it.stops[1].id, venue.id, `${label}: the new venue should be committed`);
       }
     },
   ],

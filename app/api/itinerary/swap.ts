@@ -28,6 +28,7 @@ import { withModelFallback } from "../_shared/modelFallback";
 import { getDuration } from "../schedule/durations";
 import { toZonedISO } from "../schedule/schedule";
 import { isParkLike } from "../../lib/categoryTraits";
+import { normalizeConstraint } from "../../lib/constraints";
 import {
   parsePriceDirection,
   priceDirectionSearchTerm,
@@ -152,7 +153,9 @@ export interface SwapDeps {
   getWeather: (lat: number, lng: number) => Promise<WeatherHour[] | null>;
 }
 
-const REFINE_SYSTEM = `You adjust ONE stop of an existing day plan from a short complaint. You get the stop's current settings (category, aesthetic, budget, constraints) and its current start time, plus the complaint. Classify the user's INTENT and return the parameters to act on it.
+// exported for the regression pin: the same-category guardrail below lives
+// ONLY in this prompt, so a test asserts the prompt still carries it
+export const REFINE_SYSTEM = `You adjust ONE stop of an existing day plan from a short complaint. You get the stop's current settings (category, aesthetic, budget, constraints) and its current start time, plus the complaint. Classify the user's INTENT and return the parameters to act on it.
 
 "intent":
 - "time": the complaint is about WHEN. Return a "time" object.
@@ -161,11 +164,17 @@ const REFINE_SYSTEM = `You adjust ONE stop of an existing day plan from a short 
 - "duration": the complaint is about HOW LONG they stay at this stop. Return a "duration" object.
    - ABSOLUTE ("stay 2 hours", "make it 90 minutes", "just an hour here"): set { "mode": "absolute", "targetMinutes": N }.
    - RELATIVE ("stay longer", "more time here", "shorter", "less time", "an extra hour"): set { "mode": "relative", "deltaMinutes": N } (longer is POSITIVE, shorter NEGATIVE). "an extra hour" = 60, "a lot longer" = 60; vague "longer"/"shorter" default to ±30.
-- "constraint": the complaint needs a different KIND of venue by feature/location — "with a patio", "near the water", "somewhere quieter that's outdoors". Set path "research", fold the feature into "constraints".
+- "constraint": the complaint asks for a venue with a different FEATURE or LOCATION, still the same kind of place — "with a patio", "near the water", "somewhere quieter that's outdoors". Set path "research", fold the feature into "constraints".
 - "venue": the complaint is about the venue's quality/price/style in the SAME slot — "don't like it", "cheaper", "less fancy", "higher rated". Set path "refilter" (narrows the same pool) unless it needs different venues, then "research".
 
+"category" — the KIND of place this stop is. Its current value is given to you.
+- CHANGE it only when the complaint NAMES a different kind of place to go instead: "board games instead" -> "board game cafe"; "coffee instead of the bar" -> "coffee shop"; "let's do something active" -> "climbing gym"; "make it a proper restaurant" -> "restaurant"; "a museum instead" -> "museum". Set "intent": "venue" and "path": "research".
+- A NAMED kind is the only trigger. Plain dissatisfaction is NOT one: "something different", "surprise me", "somewhere else", "something more chill", "don't like it", "higher rated", "cheaper", "somewhere quieter" all want a different VENUE of the SAME kind. For those, repeat "category" exactly as it was given and set "path": "refilter".
+- If you are unsure whether a kind was named, keep the category unchanged. A same-kind swap the user did not want is a small miss; changing the kind of the stop when they only wanted a different venue rewrites their day.
+- When you DO change "category", the new kind belongs ONLY in "category". NEVER also put it in "constraints".
+
 Rules:
-- Keep "category" the same unless the complaint clearly changes the kind of place.
+- "constraints" are provable venue FEATURES (patio, vegetarian, live music, wheelchair accessible, dog friendly) — never a kind of place, never a price word.
 - Put budget words into "budget"; vibe/feature words into "constraints".
 - Preserve still-relevant original constraints; drop ones the complaint overrides.
 
@@ -704,6 +713,94 @@ async function proposalLeg(
   }
 }
 
+/**
+ * How much of a stop's total is actually spent AT the venue.
+ *
+ * A stop's `total` is occupancy PLUS the table's scheduling margin — the
+ * buffer is transition time, not time inside the door ("the buffer stays the
+ * table's scheduling margin"). Judging openness against the total would demand
+ * that a venue stay open through margin it has nothing to do with, and that is
+ * not a hypothetical: it adapted a 4.7 bar closing at 22:00 away from a
+ * 20:55–21:55 drinks stop whose buffer ran to 22:05. The venue was open the
+ * entire time anyone was in it.
+ *
+ * The split mirrors `buildStop`'s exactly — buffer capped by the total — so
+ * the instant checked here is the same one the committed stop implies.
+ */
+function occupancyMinutes(category: string, totalMinutes: number): number {
+  const { bufferMinutes } = getDuration(category);
+  return Math.max(0, totalMinutes - Math.min(bufferMinutes, totalMinutes));
+}
+
+/**
+ * The last instant actually SPENT at a venue, for a stop starting at `start`
+ * and occupying `occupancy` minutes.
+ *
+ * Occupancy is the half-open interval [start, end): you are there until the
+ * end, not at it. Checking the end instant itself would reject a venue that
+ * closes exactly when you leave — an ordinary plan, not a conflict — because
+ * `isOpenAt` treats the closing minute as closed (`t >= open && t < close`).
+ * So the check lands one minute inside, clamped so it can never precede the
+ * start on a very short stop.
+ */
+function lastMomentOfSlot(start: Date, occupancy: number): Date {
+  const endMs = start.getTime() + occupancy * 60_000;
+  return new Date(Math.max(start.getTime(), endMs - 60_000));
+}
+
+/**
+ * Is this venue usable for the WHOLE slot, rather than only at the moment of
+ * arrival?
+ *
+ * Openness used to be judged at the slot's START and nowhere else — every
+ * caller passed the start, and `isOpenAt` is a single-instant comparison. A
+ * venue that closes MID-SLOT therefore passed every check the swap engine had:
+ * a coffee shop closing at 9:30 was a legal answer for a 9:00–10:00 slot.
+ * That was always wrong, and a category change makes it bite harder, because a
+ * new kind of place brings a new duration the old slot was never sized for.
+ *
+ * It goes through `deps.isUsableAt` — the ONE availability seam — rather than
+ * reaching for hours directly, so a real reservation API replaces both ends of
+ * the slot at once. Keep-on-missing is inherited from that seam: a venue with
+ * no hours data is still usable, exactly as at the start instant.
+ */
+function usableThroughSlot(
+  place: Place,
+  category: string,
+  when: Date,
+  slotMinutes: number,
+  timeZone: string,
+  deps: SwapDeps
+): boolean {
+  if (!Number.isFinite(slotMinutes) || slotMinutes <= 0) return true;
+  const occupancy = occupancyMinutes(category, slotMinutes);
+  if (occupancy <= 0) return true;
+  return deps.isUsableAt(
+    place,
+    lastMomentOfSlot(when, occupancy),
+    category,
+    timeZone
+  );
+}
+
+/**
+ * Slot length for a stop this swap is NOT rescheduling — judge arrival only.
+ *
+ * The whole-slot rule applies to venues this swap actually commits or moves:
+ * the replacement it picked, a stop whose length it changed, a stop it shifted
+ * to a new time. A downstream stop that keeps its committed arrival is none of
+ * those — the swap did not touch it, and the initial pipeline's own filter is
+ * still arrival-only, so re-judging it here under a stricter rule would let an
+ * unrelated swap silently re-kind stops the user never asked about. (The
+ * planner-side asymmetry is real and noted in the devlog as follow-up; the fix
+ * for it belongs in `filterPools`, not in a swap.)
+ */
+const ARRIVAL_ONLY = 0;
+
+// `slotMinutes` is REQUIRED, not optional-with-a-default, on purpose: an
+// optional one would let a future call site silently keep the old
+// start-instant-only behaviour. Every caller has to say how long the stop it
+// is proposing actually lasts — or ARRIVAL_ONLY, deliberately and visibly.
 function usableForProposal(
   place: Place,
   category: string,
@@ -711,6 +808,7 @@ function usableForProposal(
   weather: WeatherHour[] | null,
   now: Date,
   when: Date,
+  slotMinutes: number,
   timeZone: string,
   deps: SwapDeps
 ): boolean {
@@ -726,7 +824,8 @@ function usableForProposal(
   );
   return (
     (pools[category] ?? []).some((candidate) => candidate.id === place.id) &&
-    deps.isUsableAt(place, when, category, timeZone)
+    deps.isUsableAt(place, when, category, timeZone) &&
+    usableThroughSlot(place, category, when, slotMinutes, timeZone, deps)
   );
 }
 
@@ -954,6 +1053,8 @@ async function durationChange(
 
   const startISO = target.start_time!;
   const start = new Date(startISO);
+  // the NEW length is the one to check: extending a stop can push its end past
+  // the venue's closing time even though nothing about its start moved
   if (
     !usableForProposal(
       placeOf(target),
@@ -962,6 +1063,7 @@ async function durationChange(
       weather,
       now,
       start,
+      newTotal,
       tz,
       deps
     )
@@ -1053,7 +1155,32 @@ async function venueSwap(
   refinement: string,
   weather: WeatherHour[] | null
 ): Promise<SwapResult> {
-  const poolKey = interp.path === "research" ? interp.category : target.category;
+  // A CATEGORY CHANGE ("board games instead", "coffee instead of the bar") is
+  // a request for a different KIND of place, and it can only be honoured by
+  // searching that kind's own pool. REFINE_SYSTEM asks the model to pair a new
+  // `category` with path "research", but the path is its CLASSIFICATION and the
+  // category is its ANSWER — when the two disagree, the answer wins. Without
+  // this, a model that renamed the category while leaving path "refilter" had
+  // the change SILENTLY discarded: the swap re-searched the old category and
+  // handed back another bar for "board games instead", with nothing anywhere
+  // reporting that the request had been dropped.
+  // ONE effective path, derived once and used for every decision below — the
+  // pool, the search parse, and the path REPORTED back. Deriving it per
+  // consumer is how a swap ends up searching a new category through the
+  // refilter parse and then telling the client it narrowed the old pool.
+  const changesCategory =
+    interp.category.trim().toLowerCase() !== target.category.trim().toLowerCase();
+  const path: "refilter" | "research" =
+    interp.path === "research" || changesCategory ? "research" : "refilter";
+  const poolKey = path === "research" ? interp.category : target.category;
+
+  // Name the category the user actually ASKED for. "another bar" on a
+  // board-games request is wrong twice over — there is no other bar in
+  // question — and "another board game cafe" is wrong the other way, since
+  // there was never a first one.
+  const noneFound = `Couldn't find ${
+    changesCategory ? "a" : "another"
+  } ${poolKey} that fits — keeping ${target.name}.`;
 
   // A "fancier"/"cheaper" refinement is a PRICE request, read from the RAW
   // text for exactly the reason the distance and time parsers are: price is a
@@ -1090,14 +1217,35 @@ async function venueSwap(
   // is something this codebase has watched happen, so it is a strip, not a
   // hope. Only the MODEL's constraints are filtered — the plan's own stated
   // constraints are its intent, not a leak from this refinement.
-  const interpConstraints = priceDirection
-    ? (interp.constraints ?? []).filter(
-        (constraint) => parsePriceDirection(constraint) === null
-      )
-    : interp.constraints;
+  //
+  // A CATEGORY leaks the same way, and it is the SAME BUG wearing a different
+  // word. REFINE_SYSTEM's "constraint" branch says to fold a different KIND of
+  // venue into `constraints`, so "board games instead" can arrive as category
+  // "board game cafe" AND constraints ["board game cafe"]. A kind of place is
+  // unprovable BY CONSTRUCTION: `constraintEvidence` emits only six provider
+  // booleans, so `placeMeetsAllConstraints` is false for EVERY candidate, the
+  // correction retry fails identically, and the swap refuses with
+  // unmet_constraint permanently — "Couldn't find a bar that's really board
+  // game cafe". The kind is already carried, and carried better: it IS the
+  // pool being searched. As a constraint it is pure duplication with a
+  // permanent refusal attached.
+  //
+  // The strip is deliberately an EQUALITY test against the new category rather
+  // than a keyword list. "with a patio" is a genuine, provider-provable
+  // constraint, and any keyword list broad enough to catch "board games" would
+  // eventually eat it. Normalisation is `normalizeConstraint` — the SAME
+  // function the judge normalises with — so this removes exactly the strings
+  // that would have choked it, and nothing else.
+  const isLeakedConstraint = (constraint: string): boolean =>
+    (priceDirection !== null && parsePriceDirection(constraint) !== null) ||
+    (changesCategory &&
+      normalizeConstraint(constraint) === normalizeConstraint(poolKey));
+  const interpConstraints = (interp.constraints ?? []).filter(
+    (constraint) => !isLeakedConstraint(constraint)
+  );
 
   const searchParsed =
-    interp.path === "refilter"
+    path === "refilter"
       ? scoped(base, { aesthetic: searchAesthetic(base.aesthetic) }, poolKey)
       : scoped(
           base,
@@ -1147,7 +1295,7 @@ async function venueSwap(
     (place) => !excluded.has(place.id) && validLocation(place.location)
   );
   if (candidates.length === 0) {
-    return { swapped: false, reason: `Couldn't find another ${target.category} that fits — keeping ${target.name}.` };
+    return { swapped: false, reason: noneFound };
   }
 
   // "closer" = CODE-side distance ranking against the anchor the user
@@ -1255,7 +1403,7 @@ async function venueSwap(
       swapped: false,
       reason: unmet
         ? `Couldn't find a ${poolKey} that's really ${unmet} — keeping ${target.name}.`
-        : `Couldn't find another ${target.category} that fits — keeping ${target.name}.`,
+        : noneFound,
     };
   }
 
@@ -1269,7 +1417,7 @@ async function venueSwap(
     target.start_time!,
     now,
     deps,
-    interp.path,
+    path,
     sel.reason,
     base,
     floor,
@@ -1327,6 +1475,27 @@ async function timeChange(
 
   const used = new Set<string>(itinerary.stops.map((s) => s.id).filter((id): id is string => !!id));
 
+  // A time-swap moves the slot — it never resizes it, UNLESS the request
+  // carried a duration half too ("start at 6pm for 2 hours"). Otherwise the
+  // stop's own (possibly customized) duration is the source of truth; only
+  // an adapted replacement venue resets to the category default (same
+  // convention as resettleTail).
+  //
+  // Resolved HERE, ahead of the usability check below, because that check now
+  // asks whether the venue is open for the whole slot and cannot answer that
+  // without knowing how long the slot is. Only the ordering moved: a
+  // `resolveNewTotal` refusal is a refusal either way, and plan-then-commit
+  // means neither path has touched the itinerary yet.
+  const { baseMinutes, bufferMinutes } = getDuration(category);
+  const defaultTotal = baseMinutes + bufferMinutes;
+  let requestedTotal: number | null = null;
+  if (interp.duration) {
+    const resolved = resolveNewTotal(category, target, interp.duration);
+    if (!resolved.ok) return { swapped: false, reason: resolved.reason };
+    requestedTotal = resolved.total;
+  }
+  const keptTotal = requestedTotal ?? target.durationMinutes?.total ?? defaultTotal;
+
   // (a) the anchor itself: keep its venue if usable at the new time, else
   // adapt, else notify.
   let anchorPick: Place | undefined;
@@ -1339,6 +1508,7 @@ async function timeChange(
       weather,
       now,
       nd,
+      keptTotal,
       tz,
       deps
     )
@@ -1368,22 +1538,9 @@ async function timeChange(
       reason: `The route into ${target.name} can't be verified because its location is missing.`,
     };
   }
-  // A time-swap moves the slot — it never resizes it, UNLESS the request
-  // carried a duration half too ("start at 6pm for 2 hours"). Otherwise the
-  // stop's own (possibly customized) duration is the source of truth; only
-  // an adapted replacement venue resets to the category default (same
-  // convention as resettleTail).
-  const { baseMinutes, bufferMinutes } = getDuration(category);
-  const defaultTotal = baseMinutes + bufferMinutes;
-  let requestedTotal: number | null = null;
-  if (interp.duration) {
-    const resolved = resolveNewTotal(category, target, interp.duration);
-    if (!resolved.ok) return { swapped: false, reason: resolved.reason };
-    requestedTotal = resolved.total;
-  }
-  const anchorTotal = anchorPick
-    ? defaultTotal
-    : requestedTotal ?? target.durationMinutes?.total ?? defaultTotal;
+  // an ADAPTED replacement venue resets to the category default; a kept venue
+  // holds the length resolved above
+  const anchorTotal = anchorPick ? defaultTotal : keptTotal;
   const anchorEnd = new Date(newStartMs + anchorTotal * 60_000);
   const anchorInboundPlan = await planAnchorInbound(
     itinerary,
@@ -1586,6 +1743,23 @@ async function resettleTail(
     let venue: Place | undefined;
     let sel: Selection | undefined;
 
+    // This stop's length, resolved BEFORE the usability checks below because
+    // they now ask whether the venue is open for the whole slot. The rule is
+    // the one the commit at the bottom of this loop already applied: a KEPT
+    // stop holds its own (possibly customized) duration, an ADAPTED
+    // replacement takes the category default.
+    const stopDefaults = getDuration(stop.category);
+    const stopDefaultTotal =
+      stopDefaults.baseMinutes + stopDefaults.bufferMinutes;
+    const keptTotal = stop.durationMinutes?.total ?? stopDefaultTotal;
+
+    // Did THIS swap actually reschedule the stop? `preserveCommittedStarts`
+    // holds a downstream stop at its committed time whenever the change in
+    // front of it did not overflow; that stop is untouched and is judged on
+    // arrival, as it was planned. One the swap genuinely moves is a stop whose
+    // times the swap now owns, so its whole new slot is re-validated.
+    const movedByThisSwap = startMs !== committedStartMs;
+
     // try the existing venue; adapt if it isn't usable by the new arrival
     if (
       !usableForProposal(
@@ -1595,6 +1769,7 @@ async function resettleTail(
         weather,
         now,
         new Date(startMs),
+        movedByThisSwap ? keptTotal : ARRIVAL_ONLY,
         tz,
         deps
       )
@@ -1640,6 +1815,7 @@ async function resettleTail(
             weather,
             now,
             new Date(candidateStartMs),
+            stopDefaultTotal,
             tz,
             deps
           )
@@ -1668,9 +1844,8 @@ async function resettleTail(
 
     // keep the stop's own duration when it's kept (a prior duration-swap
     // must survive a later reflow); an adapted venue takes the default.
-    const { baseMinutes, bufferMinutes } = getDuration(stop.category);
-    const defaultTotal = baseMinutes + bufferMinutes;
-    const totalMinutes = venue ? defaultTotal : stop.durationMinutes?.total ?? defaultTotal;
+    // Both were resolved above, where the slot-length checks needed them.
+    const totalMinutes = venue ? stopDefaultTotal : keptTotal;
     const endMs = startMs + totalMinutes * 60_000;
     const startISO = toZonedISO(new Date(startMs), tz);
     changes.push({
@@ -1724,11 +1899,19 @@ async function findReplacement(
   const parsed = scoped(base, {}, category);
   const rawPools = await deps.searchPools(parsed, [category]);
   const { pools } = filterPools(rawPools, parsed, weather, now, when, timeZone);
+  // A replacement always takes the category's default length (the convention
+  // every caller applies on adapt), so that is the slot it has to stay open
+  // through — screening here keeps a closes-mid-slot venue from being proposed
+  // and then rejected a few lines later by the caller's own check.
+  const replacementDefaults = getDuration(category);
+  const replacementTotal =
+    replacementDefaults.baseMinutes + replacementDefaults.bufferMinutes;
   const candidates = (pools[category] ?? []).filter(
     (p) =>
       !excluded.has(p.id) &&
       validLocation(p.location) &&
-      deps.isUsableAt(p, when, category, timeZone)
+      deps.isUsableAt(p, when, category, timeZone) &&
+      usableThroughSlot(p, category, when, replacementTotal, timeZone, deps)
   );
   if (candidates.length === 0) return null;
   const sels = await deps.selectVenues(parsed, { [category]: candidates });
@@ -1834,6 +2017,7 @@ async function finalize(
       weather,
       now,
       start,
+      total,
       tz,
       deps
     )

@@ -56,6 +56,19 @@ straight map polyline.
   price-direction swap will decline it and may refuse with the other
   message ("can't compare prices for this <category>"). That is the rule,
   not a fixture bug: keep-on-missing still applies to ordinary swaps.
+- **Category-changing swaps** are triggered by a refinement that NAMES a
+  different kind of place: `board games` → `board game cafe`, `coffee
+  instead` → `coffee shop` (`MOCK_CATEGORY_CHANGES` in `fixtures.ts`).
+  Any unknown category gets a synthesised `genericPool`, so the new kind
+  lands on **Fixture Board game cafe One/Two/Three**. The fixture returns
+  the shape a real model has been SEEN to return, not the tidy one: path
+  `"refilter"` disagreeing with its own new `category`, and that category
+  ALSO leaked into `constraints`. Both are deliberate — the engine has to
+  honour the answer over the path, and strip the leak before the judge, or
+  `mockSelect` (real `placeMeetsAllConstraints`) answers unmet_constraint
+  and the swap refuses. Plain dissatisfaction ("somewhere else",
+  "cheaper", "surprise me") is deliberately NOT a trigger: those must stay
+  same-category, and the specs that swap with them are the proof.
 - Drinks pick is **Ten O'Clock Curfew** (4.7, closes 22:00) — pushing
   drinks past 10 PM fires the ADAPT path (→ The Standing Room, open to 2).
   **Night Owl** (4.1, NO listed hours) is the bar pool's any-hour

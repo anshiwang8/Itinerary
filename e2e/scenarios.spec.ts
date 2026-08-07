@@ -261,6 +261,45 @@ test("active stop can't be swapped; an upcoming one still can @mock", async ({ p
   await expect(page.locator(".lstrip__swapinput")).toBeVisible();
 });
 
+// ── category-changing swaps ──────────────────────────────────────────────
+// "board games instead" on a dinner must produce a board-game cafe, not
+// another restaurant. The fixture interpret returns the shape a real model has
+// been seen to return — path "refilter" disagreeing with its own new category,
+// and that category ALSO leaked into constraints — so this exercises both
+// guarantees through the real engine and the real constraint machinery.
+test("swap into a DIFFERENT KIND of place re-kinds the stop @mock", async ({ page }) => {
+  await planEvening(page, "dinner and drinks");
+  await expect(stripCard(page, "Velvet Fig").locator(".eyebrow")).toHaveText(/dinner/i);
+
+  await swapOn(page, "Velvet Fig", "board games instead");
+
+  // the stop is now a board game cafe, from that pool — NOT another dinner
+  const swapped = page.locator(".lstrip__stop").first();
+  await expect(swapped.locator(".eyebrow")).toHaveText(/board game cafe/i, { timeout: 15_000 });
+  await expect(swapped.locator(".lstrip__name")).toHaveText(/Fixture Board game cafe/);
+  await expect(stripCard(page, "Velvet Fig")).toHaveCount(0);
+  // If the engine failed to strip the leaked kind from constraints, mockSelect
+  // (which runs the real placeMeetsAllConstraints) would answer
+  // unmet_constraint and the swap would REFUSE — Velvet Fig would still be
+  // here and the assertions above would fail. This is that guarantee, live.
+  await expectStripMatchesPin(page, "Fixture Board game cafe One");
+  // the drinks stop is untouched: a swap holds its own slot
+  await expectStripMatchesPin(page, "Ten O'Clock Curfew");
+});
+
+test("a same-kind swap phrase does NOT change the category @mock", async ({ page }) => {
+  // The guardrail, end to end: plain dissatisfaction is a different VENUE of
+  // the same kind. If "somewhere else" ever started changing categories, this
+  // is what would catch it in the product rather than in a unit test.
+  await planEvening(page, "dinner and drinks");
+  await swapOn(page, "Velvet Fig", "somewhere else");
+
+  const swapped = page.locator(".lstrip__stop").first();
+  await expect(swapped.locator(".eyebrow")).toHaveText(/dinner/i, { timeout: 15_000 });
+  await expect(swapped.locator(".lstrip__name")).not.toHaveText(/Velvet Fig/);
+  await expect(swapped.locator(".lstrip__name")).not.toHaveText(/Fixture/);
+});
+
 // ── duplicate categories (code-audit 2026-07-18 §7.1 / §7.2) ────────────
 // "drinks at 7pm then another bar" is TWO stops sharing ONE pool. Before
 // the fix, pools keyed by category collapsed them into a single stop and
