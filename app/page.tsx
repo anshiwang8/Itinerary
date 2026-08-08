@@ -49,6 +49,7 @@ import {
   parseSwapPayload,
   parseTravelPayload,
   parseWeatherPayload,
+  type SwapEndTimeConfirm,
 } from "./lib/clientPayloads";
 import {
   arrivalForRow,
@@ -62,6 +63,7 @@ import { useAuth } from "./lib/useAuth";
 import { userInitials, userLabel } from "./lib/authUser";
 import LoginScreen from "./LoginScreen";
 import StopItineraryDialog from "./StopItineraryDialog";
+import SwapEndTimeDialog from "./SwapEndTimeDialog";
 import HistoryPanel from "./HistoryPanel";
 import TasteSurvey from "./TasteSurvey";
 import {
@@ -437,6 +439,9 @@ export default function Home() {
   const [swapText, setSwapText] = useState("");
   const [swapping, setSwapping] = useState(false);
   const [swapError, setSwapError] = useState<string | null>(null);
+  /** A swap whose push runs the day past the stated end and is waiting on an
+   *  answer. Non-null means the dialog is up; nothing has been written. */
+  const [swapConfirm, setSwapConfirm] = useState<SwapEndTimeConfirm | null>(null);
   const [weather, setWeather] = useState<WeatherHour[] | null>(null);
 
   // The weather chip renders ONLY the plan's own forecast, fetched with the
@@ -1203,8 +1208,20 @@ export default function Home() {
         );
       }
 
-      // auto-store the itinerary so the live/reroute controls work at once
-      await storeItinerary(stops, legs, hl, parseData, pools, "", hp, planZone);
+      // auto-store the itinerary so the live/reroute controls work at once.
+      // The stated end rides along: `checkWindowFit` above validated the
+      // INITIAL plan against it, and a swap hours later needs the same fact.
+      await storeItinerary(
+        stops,
+        legs,
+        hl,
+        parseData,
+        pools,
+        "",
+        hp,
+        planZone,
+        ctx.plan.timeIntent.endISO
+      );
     } catch (err) {
       setError(clientErrorMessage(err));
     } finally {
@@ -1571,7 +1588,11 @@ export default function Home() {
     poolsIn: Pools,
     simValue: string,
     home?: { label: string; location: { latitude: number; longitude: number } } | null,
-    timeZone?: string
+    timeZone?: string,
+    /** the end the user STATED, if any — null/absent for the great majority of
+     *  prompts, and that absence is what later lets a swap push the day as far
+     *  as opening hours allow */
+    plannedEndISO?: string | null
   ) {
     const enriched = sched.map((st) => {
       const loc = st.id ? (poolsIn[st.category] ?? []).find((p) => p.id === st.id)?.location : undefined;
@@ -1591,6 +1612,7 @@ export default function Home() {
           homeLeg: hl,
           ...(home ? { home } : {}),
           ...(timeZone ? { timeZone } : {}),
+          ...(plannedEndISO ? { plannedEndISO } : {}),
         }),
         parse: parseCreatePayload,
       });
@@ -1890,7 +1912,13 @@ export default function Home() {
 
   // Surgical per-stop swap: replace the selected upcoming stop from its
   // mini-prompt, reusing the reroute reflow visuals for the result.
-  async function doSwap() {
+  //
+  // `endTimeAccepted` re-runs the SAME refinement after the user answered the
+  // "this ends later than you said" question. It is a re-run, not a replay of
+  // a stored proposal: the engine holds no per-request state, and `version`
+  // still rides along, so a plan that changed underneath 409s rather than
+  // applying yesterday's answer to today's plan.
+  async function doSwap(endTimeAccepted = false) {
     if (!itinerary || !selected) return;
     const refinement = swapText.trim();
     if (!refinement) return;
@@ -1908,10 +1936,14 @@ export default function Home() {
     setBanner(null);
     const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
     let mutationApplied = false;
+    let awaitingEndTimeAnswer = false;
     // pre-swap starts (by id) so downstream shifts can strike-through
     const oldById = Object.fromEntries(
       itinerary.stops.filter((s) => s.id).map((s) => [s.id as string, s.start_time])
     );
+    // ...and the target's own start by INDEX, because its venue id is the one
+    // thing this operation is expected to change
+    const targetOldStart = itinerary.stops[stopIndex]?.start_time ?? null;
     try {
       const data = await fetchJson(`/api/itinerary/${itinerary.id}/swap`, {
         method: "POST",
@@ -1921,15 +1953,24 @@ export default function Home() {
           refinement,
           version: itinerary.version,
           ...(nowISO ? { now: nowISO } : {}),
+          ...(endTimeAccepted ? { endTimeAccepted: true } : {}),
         }),
         parse: parseSwapPayload,
       });
       if (!data.swapped) {
+        // A QUESTION, not a refusal: the push works, it just ends later than
+        // they said. Nothing was written, so holding it open costs nothing.
+        if (data.confirm) {
+          awaitingEndTimeAnswer = true;
+          setSwapConfirm(data.confirm);
+          return;
+        }
         // honest refusal — nothing better found, original kept
         setBannerFlat(true);
         setBanner(data.reason);
         return;
       }
+      setSwapConfirm(null);
       mutationApplied = true;
       const updated = await readItinerary(itinerary.id, nowISO ?? "");
 
@@ -1939,8 +1980,21 @@ export default function Home() {
       if (!swapped) {
         throw new Error("The service returned an unexpected response. Please try again.");
       }
-      // the swapped stop: venue changed, slot held → no time strike, just settle
-      if (swapped.id) ids.add(swapped.id);
+      // The swapped stop. Usually the slot is HELD and only the venue changes,
+      // so there is no old time worth striking — but a replacement the inbound
+      // leg can't reach in time now pushes its own slot later, and then the
+      // stop the user is staring at has a new time with nothing showing that
+      // it moved. Strike it only when it actually did.
+      //
+      // Read by INDEX, not out of `oldById`: that map is keyed by venue id and
+      // this stop's venue is precisely what just changed, so the id it is
+      // filed under no longer exists.
+      if (swapped.id) {
+        ids.add(swapped.id);
+        if (targetOldStart != null && targetOldStart !== swapped.start_time) {
+          olds[swapped.id] = targetOldStart;
+        }
+      }
       // downstream shifts: their times moved → strike old, settle new
       for (const downstreamIndex of data.downstreamShifted) {
         const stop = updated.stops[downstreamIndex];
@@ -1991,7 +2045,11 @@ export default function Home() {
     } finally {
       setSwapping(false);
       endOperation(operation);
-      if (focusTargetId) requestStripFocus(focusTargetId);
+      // Not when a dialog just opened: the strip would pull focus straight
+      // back out of it, and a modal nobody's keyboard is inside is worse than
+      // no modal. The dialog owns focus while it is up, and hands it back
+      // through this same path once the answer lands.
+      if (focusTargetId && !awaitingEndTimeAnswer) requestStripFocus(focusTargetId);
     }
   }
 
@@ -2587,6 +2645,28 @@ export default function Home() {
           busy={stopBusy}
           error={stopError}
           onChoose={(choice) => void chooseStop(choice)}
+        />
+      )}
+
+      {/* The push works but ends the day later than they said. DECLINE simply
+          drops the dialog: the server never wrote anything, so there is
+          nothing to undo and no request to send. */}
+      {swapConfirm && (
+        <SwapEndTimeDialog
+          confirm={swapConfirm}
+          busy={swapping}
+          error={swapError}
+          onDecide={(accepted) => {
+            if (!accepted) {
+              setSwapConfirm(null);
+              setBannerFlat(true);
+              setBanner(
+                `Kept your plan as it is — it still ends by ${swapConfirm.statedEndLabel}.`
+              );
+              return;
+            }
+            void doSwap(true);
+          }}
         />
       )}
 

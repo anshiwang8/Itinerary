@@ -78,6 +78,23 @@ straight map polyline.
 - **Sundown Scoops** (dessert, closes 21:00) is the downstream adapt
   trigger for late-shifted evenings; **Midnight Flour** is its late
   replacement.
+- **"riverside"** in a swap refinement is THE PUSH trigger: it maps to the
+  `riverside bar` category (`MOCK_CATEGORY_CHANGES`), whose one venue —
+  **Riverside Long Bar** (4.6, $$, 16–02) — sits ~12 km east, which
+  `mockLeg` turns into a ~53-minute transit ride. Every other fixture is a
+  three-minute walk from the rest of the strip, so this is the only
+  deterministic way to reach "the replacement can't be reached at its
+  committed start", which now PUSHES the later stops back rather than
+  refusing. It lives behind its own category (like `tiny bar` / `late
+  gallery`) so it can never enter the BAR pool and displace a pinned pick,
+  and it is open to 2 AM on purpose — the pushed arrival must not be the
+  thing that fails, or the test would be proving the closing-time refusal
+  instead. It resolves to the same 70-minute `bar` duration as drinks, so
+  the slot's LENGTH is held and only its start moves.
+  Pair it with a stated FINISH ("dinner and drinks from 5-8pm") and the
+  push exceeds the plan's `plannedEndISO`, which opens the end-time
+  confirmation dialog instead of applying. Without a stated finish there is
+  no ceiling and no dialog.
 - Fixtures carry an `editorialSummary` (the card's description line) —
   EXCEPT **Sundown Scoops**, deliberately description-less (the
   absent-description case). Two summaries double as **constraint
@@ -175,7 +192,10 @@ All of the above are pinned exact-text in `failloud.spec.ts`.
   cheaper swap ($$$ → $$), description present/absent, swap input takes
   real keystrokes with spaces, repeated swaps (cheaper → fancier →
   cheaper), swap-then-reroute (locked swapped stop survives), active-stop
-  swap rejection. Uses the dev time-sim (`simAt`) for status control.
+  swap rejection, and the SLOT PUSH (an unreachable replacement moves its
+  own slot later and cascades; past a stated finish it asks first —
+  decline keeps the plan, accept applies it). Uses the dev time-sim
+  (`simAt`) for status control.
 - `helpers.ts` — `planEvening(page, prompt)`,
   `planExpectingProblem(page, prompt)` (fail-loud counterpart — asserts
   the surface, returns the message), `swapOn(page, venue, refinement)`,

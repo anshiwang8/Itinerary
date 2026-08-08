@@ -299,7 +299,63 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "farther venue replacement cannot reach the fixed target slot",
+    // REWRITTEN with the push feature. This case used to assert that a
+    // replacement the inbound leg cannot reach in time is REFUSED outright
+    // ("cannot reach the fixed target slot") — the target's start was fixed,
+    // so there was nowhere for the extra travel to go. The slot may now start
+    // later, and the whole tail resettles behind it. The atomicity this file
+    // is about is unchanged and is asserted below: one coherent commit, no
+    // half-applied chain.
+    "farther venue replacement pushes its own slot and cascades the whole tail",
+    async () => {
+      const plan = itinerary();
+      const far = venue("far-bar", 44);
+      const h = harness({
+        intent: "venue",
+        pools: { bar: [far] },
+        routeMinutes: (_origin, destination) =>
+          destination.latitude >= 44 ? 30 : 10,
+      });
+      const result = await swapStop(plan, 1, "somewhere else", now, h.deps);
+
+      assert.strictEqual(result.swapped, true);
+      if (!result.swapped) return;
+      assert.strictEqual(plan.stops[1].id, "far-bar");
+      // dinner ends 20:00, the leg out to far-bar is 30 minutes, so 20:30 is
+      // the earliest it can be reached — twenty past the committed 20:10
+      assert.strictEqual(new Date(plan.stops[1].start_time!).getTime(), new Date(T(20, 30)).getTime());
+      assert.strictEqual(new Date(plan.stops[1].end_time!).getTime(), new Date(T(21, 40)).getTime());
+
+      // THREE deep: the push cascades bar → dessert → park, each start
+      // recomputed from its own real leg rather than shifted by a delta
+      assert.deepStrictEqual(result.downstreamShifted, [2, 3]);
+      assert.strictEqual(new Date(plan.stops[2].start_time!).getTime(), new Date(T(21, 50)).getTime());
+      assert.strictEqual(new Date(plan.stops[2].end_time!).getTime(), new Date(T(22, 30)).getTime());
+      assert.strictEqual(new Date(plan.stops[3].start_time!).getTime(), new Date(T(22, 40)).getTime());
+      assert.strictEqual(new Date(plan.stops[3].end_time!).getTime(), new Date(T(23, 25)).getTime());
+
+      // every kept stop keeps its own venue and its own length — a push moves
+      // stops, it never shortens them to buy room
+      assert.strictEqual(plan.stops[2].id, "s1");
+      assert.strictEqual(plan.stops[3].id, "p1");
+      assert.strictEqual(plan.stops[2].durationMinutes?.total, 40);
+      assert.strictEqual(plan.stops[3].durationMinutes?.total, 45);
+
+      // upstream of the change, nothing moved
+      assert.strictEqual(plan.stops[0].start_time, T(19, 0));
+      assert.strictEqual(plan.stops[0].end_time, T(20, 0));
+
+      // the committed chain is internally consistent: no stop starts before
+      // the previous one ends, which is what a half-applied push would break
+      for (let i = 1; i < plan.stops.length; i++) {
+        const prevEnd = new Date(plan.stops[i - 1].end_time!).getTime();
+        const start = new Date(plan.stops[i].start_time!).getTime();
+        assert.ok(start >= prevEnd, `stop ${i} starts before stop ${i - 1} ends`);
+      }
+    },
+  ],
+  [
+    "a push whose tail is stranded leaves the plan byte-identical",
     async () => {
       const plan = itinerary();
       const before = JSON.stringify(plan);
@@ -309,16 +365,22 @@ const cases: Array<[string, () => Promise<void>]> = [
         pools: { bar: [far] },
         routeMinutes: (_origin, destination) =>
           destination.latitude >= 44 ? 30 : 10,
+        // the pushed dessert arrival is unusable, and so is the only
+        // replacement the re-search can offer
+        unusableIds: ["s1", "dessert-fresh"],
       });
-      const result = await swapStop(
-        plan,
-        1,
-        "somewhere else",
-        now,
-        h.deps
-      );
+      const result = await swapStop(plan, 1, "somewhere else", now, h.deps);
+
       assert.strictEqual(result.swapped, false);
-      assert.strictEqual(JSON.stringify(plan), before);
+      if (result.swapped) return;
+      // a stranded stop is a FACT, so it refuses rather than asking
+      assert.strictEqual(result.confirm, undefined);
+      assert.match(result.reason, /moving the later stops back/i);
+      assert.strictEqual(
+        JSON.stringify(plan),
+        before,
+        "a failed cascade must not leave a partially pushed chain behind"
+      );
     },
   ],
   [

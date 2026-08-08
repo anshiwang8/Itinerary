@@ -300,6 +300,80 @@ test("a same-kind swap phrase does NOT change the category @mock", async ({ page
   await expect(swapped.locator(".lstrip__name")).not.toHaveText(/Fixture/);
 });
 
+// ── pushing the later stops back ─────────────────────────────────────────
+// Every other fixture is a few hundred metres from the rest of the strip, so
+// a swap always fits the gap the schedule left. "Riverside Long Bar" is ~12 km
+// out (a ~53-minute fixture transit ride), which is the deterministic way to
+// reach a replacement that CANNOT be at its committed start. That used to be
+// an outright refusal; it now moves the slot later and cascades.
+test("a replacement too far to reach pushes its slot and the stops after it @mock", async ({
+  page,
+}) => {
+  await planEvening(page, "dinner and drinks");
+  const drinksBefore = await stripCard(page, "Ten O'Clock Curfew")
+    .locator(".lstrip__be")
+    .innerText();
+
+  await swapOn(page, "Ten O'Clock Curfew", "a riverside bar instead");
+
+  // it committed rather than refusing — the whole point of the feature
+  const swapped = stripCard(page, "Riverside Long Bar");
+  await expect(swapped).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".banner--show")).toContainText(/can't be reached any earlier/i);
+
+  // and it says so on the card: the pushed stop shows its OLD time struck
+  // through beside the new one, because its own slot moved
+  await expect(swapped.locator(".old-time")).toBeVisible();
+  await expect(swapped.locator(".new-time")).toBeVisible();
+  const drinksAfter = await swapped.locator(".lstrip__be").innerText();
+  expect(drinksAfter).not.toBe(drinksBefore);
+
+  // strip, map and store still agree on when it is — the desync check
+  await expectStripMatchesPin(page, "Riverside Long Bar");
+  // dinner is upstream of the change and must not have moved
+  await expectStripMatchesPin(page, "Velvet Fig");
+  await expect(stripCard(page, "Velvet Fig").locator(".old-time")).toHaveCount(0);
+});
+
+test("a push past a STATED end asks first: decline keeps the plan, accept applies it @mock", async ({
+  page,
+}) => {
+  // "from 5-8pm" is a stated FINISH, so the plan carries an end instant the
+  // swap engine can check the push against. Without one there is no ceiling
+  // and no question — that is the case the test above covers.
+  await planEvening(page, "dinner and drinks from 5-8pm");
+  const drinksBefore = await stripCard(page, "Ten O'Clock Curfew")
+    .locator(".lstrip__be")
+    .innerText();
+
+  await swapOn(page, "Ten O'Clock Curfew", "a riverside bar instead");
+
+  // ── it ASKS rather than applying ──
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible({ timeout: 15_000 });
+  await expect(dialog).toContainText(/push your day to .* instead of 8:00 PM/i);
+
+  // ── DECLINE: nothing was ever written, so the plan is exactly as it was ──
+  await dialog.getByRole("button", { name: /keep it as it is/i }).click();
+  await expect(dialog).toBeHidden();
+  await expect(stripCard(page, "Ten O'Clock Curfew")).toBeVisible();
+  await expect(stripCard(page, "Riverside Long Bar")).toHaveCount(0);
+  expect(
+    await stripCard(page, "Ten O'Clock Curfew").locator(".lstrip__be").innerText()
+  ).toBe(drinksBefore);
+  await expectStripMatchesPin(page, "Ten O'Clock Curfew");
+
+  // ── ACCEPT: the same swap, now with consent, applies the push ──
+  await swapOn(page, "Ten O'Clock Curfew", "a riverside bar instead");
+  const again = page.getByRole("alertdialog");
+  await expect(again).toBeVisible({ timeout: 15_000 });
+  await again.getByRole("button", { name: /^continue/i }).click();
+
+  await expect(stripCard(page, "Riverside Long Bar")).toBeVisible({ timeout: 15_000 });
+  await expect(stripCard(page, "Ten O'Clock Curfew")).toHaveCount(0);
+  await expectStripMatchesPin(page, "Riverside Long Bar");
+});
+
 // ── duplicate categories (code-audit 2026-07-18 §7.1 / §7.2) ────────────
 // "drinks at 7pm then another bar" is TWO stops sharing ONE pool. Before
 // the fix, pools keyed by category collapsed them into a single stop and

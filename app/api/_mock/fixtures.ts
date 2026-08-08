@@ -250,6 +250,31 @@ const TINY_BAR: Place[] = [
     "A single-room bar used to exercise a genuinely narrowed second slot."
   ),
 ];
+// THE PUSH trigger. Every other fixture sits within a few hundred metres of
+// the rest of the strip, so their legs are three-minute walks and a swap
+// always fits the gap the schedule already left. This one is ~12 km east,
+// which `mockLeg` turns into a ~53-minute transit ride — far longer than that
+// gap — so swapping into it is the deterministic way to reach "the
+// replacement can't be reached at its committed start", which now pushes the
+// later stops back instead of refusing.
+//
+// It lives behind its OWN category, like `tiny bar` and `late gallery`, so it
+// can never enter the BAR pool and displace the picks other specs pin.
+// Open 16:00–02:00 on purpose: the pushed arrival must never be what fails,
+// or the test would be proving the closing-time refusal instead.
+const RIVERSIDE_BAR: Place[] = [
+  venue(
+    "fx_bar_riverside",
+    "Riverside Long Bar",
+    43.6491,
+    -79.2716,
+    4.6,
+    "PRICE_LEVEL_MODERATE",
+    16,
+    2,
+    "A long bar clear across the city — getting there is most of the trip."
+  ),
+];
 
 // unknown categories still get a small deterministic pool
 const genericCache = new Map<string, Place[]>();
@@ -287,6 +312,7 @@ export function poolFor(category: string, hasNeighbourhood = false): Place[] {
   if (/\bbao\b/i.test(category)) return hasNeighbourhood ? [BAO_CLOSED] : [BAO_OPEN];
   if (/\blate gallery\b/i.test(category)) return LATE_GALLERY;
   if (/\btiny bar\b/i.test(category)) return TINY_BAR;
+  if (/\briverside bar\b/i.test(category)) return RIVERSIDE_BAR;
   // "beach" is the deliberately EMPTY park-family pool: it shares the park
   // plausible band (so the time-gate fires late at night) but nothing is
   // ever found — the deterministic trigger for "override finds nothing →
@@ -1157,6 +1183,10 @@ export function mockWeather(): WeatherHour[] {
 const MOCK_CATEGORY_CHANGES: Array<[RegExp, string]> = [
   [/\bboard games?\b/i, "board game cafe"],
   [/\bcoffee instead\b/i, "coffee shop"],
+  // the push trigger — a kind of bar that only exists across town. It
+  // resolves to the same 70-minute `bar` duration as drinks, so the slot's
+  // LENGTH is held and the only thing the scenario changes is when it starts.
+  [/\briverside\b/i, "riverside bar"],
 ];
 
 export function mockSwapDeps(

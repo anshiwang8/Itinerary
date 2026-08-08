@@ -52,6 +52,11 @@ export async function POST(
     const nowISO = parseOptionalInstant(body.now, "now");
     const expectedVersion = parseOptionalVersion(body.version);
     const now = nowISO ? new Date(nowISO) : new Date();
+    // The user was shown "this pushes your day to 11:20 PM" and said continue.
+    // Strictly boolean-true: anything else (absent, "false", 1, "yes") is NOT
+    // consent, because the safe reading of an unclear answer is the one that
+    // asks again rather than the one that silently rewrites their evening.
+    const endTimeAccepted = body.endTimeAccepted === true;
 
     const updated = await updateItinerary(
       id,
@@ -63,7 +68,18 @@ export async function POST(
             "`stopIndex` is outside this itinerary."
           );
         }
-        const result = await swapStop(proposal, stopIndex, refinement, now);
+        const result = await swapStop(
+          proposal,
+          stopIndex,
+          refinement,
+          now,
+          {},
+          endTimeAccepted
+        );
+        // A needs-confirmation result is `swapped: false`, so it lands here as
+        // `changed: false` — no version bump, no CAS, nothing written. That is
+        // the whole mechanism behind "decline costs nothing": the question is
+        // asked from a proposal that was never committed in the first place.
         return { value: result, changed: result.swapped };
       },
       { expectedVersion, maxAttempts: 2 }

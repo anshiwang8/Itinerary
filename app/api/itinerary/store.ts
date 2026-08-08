@@ -47,6 +47,21 @@ export interface Itinerary {
    * every read (GET/swap/reroute/dev-sim) uses the SAME zone. Absent →
    * America/Toronto (pre-multi-city plans, Toronto, unresolvable). */
   timeZone?: string;
+  /**
+   * The end the USER STATED, resolved to an instant ("back by 10", "3-8pm").
+   * Absent whenever they never named a finish — which is most plans, every
+   * plan created before this field existed, and the deliberate meaning of
+   * "no ceiling": a swap may then push the day as late as real opening hours
+   * allow. Code must NEVER invent one; the planner works under the same rule
+   * ("an end time is a stated fact or nothing").
+   *
+   * It is persisted because it outlives the request that knew it. The planner
+   * resolves it, `checkWindowFit` validates the INITIAL plan against it in the
+   * browser, and then it used to be dropped — so a swap hours later had no way
+   * to know the day was supposed to be over by ten. Same reason
+   * `ownerIsAnonymous` is recorded at creation rather than looked up later.
+   */
+  plannedEndISO?: string;
   /** original parse output — the reroute engine re-runs the pipeline with it */
   parsed?: ParsedPrompt;
   /**
@@ -423,7 +438,8 @@ export function createItinerary(
   parsed?: ParsedPrompt,
   homeLeg?: TravelLeg | null,
   home?: HomePoint | null,
-  timeZone?: string | null
+  timeZone?: string | null,
+  plannedEndISO?: string | null
 ): Itinerary {
   const itinerary: Itinerary = {
     id: crypto.randomUUID(),
@@ -440,6 +456,7 @@ export function createItinerary(
     ...(homeLeg ? { homeLeg } : {}),
     ...(home ? { home } : {}),
     ...(timeZone ? { timeZone } : {}),
+    ...(plannedEndISO ? { plannedEndISO } : {}),
     ...(parsed ? { parsed } : {}),
   };
   return itinerary;

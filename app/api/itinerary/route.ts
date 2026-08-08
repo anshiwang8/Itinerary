@@ -25,6 +25,7 @@ import {
 } from "../_shared/http";
 import {
   parseHomePoint,
+  parseOptionalInstant,
   parseOptionalTimeZone,
   parseParsedPrompt,
   parseScheduledStops,
@@ -50,6 +51,10 @@ export async function POST(request: NextRequest) {
         : parseTravelLegs([body.homeLeg], "homeLeg")[0];
     const home: HomePoint | undefined = parseHomePoint(body.home);
     const timeZone = parseOptionalTimeZone(body.timeZone);
+    // The end the user STATED, if they stated one. Optional on purpose: most
+    // prompts name no finish, and absent means "no ceiling" downstream rather
+    // than a default anyone invented.
+    const plannedEndISO = parseOptionalInstant(body.plannedEndISO, "plannedEndISO");
 
     // WHO is creating this, verified from the token — never from the body.
     // Null (mock e2e, no Admin credentials, guest before anonymous sign-in
@@ -57,7 +62,7 @@ export async function POST(request: NextRequest) {
     // did before this slice.
     const caller = await verifyCaller(request);
     const itinerary = stampOwner(
-      createItinerary(stops, legs, parsed, homeLeg, home, timeZone),
+      createItinerary(stops, legs, parsed, homeLeg, home, timeZone, plannedEndISO),
       caller
     );
     const stored = await saveItinerary(itinerary);

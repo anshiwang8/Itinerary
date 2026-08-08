@@ -42,8 +42,24 @@ export type ReroutePayload =
       }>;
     };
 
+/** The engine's proposal ran the day past the end the user stated. Mirrors
+ *  `EndTimeConfirm` in the swap engine; labels are pre-formatted THERE, in the
+ *  plan's zone, so the browser never renders a plan time in the viewer's. */
+export interface SwapEndTimeConfirm {
+  proposedEndISO: string;
+  statedEndISO: string;
+  overrunMinutes: number;
+  proposedEndLabel: string;
+  statedEndLabel: string;
+}
+
 export type SwapPayload =
-  | { swapped: false; reason: string }
+  | {
+      swapped: false;
+      reason: string;
+      /** present ⇒ a QUESTION the user can answer yes to, not a refusal */
+      confirm?: SwapEndTimeConfirm;
+    }
   | {
       swapped: true;
       reason: string;
@@ -599,10 +615,29 @@ export function parseReroutePayload(value: unknown): ReroutePayload {
   return data as unknown as ReroutePayload;
 }
 
+function swapEndTimeConfirm(value: unknown): SwapEndTimeConfirm | undefined {
+  if (value === undefined) return undefined;
+  const data = record(value);
+  if (
+    !validInstant(data.proposedEndISO) ||
+    !validInstant(data.statedEndISO) ||
+    typeof data.overrunMinutes !== "number" ||
+    !Number.isFinite(data.overrunMinutes) ||
+    typeof data.proposedEndLabel !== "string" ||
+    typeof data.statedEndLabel !== "string"
+  ) {
+    // A malformed confirmation must not become a silent plain refusal — the
+    // user would be told "no" to something the engine was willing to do.
+    throw new Error("invalid swap confirmation");
+  }
+  return data as unknown as SwapEndTimeConfirm;
+}
+
 export function parseSwapPayload(value: unknown): SwapPayload {
   const data = record(value);
   if (data.swapped === false && typeof data.reason === "string") {
-    return { swapped: false, reason: data.reason };
+    const confirm = swapEndTimeConfirm(data.confirm);
+    return { swapped: false, reason: data.reason, ...(confirm ? { confirm } : {}) };
   }
   if (
     data.swapped !== true ||

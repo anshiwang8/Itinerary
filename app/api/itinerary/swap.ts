@@ -26,7 +26,7 @@ import {
 } from "../select/selectVenues";
 import { withModelFallback } from "../_shared/modelFallback";
 import { getDuration } from "../schedule/durations";
-import { toZonedISO } from "../schedule/schedule";
+import { toZonedISO, WINDOW_OVERRUN_TOLERANCE_MINUTES } from "../schedule/schedule";
 import { isParkLike } from "../../lib/categoryTraits";
 import { normalizeConstraint } from "../../lib/constraints";
 import {
@@ -100,8 +100,39 @@ interface Snap {
   category: string;
 }
 
+/**
+ * The push works, and would run the day past the end the user STATED.
+ *
+ * Not a refusal — a question, and the difference is a fact about who owns the
+ * decision. A closing time is physics and gets an honest refusal; a stated end
+ * is the user's own intent, and only they can say whether tonight is the night
+ * it slips. So the engine computes the whole proposal, checks every hard limit
+ * against it, and then stops one step short of writing.
+ *
+ * `swapped` stays FALSE, which is what makes declining free: the route reports
+ * `changed: false`, no CAS runs, and the stored plan is byte-identical. Accept
+ * re-sends the same refinement with `endTimeAccepted`.
+ */
+export interface EndTimeConfirm {
+  /** where the day would now end (ISO, plan zone) */
+  proposedEndISO: string;
+  /** the end the user stated (ISO, plan zone) */
+  statedEndISO: string;
+  /** minutes past the stated end — the number the tolerance was judged on */
+  overrunMinutes: number;
+  /** clock labels in the PLAN's zone; the engine that owns the zone formats
+   *  them, so the browser never re-derives a time in the viewer's zone */
+  proposedEndLabel: string;
+  statedEndLabel: string;
+}
+
 export type SwapResult =
-  | { swapped: false; reason: string }
+  | {
+      swapped: false;
+      reason: string;
+      /** present ⇒ this is a QUESTION, not a refusal. Absent ⇒ refusal. */
+      confirm?: EndTimeConfirm;
+    }
   | {
       swapped: true;
       stopIndex: number;
@@ -832,6 +863,23 @@ function usableForProposal(
 interface AnchorInbound {
   leg: TravelLeg;
   prevStop: ItineraryStop | null;
+  /**
+   * The EARLIEST instant this anchor can legally start: the previous timed
+   * stop's committed end plus the REAL inbound leg.
+   *
+   * This used to be a refusal rather than a value — `planAnchorInbound`
+   * compared it against the requested start and returned null when it didn't
+   * reach, which collapsed "can't get there by then" into the same `null` as
+   * six genuinely unverifiable cases. Reporting it lets each caller decide:
+   * a time-swap still refuses (the user NAMED that time, and quietly landing
+   * them somewhere else ignores the request), while `finalize` shifts the slot
+   * and lets `resettleTail` absorb it.
+   *
+   * With NO previous timed stop this is the requested start itself, not a
+   * constraint: the origin is home, the home departure is not a committed
+   * boundary, and nothing is upstream of it to run into.
+   */
+  earliestStartMs: number;
 }
 
 async function planAnchorInbound(
@@ -868,14 +916,19 @@ async function planAnchorInbound(
     prevStop?.end_time ?? undefined
   );
   if (!leg) return null;
-  if (
-    prevStop?.end_time &&
-    new Date(prevStop.end_time).getTime() + leg.totalMinutes * 60_000 >
-      anchorStart.getTime()
-  ) {
-    return null;
-  }
-  return { leg, prevStop };
+  // A FACT, not a verdict. `null` above means "we cannot verify this route at
+  // all"; reaching here means we can, and this is the earliest the anchor can
+  // start given a real leg departing at the previous stop's committed end.
+  const earliestStartMs = prevStop?.end_time
+    ? new Date(prevStop.end_time).getTime() + leg.totalMinutes * 60_000
+    : anchorStart.getTime();
+  return { leg, prevStop, earliestStartMs };
+}
+
+/** Does this inbound leg reach the requested start? The two callers that must
+ *  keep the slot exactly where it is ask this; `finalize` instead pushes. */
+function reachesStart(inbound: AnchorInbound, anchorStart: Date): boolean {
+  return inbound.earliestStartMs <= anchorStart.getTime();
 }
 
 function commitAnchorInbound(
@@ -894,6 +947,94 @@ function snap(s: ItineraryStop): Snap {
   return { name: s.name ?? null, start: s.start_time, end: s.end_time, category: s.category };
 }
 
+/** "Nothing similar to X is open by 9 PM." → "nothing similar to…" — for
+ *  splicing an existing whole-sentence reason after a dash. */
+function lowerFirst(text: string): string {
+  return text.charAt(0).toLowerCase() + text.slice(1);
+}
+
+/**
+ * When would the day END if this proposal were committed?
+ *
+ * The tail is a PLAN at this point, not a mutation, so the answer cannot be
+ * read off the itinerary — it is the latest end among the anchor's own end and
+ * every stop `resettleTail` re-timed, plus any stop it left alone. A locked
+ * stop that terminates the cascade is included for exactly that reason: it is
+ * still part of the day, and it may well be the last thing in it.
+ */
+function proposedDayEndMs(
+  itinerary: Itinerary,
+  anchorEnd: Date,
+  changes: TailChange[]
+): number {
+  const moved = new Map(changes.map((c) => [c.stopIndex, c]));
+  let latest = anchorEnd.getTime();
+  itinerary.stops.forEach((stop, index) => {
+    const change = moved.get(index);
+    const endMs = change
+      ? new Date(change.startISO).getTime() + change.totalMinutes * 60_000
+      : stop.end_time
+      ? new Date(stop.end_time).getTime()
+      : Number.NaN;
+    if (Number.isFinite(endMs) && endMs > latest) latest = endMs;
+  });
+  return latest;
+}
+
+/**
+ * The one NET-NEW constraint in the push path: the end the user actually said.
+ *
+ * Nothing enforced this after a swap before — `checkWindowFit` runs once, in
+ * the initial pipeline (`page.tsx`), against a planner result the browser was
+ * still holding. The instant is persisted on the plan now (`plannedEndISO`) so
+ * the engine can ask the same question later.
+ *
+ * NO STATED END MEANS NO CEILING. An absent value is the ordinary case — every
+ * plan made before this shipped, and every prompt that never named a finish —
+ * and it returns null, so the push extends as far as real opening hours allow.
+ * Code must never invent an end; that is the same rule the planner works under
+ * ("an end time is a stated fact or nothing").
+ *
+ * The tolerance is `WINDOW_OVERRUN_TOLERANCE_MINUTES`, SHARED with the initial
+ * pipeline rather than a second number. Two definitions of "past the stated
+ * window" in one codebase is how a plan silently accepts a 25-minute overrun
+ * at creation and then interrupts a swap over five. The half of that
+ * constant's rationale that carries here is "a stated window is a human's
+ * rough intent, not a booking" — not the dropping-is-worse half, since this
+ * path asks rather than discards.
+ */
+function endsAfterStatedEnd(
+  itinerary: Itinerary,
+  anchorEnd: Date,
+  changes: TailChange[],
+  timeZone: string
+): { reason: string; confirm: EndTimeConfirm } | null {
+  const statedEndISO = itinerary.plannedEndISO;
+  if (!statedEndISO) return null;
+  const statedEndMs = new Date(statedEndISO).getTime();
+  if (!Number.isFinite(statedEndMs)) return null;
+
+  const proposedEndMs = proposedDayEndMs(itinerary, anchorEnd, changes);
+  if (!Number.isFinite(proposedEndMs)) return null;
+  const overrunMinutes = Math.round((proposedEndMs - statedEndMs) / 60_000);
+  if (overrunMinutes <= WINDOW_OVERRUN_TOLERANCE_MINUTES) return null;
+
+  const proposedEnd = new Date(proposedEndMs);
+  const statedEnd = new Date(statedEndMs);
+  const proposedEndLabel = clockLabel(proposedEnd, timeZone);
+  const statedEndLabel = clockLabel(statedEnd, timeZone);
+  return {
+    reason: `This will push your day to ${proposedEndLabel} instead of ${statedEndLabel}. Continue?`,
+    confirm: {
+      proposedEndISO: toZonedISO(proposedEnd, timeZone),
+      statedEndISO,
+      overrunMinutes,
+      proposedEndLabel,
+      statedEndLabel,
+    },
+  };
+}
+
 // "4:00 AM" in the plan's zone — swap reasons quote the venue's local time.
 function clockLabel(d: Date, timeZone: string = DEFAULT_ZONE): string {
   const { hour, minute } = wallClockParts(d, timeZone);
@@ -907,7 +1048,11 @@ export async function swapStop(
   stopIndex: number,
   refinement: string,
   now: Date,
-  depsIn: Partial<SwapDeps> = {}
+  depsIn: Partial<SwapDeps> = {},
+  /** The user was shown the proposed new end and said continue. Skips ONLY
+   *  the stated-end guard — every hard limit is re-checked on this pass, and
+   *  the swap is re-run from scratch rather than replaying a cached plan. */
+  endTimeAccepted = false
 ): Promise<SwapResult> {
   const deps = { ...realDeps(), ...depsIn };
   const work = cloneProposal(itinerary);
@@ -975,7 +1120,8 @@ export async function swapStop(
       now,
       deps,
       refinement,
-      weather
+      weather,
+      endTimeAccepted
     );
   }
 
@@ -1084,7 +1230,10 @@ async function durationChange(
     start,
     deps
   );
-  if (!anchorInbound) {
+  // A duration swap does not move the start — it only re-verifies that the
+  // committed inbound still fits. A failure here means the plan was already
+  // inconsistent, which is not a push opportunity, so this keeps refusing.
+  if (!anchorInbound || !reachesStart(anchorInbound, start)) {
     return {
       swapped: false,
       reason: `The route into ${target.name} no longer fits its committed start.`,
@@ -1153,7 +1302,8 @@ async function venueSwap(
   now: Date,
   deps: SwapDeps,
   refinement: string,
-  weather: WeatherHour[] | null
+  weather: WeatherHour[] | null,
+  endTimeAccepted = false
 ): Promise<SwapResult> {
   // A CATEGORY CHANGE ("board games instead", "coffee instead of the bar") is
   // a request for a different KIND of place, and it can only be honoured by
@@ -1414,6 +1564,8 @@ async function venueSwap(
     pick,
     sel,
     poolKey,
+    // the slot's REQUESTED start — finalize may resolve it later when the
+    // real inbound leg can't reach it, and never earlier
     target.start_time!,
     now,
     deps,
@@ -1421,7 +1573,8 @@ async function venueSwap(
     sel.reason,
     base,
     floor,
-    weather
+    weather,
+    endTimeAccepted
   );
 }
 
@@ -1550,7 +1703,11 @@ async function timeChange(
     nd,
     deps
   );
-  if (!anchorInboundPlan) {
+  // A TIME swap refuses rather than pushes, deliberately: the user NAMED this
+  // time. Landing them at 8:20 because 8:00 was unreachable would silently
+  // answer a different question than the one they asked — the push exists for
+  // a VENUE swap, where the slot was never the point.
+  if (!anchorInboundPlan || !reachesStart(anchorInboundPlan, nd)) {
     return {
       swapped: false,
       reason: `The route into ${
@@ -1975,8 +2132,17 @@ function scoped(
   };
 }
 
-// ── Shared write-back: place the pick at startISO, recompute duration +
-// legs, shift the downstream tail only when it overflows. ──
+// ── Shared write-back: place the pick at startISO — or LATER, when the real
+// inbound leg can't reach it — recompute duration + legs, and shift the
+// downstream tail only when it overflows.
+//
+// `startISO` is the slot's REQUESTED start, not a guarantee. It used to be
+// both: the start was treated as fixed, and a replacement the inbound leg
+// couldn't reach in time was refused outright ("can't be reached by 10:19 PM
+// without moving the slot") even when the rest of the evening had room to move
+// back. The slot is now allowed to start LATER — never earlier — and the
+// existing `resettleTail` cascade absorbs the consequence.
+// ──
 async function finalize(
   itinerary: Itinerary,
   stopIndex: number,
@@ -1991,7 +2157,11 @@ async function finalize(
   reason: string,
   base: ParsedPrompt,
   floor: Date,
-  weather: WeatherHour[] | null
+  weather: WeatherHour[] | null,
+  /** The user already saw "this runs past your stated end" and said yes.
+   *  Skips ONLY that soft guard — closing times and locked stops are facts
+   *  and are re-checked identically on this pass. */
+  endTimeAccepted = false
 ): Promise<SwapResult> {
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
   const before = snap(target);
@@ -2006,46 +2176,71 @@ async function finalize(
       ? target.durationMinutes?.total ?? defaultTotal
       : defaultTotal;
   const newLoc = pick.location;
-  const start = new Date(startISO);
-  if (
-    !validLocation(newLoc) ||
-    !Number.isFinite(start.getTime()) ||
-    !usableForProposal(
-      pick,
-      category,
-      base,
-      weather,
-      now,
-      start,
-      total,
-      tz,
-      deps
-    )
-  ) {
+  const requestedStart = new Date(startISO);
+  if (!validLocation(newLoc) || !Number.isFinite(requestedStart.getTime())) {
     return {
       swapped: false,
       reason: `The replacement for ${target.name} isn't usable in that slot.`,
     };
   }
 
+  // THE ROUTE COMES FIRST NOW. The usability check below asks whether the
+  // venue is open for the whole slot, and it cannot answer that until the slot
+  // is resolved — so the inbound leg, which is what decides where the slot
+  // actually starts, has to be planned before it rather than after.
   const timedIdx = timedIndexes(itinerary);
   const inbound = await planAnchorInbound(
     itinerary,
     timedIdx,
     stopIndex,
     newLoc,
-    start,
+    requestedStart,
     deps
   );
   if (!inbound) {
+    // Genuinely unverifiable — a missing location, an unparseable boundary, a
+    // leg the provider wouldn't return. Not the same thing as "too far to make
+    // it", which is now a push, so this no longer borrows that wording.
     return {
       swapped: false,
-      reason: `The replacement can't be reached by ${clockLabel(
-        start,
-        tz
-      )} without moving the slot.`,
+      reason: `The route into ${
+        pick.displayName?.text ?? target.name
+      } couldn't be verified.`,
     };
   }
+
+  // THE PUSH. `Math.max` is the "never earlier" guarantee in one operator: a
+  // reachable start leaves the slot exactly where it was (byte-identical to
+  // the old path, which every plain-swap test still pins), and an unreachable
+  // one moves it LATER by precisely the shortfall — no rounding, no padding,
+  // the real leg's own arithmetic.
+  const startMs = Math.max(requestedStart.getTime(), inbound.earliestStartMs);
+  const pushedMinutes = Math.round(
+    (startMs - requestedStart.getTime()) / 60_000
+  );
+  const start = new Date(startMs);
+  const resolvedStartISO = pushedMinutes > 0 ? toZonedISO(start, tz) : startISO;
+
+  // Judged at the RESOLVED start, not the requested one: a venue that is open
+  // at 9:00 may be shut by the 9:25 you would actually arrive, and pushing the
+  // slot is exactly what creates that gap.
+  if (
+    !usableForProposal(pick, category, base, weather, now, start, total, tz, deps)
+  ) {
+    return {
+      swapped: false,
+      reason:
+        pushedMinutes > 0
+          ? `${
+              pick.displayName?.text ?? "That replacement"
+            } can't be reached before ${clockLabel(
+              start,
+              tz
+            )}, and it isn't usable then.`
+          : `The replacement for ${target.name} isn't usable in that slot.`,
+    };
+  }
+
   const used = new Set<string>(
     itinerary.stops
       .map((stop) => stop.id)
@@ -2053,7 +2248,7 @@ async function finalize(
   );
   if (target.id) used.delete(target.id);
   used.add(pick.id);
-  const anchorEnd = new Date(start.getTime() + total * 60_000);
+  const anchorEnd = new Date(startMs + total * 60_000);
   const settle = await resettleTail(
     itinerary,
     stopIndex,
@@ -2068,7 +2263,31 @@ async function finalize(
     weather,
     true
   );
-  if (!settle.ok) return { swapped: false, reason: settle.reason };
+  if (!settle.ok) {
+    // A stranded stop is a FACT — a venue shut by the time you would get
+    // there, or a locked stop the change runs into. Never a prompt: consent
+    // cannot open a closed door. `resettleTail` already names which stop and
+    // which instant; the push only adds why it was trying to move anything.
+    return {
+      swapped: false,
+      reason:
+        pushedMinutes > 0
+          ? `Moving the later stops back to fit ${
+              pick.displayName?.text ?? "that spot"
+            } doesn't work — ${lowerFirst(settle.reason)}`
+          : settle.reason,
+    };
+  }
+
+  // ── the SOFT limit, and the only new constraint in this path ──
+  // Physically fine; it may just run the day past what the user said. That is
+  // theirs to decide, so it asks instead of refusing — and asks BEFORE any
+  // write, so declining costs nothing (the caller is holding a clone).
+  if (!endTimeAccepted) {
+    const overrun = endsAfterStatedEnd(itinerary, anchorEnd, settle.changes, tz);
+    if (overrun) return { swapped: false, reason: overrun.reason, confirm: overrun.confirm };
+  }
+
   const outbound =
     settle.changes[0]?.inbound ?? settle.terminalInbound ?? null;
 
@@ -2077,7 +2296,7 @@ async function finalize(
   // parallel copy of all three (code-audit 2026-07-18 §5.5)
   itinerary.stops[stopIndex] = buildStop(
     category,
-    startISO,
+    resolvedStartISO,
     { pick, sel },
     outbound,
     total,
@@ -2093,13 +2312,35 @@ async function finalize(
 
   withStatuses(itinerary, now);
 
+  // Only when the slot actually MOVED. `swap_applied` already logs every
+  // swap's before/after; a second line saying "pushed by 0" on each of them
+  // would bury the one event this exists to make findable.
+  if (pushedMinutes > 0) {
+    logEvent("info", "swap_slot_push", {
+      stopIndex,
+      pushedMinutes,
+      requestedStart: startISO,
+      resolvedStart: resolvedStartISO,
+      downstreamShifted,
+      endTimeAccepted,
+    });
+  }
+
   return {
     swapped: true,
     stopIndex,
     path,
     before,
     after: snap(itinerary.stops[stopIndex]),
-    reason,
+    // The slot moved, so SAY the slot moved. A venue swap that silently
+    // reports only the new venue while the time changed underneath is the
+    // reason `[swap-apply]` exists — the user reads this line, not the log.
+    reason:
+      pushedMinutes > 0
+        ? `${reason} Moved to ${clockLabel(start, tz)}${
+            downstreamShifted.length > 0 ? " and pushed the later stops back" : ""
+          } — it can't be reached any earlier.`
+        : reason,
     downstreamShifted,
   };
 }

@@ -2024,6 +2024,229 @@ const cases: Array<[string, () => Promise<void>]> = [
       }
     },
   ],
+
+  // ── PUSH THE TAIL BACK ────────────────────────────────────────────────────
+  // The fixture's dinner ends 20:45 and the bar is committed to 21:00, so the
+  // slot has exactly 15 minutes of inbound room. A `legMin` above that is a
+  // replacement that CANNOT be reached at its committed start — which used to
+  // be an outright refusal ("can't be reached by 9:00 PM without moving the
+  // slot") and is now a push.
+  [
+    "PUSH: a replacement too far to reach shifts its OWN slot later and cascades",
+    async () => {
+      const it = mkItinerary();
+      const before = JSON.stringify(it);
+      const now = new Date(T(18, 0)); // everything upcoming
+      // 25-minute legs vs a 15-minute gap: dinner ends 20:45, so the earliest
+      // this venue can be reached is 21:10 — ten minutes past the slot.
+      const res = await swapStop(it, 1, "somewhere else", now, mkDeps({ legMin: 25 }));
+
+      assert.ok(res.swapped, `expected a push, not a refusal: ${JSON.stringify(res)}`);
+      if (!res.swapped) return;
+      assert.notStrictEqual(JSON.stringify(it), before, "the push must actually commit");
+
+      // the anchor moved LATER by exactly the shortfall — 21:00 → 21:10 — and
+      // kept its 70-minute slot, because a push moves a stop, never resizes it
+      assert.strictEqual(ms(it.stops[1].start_time), ms(T(21, 10)));
+      assert.strictEqual(ms(it.stops[1].end_time), ms(T(22, 20)));
+      assert.strictEqual(it.stops[1].durationMinutes?.total, 70);
+
+      // and the tail cascaded off it, recomputed from the real leg:
+      // 22:20 + 25 = 22:45, not the committed 22:20
+      assert.deepStrictEqual(res.downstreamShifted, [2]);
+      assert.strictEqual(ms(it.stops[2].start_time), ms(T(22, 45)));
+      assert.strictEqual(ms(it.stops[2].end_time), ms(T(23, 25)));
+      assert.strictEqual(it.stops[2].durationMinutes?.total, 40, "a pushed stop keeps its length");
+
+      // dinner is upstream of the change and must be byte-identical
+      assert.strictEqual(it.stops[0].start_time, T(19, 0));
+      assert.strictEqual(it.stops[0].end_time, T(20, 45));
+      assert.strictEqual(it.stops[0].id, "d1");
+
+      // the user is TOLD the slot moved — a venue swap that silently rewrites
+      // the time is the failure this reason exists to prevent
+      assert.match(res.reason, /moved to 9:10 pm/i, `reason should name the new time: ${res.reason}`);
+      assert.match(res.reason, /can't be reached any earlier/i);
+    },
+  ],
+  [
+    "PUSH: never EARLIER — a nearer replacement leaves the committed slot alone",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(18, 0));
+      // 5-minute legs: reachable by 20:50, well before the committed 21:00.
+      // `Math.max` is the whole guarantee — the slot must not slide up to meet
+      // the earlier arrival, and nothing downstream may move.
+      const res = await swapStop(it, 1, "somewhere else", now, mkDeps({ legMin: 5 }));
+      assert.ok(res.swapped);
+      if (!res.swapped) return;
+      assert.strictEqual(it.stops[1].start_time, T(21, 0), "the slot must be held, not pulled earlier");
+      assert.strictEqual(it.stops[1].end_time, T(22, 10));
+      assert.deepStrictEqual(res.downstreamShifted, []);
+      assert.strictEqual(ms(it.stops[2].start_time), ms(T(22, 20)));
+      // and the reason stays the plain venue reason — no time talk when no
+      // time moved
+      assert.doesNotMatch(res.reason, /moved to/i);
+    },
+  ],
+  [
+    "PUSH: a stop stranded past its CLOSING time refuses honestly — never a prompt",
+    async () => {
+      const it = mkItinerary();
+      // dessert genuinely shuts at 23:00, and it is the plan's last stop
+      it.stops[2].currentOpeningHours = openHours(17, 23);
+      // a stated end exists too, to prove the HARD limit wins: consent cannot
+      // open a closed door, so this must not become a question
+      it.plannedEndISO = T(23, 0);
+      const before = JSON.stringify(it);
+      const now = new Date(T(18, 0));
+
+      const farBar = { ...mkVenue("far_bar", "Far Bar"), currentOpeningHours: openHours(17, 2) };
+      const lateDessert = {
+        ...mkVenue("late_dessert", "Late Scoops"),
+        currentOpeningHours: openHours(17, 23),
+      };
+      const res = await swapStop(it, 1, "somewhere else", now, {
+        ...mkDeps({ legMin: 25 }),
+        // per-category pools: the bar swap succeeds, the dessert re-search
+        // finds only another venue that is equally shut by then
+        searchPools: async (_parsed, cats) => ({
+          [cats[0]]: cats[0] === "bar" ? [farBar] : [lateDessert],
+        }),
+        isUsableAt: usableByHours,
+      });
+
+      // the push reaches 22:45 for a stop occupying 30 minutes → 23:15, past a
+      // 23:00 close, and nothing adapts
+      assert.ok(!res.swapped, `expected an honest refusal, got: ${JSON.stringify(res)}`);
+      if (res.swapped) return;
+      assert.strictEqual(res.confirm, undefined, "a closing time is a FACT — it must never prompt");
+      assert.match(res.reason, /moving the later stops back/i, "the refusal should say what it tried");
+      assert.match(res.reason, /dessert spot/i, "and name the stop it stranded");
+      assert.strictEqual(JSON.stringify(it), before, "plan-then-commit: nothing was written");
+    },
+  ],
+  [
+    "PUSH: running into a LOCKED stop refuses, with a stated end present and no prompt",
+    async () => {
+      const it = mkItinerary();
+      const now = new Date(T(20, 0)); // the bar (21:00) is still upcoming
+      withStatuses(it, now);
+      it.stops[2].locked = true; // dessert's 22:20 boundary is committed
+      it.plannedEndISO = T(23, 0);
+      const before = JSON.stringify(it);
+
+      const res = await swapStop(it, 1, "somewhere else", now, mkDeps({ legMin: 25 }));
+      assert.ok(!res.swapped, `expected a refusal, got: ${JSON.stringify(res)}`);
+      if (res.swapped) return;
+      assert.strictEqual(res.confirm, undefined, "a locked stop is a FACT — no prompt");
+      assert.match(res.reason, /locked stop/i, `refusal should name the collision: ${res.reason}`);
+      assert.strictEqual(JSON.stringify(it), before, "plan-then-commit: nothing was written");
+    },
+  ],
+
+  // ── the stated end-time: the one SOFT limit, and the only new constraint ──
+  [
+    "END-TIME: a push past the STATED end asks instead of applying, and writes nothing",
+    async () => {
+      const it = mkItinerary();
+      it.plannedEndISO = T(23, 0); // "back by 11"
+      const before = JSON.stringify(it);
+      const now = new Date(T(18, 0));
+
+      // 45-minute legs: bar 21:30–22:40, dessert 23:25–00:05 → 65 minutes past
+      // the stated end, comfortably outside the shared 30-minute tolerance
+      const res = await swapStop(it, 1, "somewhere else", now, mkDeps({ legMin: 45 }));
+
+      assert.ok(!res.swapped, `must not auto-apply: ${JSON.stringify(res)}`);
+      if (res.swapped) return;
+      assert.ok(res.confirm, "this is a QUESTION, so it must carry a confirmation");
+      assert.strictEqual(res.confirm!.overrunMinutes, 65);
+      assert.strictEqual(res.confirm!.statedEndLabel, "11:00 PM");
+      assert.strictEqual(res.confirm!.proposedEndLabel, "12:05 AM");
+      assert.strictEqual(ms(res.confirm!.proposedEndISO), ms(T(23, 25)) + 40 * 60_000);
+      assert.match(res.reason, /push your day to 12:05 AM instead of 11:00 PM/i);
+
+      // DECLINE is simply "don't re-run" — and it costs nothing, because the
+      // question was asked from a proposal that was never committed
+      assert.strictEqual(JSON.stringify(it), before, "declining must leave the plan byte-identical");
+    },
+  ],
+  [
+    "END-TIME: ACCEPT applies exactly the push that was proposed",
+    async () => {
+      const it = mkItinerary();
+      it.plannedEndISO = T(23, 0);
+      const now = new Date(T(18, 0));
+
+      const res = await swapStop(
+        it, 1, "somewhere else", now, mkDeps({ legMin: 45 }),
+        true // the user saw "12:05 AM instead of 11:00 PM" and said continue
+      );
+
+      assert.ok(res.swapped, `accept must apply: ${JSON.stringify(res)}`);
+      if (!res.swapped) return;
+      assert.strictEqual(ms(it.stops[1].start_time), ms(T(21, 30)));
+      assert.strictEqual(ms(it.stops[1].end_time), ms(T(22, 40)));
+      assert.deepStrictEqual(res.downstreamShifted, [2]);
+      assert.strictEqual(ms(it.stops[2].start_time), ms(T(23, 25)));
+      assert.strictEqual(ms(it.stops[2].end_time), ms(T(23, 25)) + 40 * 60_000);
+      // the stated end is untouched by consent — it recorded what they ASKED
+      // for, and one accepted overrun does not rewrite that
+      assert.strictEqual(it.plannedEndISO, T(23, 0));
+    },
+  ],
+  [
+    "END-TIME: NO stated end means NO ceiling — the same push applies unasked",
+    async () => {
+      const it = mkItinerary();
+      assert.strictEqual(it.plannedEndISO, undefined, "the fixture states no end");
+      const now = new Date(T(18, 0));
+
+      const res = await swapStop(it, 1, "somewhere else", now, mkDeps({ legMin: 45 }));
+
+      assert.ok(res.swapped, `no stated end must never prompt: ${JSON.stringify(res)}`);
+      if (!res.swapped) return;
+      assert.strictEqual(ms(it.stops[1].start_time), ms(T(21, 30)));
+      // it runs past midnight, and that is allowed: opening hours are the only
+      // limit when the user never named a finish
+      assert.strictEqual(ms(it.stops[2].end_time), ms(T(23, 25)) + 40 * 60_000);
+    },
+  ],
+  [
+    "END-TIME: a push that FITS inside the stated end applies directly, no prompt",
+    async () => {
+      const it = mkItinerary();
+      it.plannedEndISO = T(23, 30); // roomy enough for the 23:25 finish
+      const now = new Date(T(18, 0));
+
+      const res = await swapStop(it, 1, "somewhere else", now, mkDeps({ legMin: 25 }));
+
+      assert.ok(res.swapped, `fitting inside the window must not ask: ${JSON.stringify(res)}`);
+      if (!res.swapped) return;
+      assert.strictEqual(ms(it.stops[1].start_time), ms(T(21, 10)));
+      assert.strictEqual(ms(it.stops[2].end_time), ms(T(23, 25)));
+    },
+  ],
+  [
+    "END-TIME: the guard reads the DAY's end, so an unstated end on a TIME swap is untouched",
+    async () => {
+      // A time swap NAMES a time. It must keep refusing an unreachable one
+      // rather than quietly landing somewhere else — the push belongs to venue
+      // swaps, where the slot was never the point.
+      const it = mkItinerary();
+      const before = JSON.stringify(it);
+      const now = new Date(T(18, 0));
+      // move the bar to 20:50, which dinner's 20:45 end + a 25-minute leg
+      // cannot reach
+      const res = await swapStop(it, 1, "move it to 8:50pm", now, mkDeps({ legMin: 25 }));
+      assert.ok(!res.swapped, `a time swap must refuse, not push: ${JSON.stringify(res)}`);
+      if (res.swapped) return;
+      assert.strictEqual(res.confirm, undefined);
+      assert.match(res.reason, /can't reach/i);
+      assert.strictEqual(JSON.stringify(it), before);
+    },
+  ],
 ];
 
 (async () => {
