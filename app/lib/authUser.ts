@@ -71,6 +71,41 @@ export function toAppUser(user: FirebaseUserLike | null | undefined): AppUser | 
   };
 }
 
+/**
+ * Are these the same user, as far as anything downstream can tell?
+ *
+ * THE REASON THIS EXISTS is that `useAuth` subscribes to `onIdTokenChanged`,
+ * not `onAuthStateChanged`. It has to: the SDK fires the auth-state observer
+ * only when the UID CHANGES, and upgrading a guest with `linkWithPopup`
+ * deliberately KEEPS the uid — so the one transition that matters most
+ * (isAnonymous true → false) was silent, and the app went on believing a
+ * signed-in user was a guest until the next page load.
+ *
+ * The token observer is the strict superset Firebase's own docs point at
+ * ("sign-in, sign-out, and token refresh"), and the price of the superset is
+ * the refreshes: it fires hourly, and again whenever `getIdToken()` renews an
+ * access token — which this app does on every authenticated request. Since
+ * `toAppUser` mints a FRESH OBJECT each time, storing every one of those would
+ * churn `user`'s identity and re-run every effect keyed on it, for a change no
+ * human could see. So the subscription stores a new user only when this says
+ * they differ, and a pure token refresh becomes a no-op.
+ *
+ * EVERY FIELD THE APP READS IS COMPARED — including `photoURL`, which the
+ * account corner renders. The set is "what the UI or a downstream call can
+ * observe", not a hand-picked subset: a field left out here is a field that
+ * can go stale on screen, and none of them move on a token refresh, so
+ * including them all costs the guard nothing.
+ */
+export function sameAppUserIdentity(a: AppUser, b: AppUser): boolean {
+  return (
+    a.uid === b.uid &&
+    a.isAnonymous === b.isAnonymous &&
+    a.displayName === b.displayName &&
+    a.email === b.email &&
+    a.photoURL === b.photoURL
+  );
+}
+
 /** What to call someone in the UI, never empty. */
 export function userLabel(user: AppUser): string {
   return user.displayName ?? user.email ?? "Signed in";

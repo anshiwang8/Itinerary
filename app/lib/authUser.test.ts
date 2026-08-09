@@ -2,7 +2,23 @@
 // provider payload onto the app's own user shape. Pure, offline, no SDK — the
 // live popup flow is verified by hand, but THIS is checkable, so it is checked.
 import assert from "node:assert";
-import { toAppUser, userInitials, userLabel } from "./authUser";
+import {
+  sameAppUserIdentity,
+  toAppUser,
+  userInitials,
+  userLabel,
+  type AppUser,
+} from "./authUser";
+
+/** A signed-in Google account, as `toAppUser` would hand it back. */
+const account = (over: Partial<AppUser> = {}): AppUser => ({
+  uid: "abc123",
+  displayName: "Ada Lovelace",
+  email: "ada@example.com",
+  photoURL: "https://lh3.googleusercontent.com/a/photo",
+  isAnonymous: false,
+  ...over,
+});
 
 const cases: Array<[string, () => void]> = [
   [
@@ -151,6 +167,88 @@ const cases: Array<[string, () => void]> = [
       // a uid-only user still gets a glyph rather than an empty circle
       assert.strictEqual(initialsOf({ uid: "u" }), "?");
       assert.strictEqual(initialsOf({ uid: "u", displayName: "☃" }), "?", "no letters to take");
+    },
+  ],
+
+  // ── the identity diff that makes a token refresh inert ──
+  //
+  // `useAuth` watches TOKENS, not auth state, because the SDK fires the
+  // auth-state observer only on a uid CHANGE and upgrading a guest with
+  // linkWithPopup deliberately keeps the uid. The price is that the observer
+  // also fires on every token refresh, and `toAppUser` mints a fresh object
+  // each time — so the subscription only stores a new user when this says
+  // they differ. Under-firing loses the anonymity flip (the bug); over-firing
+  // churns `user`'s identity on a timer and re-runs every effect keyed on it.
+  [
+    "a token refresh is NOT a change — identical fields compare equal",
+    () => {
+      // Two separately-mapped objects with the same content: exactly what two
+      // consecutive token events produce. The subscription must keep the first.
+      assert.strictEqual(sameAppUserIdentity(account(), account()), true);
+    },
+  ],
+  [
+    "THE BUG THIS EXISTS FOR: an anonymity flip on the SAME uid IS a change",
+    () => {
+      // linkWithPopup keeps the uid and flips isAnonymous. If this ever
+      // returned true, the survey gate would never learn there is an account
+      // and a brand-new user would see no survey until they reloaded.
+      const guest = account({ isAnonymous: true, displayName: null, email: null });
+      assert.strictEqual(
+        sameAppUserIdentity(guest, account()),
+        false,
+        "the guest→account upgrade must replace the stored user"
+      );
+      // and isolated from the decoration that happens to move with it
+      assert.strictEqual(
+        sameAppUserIdentity(account({ isAnonymous: true }), account()),
+        false,
+        "isAnonymous alone is enough"
+      );
+    },
+  ],
+  [
+    "a different uid is a different person",
+    () => {
+      // The signInWithCredential path (a returning Google account) mints a new
+      // uid, and that must always replace the stored user.
+      assert.strictEqual(sameAppUserIdentity(account(), account({ uid: "other" })), false);
+    },
+  ],
+  [
+    "every field the UI reads counts — name, email and photo included",
+    () => {
+      // Not a hand-picked subset: a field left out is a field that can go
+      // stale on screen. The account corner renders all three.
+      assert.strictEqual(
+        sameAppUserIdentity(account(), account({ displayName: "Ada B Lovelace" })),
+        false
+      );
+      assert.strictEqual(
+        sameAppUserIdentity(account(), account({ email: "ada@other.co" })),
+        false
+      );
+      assert.strictEqual(
+        sameAppUserIdentity(account(), account({ photoURL: null })),
+        false,
+        "a changed avatar must reach the account corner"
+      );
+    },
+  ],
+  [
+    "null and a present value are distinguished, not coerced",
+    () => {
+      // `toAppUser` normalises absent decoration to null, so null-vs-value is
+      // the shape a real change arrives in — a loose == here would miss it.
+      assert.strictEqual(
+        sameAppUserIdentity(account({ displayName: null }), account()),
+        false
+      );
+      assert.strictEqual(
+        sameAppUserIdentity(account({ email: null }), account({ email: null })),
+        true,
+        "both absent is still the same person"
+      );
     },
   ],
 ];

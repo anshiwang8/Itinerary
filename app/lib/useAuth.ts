@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   GoogleAuthProvider,
   linkWithPopup,
-  onAuthStateChanged,
+  onIdTokenChanged,
   signInAnonymously,
   signInWithCredential,
   signInWithPopup,
@@ -22,7 +22,7 @@ import {
   type AuthError,
 } from "firebase/auth";
 import { getFirebaseAuth, isFirebaseConfigured } from "./firebase";
-import { toAppUser, type AppUser } from "./authUser";
+import { sameAppUserIdentity, toAppUser, type AppUser } from "./authUser";
 import { shouldShowDevControls } from "./devControls";
 
 export type AuthStatus = "loading" | "signed-in" | "signed-out";
@@ -139,9 +139,26 @@ export function useAuth(): AuthState {
       const frame = requestAnimationFrame(() => setStatus("signed-out"));
       return () => cancelAnimationFrame(frame);
     }
-    // onAuthStateChanged (not a one-shot read) is what recognises a returning
+    // onIdTokenChanged (not a one-shot read) is what recognises a returning
     // signed-in user on load; Firebase's own session persistence supplies it.
-    return onAuthStateChanged(
+    //
+    // WHY THE TOKEN OBSERVER AND NOT `onAuthStateChanged`. The auth-state
+    // observer notifies only when the UID CHANGES — the SDK gates it on
+    // `lastNotifiedUid !== currentUid`. `signIn` below upgrades a guest with
+    // `linkWithPopup` precisely BECAUSE it keeps the same uid, so the most
+    // important transition this app has (isAnonymous true → false) fired no
+    // auth-state event at all: React went on holding a user that said "guest",
+    // the profile read that gates the onboarding survey never ran, and a
+    // brand-new account saw no survey until it reloaded the page. The token
+    // observer is the strict superset Firebase's own docs point at for exactly
+    // this ("sign-in, sign-out, and token refresh"), and it fires on the link
+    // because the SDK notifies token subscribers unconditionally.
+    //
+    // Nothing else about this subscription changed: the same `toAppUser`
+    // mapping, the same statuses, the same error path, the same unsubscribe.
+    // The one addition is the identity diff below, which pays for the
+    // superset.
+    return onIdTokenChanged(
       auth,
       (firebaseUser) => {
         const mapped = toAppUser(firebaseUser);
@@ -167,7 +184,23 @@ export function useAuth(): AuthState {
           });
           return;
         }
-        setUser(mapped);
+        // THE PRICE OF THE SUPERSET, PAID HERE. A token refresh — hourly, and
+        // again on every `getIdToken()` that renews — is a real event with no
+        // user-visible content, and `toAppUser` mints a fresh object for each
+        // one. Storing them would change `user`'s IDENTITY on a timer and
+        // re-run every effect keyed on it, which is how a fix for a missing
+        // update becomes a source of spurious ones. Keeping the current object
+        // when nothing observable moved makes a refresh completely inert, and
+        // React bails out of the re-render on the returned-identical value.
+        //
+        // The anonymity flip still lands: isAnonymous differs, so the new user
+        // replaces the old and the survey gate sees a real account.
+        setUser((current) =>
+          current && sameAppUserIdentity(current, mapped) ? current : mapped
+        );
+        // Unconditional, and safe for the same reason: setting a string state
+        // to the value it already holds is a no-op React does not re-render
+        // for. The first resolve after load still moves "loading" → signed-in.
         setStatus("signed-in");
       },
       () => {
@@ -192,11 +225,15 @@ export function useAuth(): AuthState {
         // uid, so the plan they are in the middle of stays theirs. A plain
         // signInWithPopup here would mint a different uid and silently orphan
         // the active plan — a visible regression against "plans survive".
+        //
+        // That same preserved uid is why the subscription above watches TOKENS
+        // rather than auth state: no uid change, no auth-state event. The fix
+        // belongs there, not here — see the note on the observer.
         await linkWithPopup(current, new GoogleAuthProvider());
       } else {
         await signInWithPopup(auth, new GoogleAuthProvider());
       }
-      // No setState here: onAuthStateChanged is the single source of truth for
+      // No setState here: the observer above is the single source of truth for
       // who is signed in, so the popup result never gets to disagree with it.
     } catch (caught) {
       const code = errorCode(caught);
@@ -228,7 +265,7 @@ export function useAuth(): AuthState {
         if (credential) {
           try {
             await signInWithCredential(auth, credential);
-            // Recovered in full. onAuthStateChanged reports the result, as
+            // Recovered in full. The observer reports the result, as
             // everywhere else, and NOTHING is logged — a sign-in that
             // succeeds must leave no failure line behind it.
             return;

@@ -38,6 +38,7 @@ import type { DropEntry, ParsedPrompt } from "./api/places/search/filter";
 import type { GeocodeCandidate } from "./api/geocode/geocode";
 import { isOpenAtInstant, type CurrentOpeningHours } from "./api/places/search/hours";
 import { ClientFetchError, fetchJson } from "./lib/clientFetch";
+import { settlePendingWrite } from "./lib/pendingWrite";
 import {
   parseCreatePayload,
   parseGeocodePayload,
@@ -335,6 +336,12 @@ export default function Home() {
   // Without this, the gap between closing the survey and the write landing is a
   // window in which the effect below would mount it a second time.
   const surveyOffered = useRef(false);
+  // The survey's write, while it is still in the air. The screen deliberately
+  // does not wait for it (see saveTasteProfile); the PLANNER does, because it
+  // reads the profile back server-side and would otherwise race a write the
+  // user made seconds earlier. Null whenever there is nothing to wait for,
+  // which is every plan except the one right after a submit.
+  const pendingProfileWrite = useRef<Promise<void> | null>(null);
 
   // Does this person already have a profile? Asked once, and only of a REAL
   // account: a guest's profile is never written, so asking about one is a round
@@ -379,15 +386,20 @@ export default function Home() {
 
   /** File the survey result — answers on submit, an empty set on skip. BOTH
    *  write, because a skip that recorded nothing would mean "ask me again every
-   *  login". Fire-and-forget: the route answers 200 even when there is nowhere
-   *  to write (guest, no Firebase), so there is no failure for a screen that is
-   *  already closing to report. */
+   *  login". Fire-and-forget FOR THE SCREEN: the route answers 200 even when
+   *  there is nowhere to write (guest, no Firebase), so there is no failure for
+   *  a screen that is already closing to report — but the promise is KEPT, in
+   *  `pendingProfileWrite`, because the next plan reads this profile back from
+   *  the server and must not overtake it. */
   const saveTasteProfile = useCallback(
     (answers: TasteAnswers, completed: boolean) => {
       // Locally, the profile now exists. Set before the request so a re-render
       // during the write cannot re-open the survey.
       setProfileGate("present");
-      void (async () => {
+      // The catch lives INSIDE, so this promise always resolves. Whoever waits
+      // on it is waiting for the write to be OVER, not for it to have worked:
+      // a failed save must delay a plan at most, never fail one.
+      pendingProfileWrite.current = (async () => {
         try {
           await fetchJson<unknown>("/api/profile", {
             method: "POST",
@@ -689,6 +701,18 @@ export default function Home() {
       setLoadingText(null);
     };
     setLoadingText("Shaping your day…");
+    // THE ONE PLACE THE SURVEY'S WRITE IS WAITED FOR. `/api/parse` reads the
+    // taste profile back SERVER-SIDE, from Firestore, for the verified caller —
+    // so a user who submits the survey and immediately plans can beat their own
+    // write and get a plan that ignores the answers they just gave. This closes
+    // that by ordering, not by carrying preferences on the request: the trust
+    // boundary is unchanged and the body below is byte-identical. Every plan
+    // that is not the one right after a submit finds nothing pending and pays
+    // nothing; a broken write resolves too, so this can delay a plan but never
+    // fail one. It sits in `planFrom` rather than `runPipeline` because all
+    // three entry points — first plan, answered questions, geocode resume —
+    // reach the planner through here.
+    await settlePendingWrite(pendingProfileWrite);
     const { plan, parsed } = await fetchJson("/api/parse", {
       method: "POST",
       // Stage 3B: the token is how the SERVER learns whose taste profile to
