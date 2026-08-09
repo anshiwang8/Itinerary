@@ -117,7 +117,7 @@ button { font-family: var(--grot); cursor: pointer; }
    This selector outranks a plain `.hist`/`.auth` rule, so a new full-screen
    overlay mounted here MUST be added to the exclusions or it is quietly
    demoted to `position: relative` and stops covering the page. */
-.empty > *:not(.empty__glow):not(.empty__mark):not(.acct):not(.auth):not(.hist):not(.taste) { position: relative; z-index: 2; }
+.empty > *:not(.empty__glow):not(.empty__mark):not(.acct):not(.auth):not(.hist):not(.taste):not(.prof) { position: relative; z-index: 2; }
 
 .empty__mark {
   position: absolute; top: 26px; left: 30px; z-index: 3;
@@ -676,14 +676,20 @@ button { font-family: var(--grot); cursor: pointer; }
 .acct__signin:hover { background: #FFFFFF; box-shadow: var(--shadow-lift); transform: translateY(-1px); }
 .acct__signin:active { transform: translateY(0); }
 
-/* signed-in: avatar + name, with sign-out as a quiet sibling */
+/* signed-in: avatar + name, with sign-out as a quiet sibling. The pill is a
+   BUTTON — it opens the preferences editor — so it gets the same lift the
+   other account controls have on hover, and nothing else about it moved. */
 .acct__who {
   display: inline-flex; align-items: center; gap: 8px;
   min-height: 38px; padding: 5px 14px 5px 5px;
   background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(255, 255, 255, 0.9);
   border-radius: 999px; box-shadow: var(--shadow-card);
   max-width: min(46vw, 260px);
+  text-align: left;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
 }
+.acct__who:hover { background: #FFFFFF; box-shadow: var(--shadow-lift); transform: translateY(-1px); }
+.acct__who:active { transform: translateY(0); }
 .acct__avatar {
   width: 28px; height: 28px; border-radius: 50%; flex: none;
   object-fit: cover; background: var(--accent-soft);
@@ -1161,6 +1167,121 @@ button { font-family: var(--grot); cursor: pointer; }
   }
 }
 
+/* ──────────  Edit profile — the survey's re-openable other half  ──────────
+   Same overlay geometry as .auth, .hist and .taste. The QUESTION CHIPS are
+   the survey's own (.taste__q / .taste__qLabel / .taste__opt), shared rather
+   than re-declared, so restyling a chip restyles both screens and the two
+   cannot drift apart. Only the shell, the footer and the discard prompt are
+   new. --live is absent for the same reason it is absent from the survey: a
+   stored preference is not a live event. */
+
+.prof {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(30, 58, 76, 0.42);
+  backdrop-filter: blur(3px);
+  animation: auth-in 0.18s ease-out;
+}
+.prof__card {
+  width: min(100%, 540px); max-height: min(84vh, 720px);
+  display: flex; flex-direction: column;
+  background: var(--card); border-radius: 20px;
+  box-shadow: var(--shadow-lift);
+  animation: auth-card-in 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
+  overflow: hidden;
+  /* the landing hero centres its text and this card is mounted inside it */
+  text-align: left;
+}
+.prof__head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 20px 18px 14px 24px;
+  border-bottom: 1px solid var(--rule);
+}
+.prof__title {
+  font-family: var(--disp); font-weight: 600; font-size: 22px;
+  letter-spacing: -0.015em; color: var(--ink); line-height: 1.25;
+  margin-right: auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.prof__close {
+  flex: none;
+  width: 34px; height: 34px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--ink-soft);
+  border: 1px solid var(--rule); border-radius: 50%;
+  font-family: var(--grot); font-size: 13px; line-height: 1;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+.prof__close:hover { background: var(--paper-2); color: var(--ink); border-color: var(--rule-strong); }
+
+.prof__body {
+  padding: 18px 24px 4px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.prof__lede {
+  font-family: var(--disp); font-style: italic; font-weight: 400;
+  font-size: 14.5px; line-height: 1.5; color: var(--ink-soft);
+  margin-bottom: 20px;
+}
+.prof__note, .prof__err {
+  font-family: var(--grot); font-size: 13px; line-height: 1.55;
+  color: var(--ink-soft); margin: 6px 0 18px;
+}
+.prof__err { color: #A3372F; }
+
+.prof__foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 24px 20px;
+  border-top: 1px solid var(--rule);
+}
+/* The one line that says what just happened. Takes the slack so the buttons
+   stay right-aligned whether or not it has anything to say. */
+.prof__status {
+  margin-right: auto; min-width: 0;
+  font-family: var(--grot); font-size: 12.5px; color: var(--ink-soft);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.prof__status--err { color: #A3372F; }
+.prof__confirm {
+  margin-right: auto; min-width: 0;
+  font-family: var(--grot); font-size: 13px; font-weight: 500; color: var(--ink);
+}
+.prof__cancel {
+  flex: none; min-height: 44px; padding: 10px 18px;
+  background: transparent; color: var(--accent-deep);
+  border: 1px solid var(--rule-strong); border-radius: 12px;
+  font-family: var(--grot); font-size: 14px; font-weight: 500; white-space: nowrap;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+.prof__cancel:hover { background: var(--accent-soft); border-color: var(--accent); }
+.prof__save {
+  flex: none; min-height: 44px; padding: 10px 22px;
+  background: var(--accent); color: #FFFFFF;
+  border: 1px solid var(--accent); border-radius: 12px;
+  font-family: var(--grot); font-size: 14px; font-weight: 500; white-space: nowrap;
+  transition: background 0.16s ease, transform 0.16s ease;
+}
+.prof__save:hover:not(:disabled) { background: var(--accent-deep); transform: translateY(-1px); }
+.prof__save:active:not(:disabled) { transform: translateY(0); }
+/* Nothing changed is nothing to save. Quiet rather than hidden — the control
+   has to stay findable, so it reads as "not yet" and not as "gone". */
+.prof__save:disabled {
+  background: var(--paper-2); color: var(--ink-faint);
+  border-color: var(--rule); cursor: default;
+}
+/* Discarding is the destructive choice, so it is the QUIET one: "Keep
+   editing" holds focus and the accent, and this asks to be read first. */
+.prof__discard {
+  flex: none; min-height: 44px; padding: 10px 18px;
+  background: transparent; color: #A3372F;
+  border: 1px solid rgba(163, 55, 47, 0.34); border-radius: 12px;
+  font-family: var(--grot); font-size: 14px; font-weight: 500; white-space: nowrap;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+.prof__discard:hover { background: rgba(163, 55, 47, 0.08); border-color: rgba(163, 55, 47, 0.6); }
+
 @media (max-width: 560px) {
   .empty {
     justify-content: flex-start; overflow-y: auto;
@@ -1178,6 +1299,16 @@ button { font-family: var(--grot); cursor: pointer; }
   .hist__head { padding: 16px 14px 12px 18px; }
   .hist__title { font-size: 19px; }
   .hist__body { padding: 14px 18px 20px; }
+  /* four questions of chips need the room too */
+  .prof__card { max-height: 90vh; }
+  .prof__head { padding: 16px 14px 12px 18px; }
+  .prof__title { font-size: 19px; }
+  .prof__body { padding: 14px 18px 2px; }
+  .prof__foot { padding: 12px 18px 16px; gap: 8px; }
+  /* the status line wraps under the buttons rather than squeezing them off
+     the edge; the buttons keep their 44px target */
+  .prof__foot { flex-wrap: wrap; }
+  .prof__status, .prof__confirm { flex: 1 0 100%; margin-right: 0; white-space: normal; }
   .auth__card { padding: 28px 22px 22px; }
   .empty__title { font-size: clamp(42px, 16vw, 64px); }
   .empty__mark { display: none; }
@@ -1236,4 +1367,9 @@ button { font-family: var(--grot); cursor: pointer; }
   .taste__spark { display: none; }
   .taste__opt, .taste__skip, .taste__save { transition: none !important; }
   .taste__save:hover { transform: none !important; }
+  .prof, .prof__card { animation: none !important; }
+  .prof__close, .prof__cancel, .prof__save, .prof__discard, .acct__who {
+    transition: none !important;
+  }
+  .prof__save:hover, .acct__who:hover { transform: none !important; }
 }

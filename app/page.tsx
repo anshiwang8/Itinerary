@@ -67,6 +67,7 @@ import StopItineraryDialog from "./StopItineraryDialog";
 import SwapEndTimeDialog from "./SwapEndTimeDialog";
 import HistoryPanel from "./HistoryPanel";
 import TasteSurvey from "./TasteSurvey";
+import ProfilePanel from "./ProfilePanel";
 import {
   EMPTY_ANSWERS,
   profileGateState,
@@ -75,6 +76,12 @@ import {
   type ProfileGateState,
   type TasteAnswers,
 } from "./lib/tastePreferences";
+import {
+  parseProfileEditLoad,
+  parseSaveResult,
+  type ProfileEditLoad,
+  type ProfileSaveResult,
+} from "./lib/profileEdit";
 import { parseHistoryResponse, type HistoryResponseView } from "./lib/historyView";
 import type { StopChoice } from "./api/itinerary/stopPlan";
 import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
@@ -333,6 +340,11 @@ export default function Home() {
   // answers — no planner, no search, no selection. Spending them is 3B.
   const [profileGate, setProfileGate] = useState<ProfileGateState>("unknown");
   const [surveyOpen, setSurveyOpen] = useState(false);
+  // The EDITOR for those same answers — the survey's re-openable other half,
+  // entered from the account corner. Landing-screen only, like History: the
+  // corner lives inside `if (!itinerary)`, so this is unreachable mid-plan by
+  // construction rather than by a check.
+  const [profileOpen, setProfileOpen] = useState(false);
   // The survey is offered ONCE per session, whatever the profile write does.
   // Without this, the gap between closing the survey and the write landing is a
   // window in which the effect below would mount it a second time.
@@ -404,6 +416,12 @@ export default function Home() {
     if (shouldRearmSurvey(surveyIdentityUid.current, uid)) {
       surveyIdentityUid.current = uid;
       surveyOffered.current = false;
+      // The preferences editor belongs to whoever opened it, and that is no
+      // longer the person here — same reason the survey is closed below. (The
+      // mount is gated on `signedInForReal` too, so the guest hop every account
+      // switch passes through has already taken it off screen; this is what
+      // stops it reappearing when the next account arrives.)
+      setProfileOpen(false);
       // WHETHER, never WHICH — the same line `planner_plan` draws. A uid here
       // would put someone's identity in a log about their taste, and the only
       // question this has to answer is "did the session notice the person
@@ -430,24 +448,41 @@ export default function Home() {
     setSurveyOpen(true);
   }, [auth.status, auth.user, profileGate]);
 
+  /** The caller's stored taste, for the editor to pre-fill from. Scoped by the
+   *  SERVER to the verified token — there is no uid to send — and injected as a
+   *  prop for the same reason `loadHistory` is: the panel never touches auth. */
+  const loadTasteProfile = useCallback(async (): Promise<ProfileEditLoad> => {
+    const payload = await fetchJson<unknown>("/api/profile", {
+      headers: await authHeaders(),
+    });
+    return parseProfileEditLoad(payload);
+  }, [authHeaders]);
+
   /** File the survey result — answers on submit, an empty set on skip. BOTH
    *  write, because a skip that recorded nothing would mean "ask me again every
    *  login". Fire-and-forget FOR THE SCREEN: the route answers 200 even when
    *  there is nowhere to write (guest, no Firebase), so there is no failure for
    *  a screen that is already closing to report — but the promise is KEPT, in
    *  `pendingProfileWrite`, because the next plan reads this profile back from
-   *  the server and must not overtake it. */
+   *  the server and must not overtake it.
+   *
+   *  IT ALSO RETURNS THAT PROMISE, and the two callers want opposite things
+   *  from it. The survey ignores it and keeps its send-off; the editor AWAITS
+   *  it, because an explicit Save button with no acknowledgement reads as
+   *  broken. Neither is a second write path — one writer, so the editor cannot
+   *  miss `pendingProfileWrite` and re-open the race the planner closed. */
   const saveTasteProfile = useCallback(
-    (answers: TasteAnswers, completed: boolean) => {
+    (answers: TasteAnswers, completed: boolean): Promise<ProfileSaveResult> => {
       // Locally, the profile now exists. Set before the request so a re-render
       // during the write cannot re-open the survey.
       setProfileGate("present");
       // The catch lives INSIDE, so this promise always resolves. Whoever waits
       // on it is waiting for the write to be OVER, not for it to have worked:
-      // a failed save must delay a plan at most, never fail one.
-      pendingProfileWrite.current = (async () => {
+      // a failed save must delay a plan at most, never fail one. The editor
+      // reads the RESULT to decide what to say; a plan reads nothing at all.
+      const write = (async (): Promise<ProfileSaveResult> => {
         try {
-          await fetchJson<unknown>("/api/profile", {
+          const payload = await fetchJson<unknown>("/api/profile", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -455,14 +490,30 @@ export default function Home() {
             },
             body: JSON.stringify({ answers, completed }),
           });
+          return parseSaveResult(payload);
         } catch {
-          // Swallowed on purpose. The user has finished with this screen; an
-          // error toast about a preference that failed to save would be the
-          // most annoying possible thing to show next.
+          // Swallowed on purpose for the SURVEY, whose user has finished with
+          // the screen: an error toast about a preference that failed to save
+          // would be the most annoying possible thing to show next. The editor
+          // is still on screen and gets the honest answer instead.
+          return { saved: false };
         }
       })();
+      // Never rejects (the catch is inside), so the plan-side wait inherits the
+      // same guarantee it had before: it waits for the write to be over.
+      pendingProfileWrite.current = write.then(() => undefined);
+      return write;
     },
     [authHeaders]
+  );
+
+  /** The editor's save. `completed: true` is the honest value for an answer
+   *  deliberately given (it gates nothing today — `plannerPreferences` never
+   *  consults it), and `surveySeen` is hardcoded true by the one writer, so an
+   *  edit can never resurrect the onboarding nag. */
+  const saveEditedProfile = useCallback(
+    (answers: TasteAnswers): Promise<ProfileSaveResult> => saveTasteProfile(answers, true),
+    [saveTasteProfile]
   );
 
   const [prompt, setPrompt] = useState("");
@@ -2486,7 +2537,19 @@ export default function Home() {
             </button>
             {signedInForReal && auth.user ? (
               <>
-                <div className="acct__who">
+                {/* The name is the way IN to your stored taste. Offered only
+                    here, inside the real-account branch — a guest sees
+                    `.acct__signin` instead, so the editor is structurally
+                    unreachable for one rather than hidden from it. The
+                    accessible name CONTAINS the visible label, so speaking it
+                    still matches what is on screen. */}
+                <button
+                  type="button"
+                  className="acct__who"
+                  aria-haspopup="dialog"
+                  aria-label={`${userLabel(auth.user)} — your preferences`}
+                  onClick={() => setProfileOpen(true)}
+                >
                   {auth.user.photoURL ? (
                     // eslint-disable-next-line @next/next/no-img-element -- provider avatar on an unconfigurable remote host
                     <img
@@ -2501,7 +2564,7 @@ export default function Home() {
                     </span>
                   )}
                   <span className="acct__name">{userLabel(auth.user)}</span>
-                </div>
+                </button>
                 <button type="button" className="acct__out" onClick={() => void auth.signOut()}>
                   Sign out
                 </button>
@@ -2548,14 +2611,31 @@ export default function Home() {
             demoted to position: relative and stop covering the page. */}
         {surveyOpen && (
           <TasteSurvey
-            onSubmit={(answers) => saveTasteProfile(answers, true)}
+            // `void`, explicitly: the writer returns its promise now (the
+            // editor awaits it), and onboarding deliberately does not — the
+            // send-off is about the answers being GIVEN, not about a round
+            // trip completing.
+            onSubmit={(answers) => void saveTasteProfile(answers, true)}
             onSkip={() => {
               // EMPTY_ANSWERS, never a literal: a dimension added to the
               // survey must reach the skip path automatically, or a skip
               // would file a document missing the new field.
-              saveTasteProfile(EMPTY_ANSWERS, false);
+              void saveTasteProfile(EMPTY_ANSWERS, false);
             }}
             onClose={() => setSurveyOpen(false)}
+          />
+        )}
+        {/* The editor for the same four questions. Gated on a REAL account at
+            the mount as well as at the trigger: signing out with it open must
+            not leave a guest holding an editor for a profile they cannot have.
+            `.prof` is in the `.empty > *:not(…)` exclusion list; without that
+            it would be demoted to position: relative and stop covering the
+            page. */}
+        {profileOpen && signedInForReal && (
+          <ProfilePanel
+            load={loadTasteProfile}
+            save={saveEditedProfile}
+            onDismiss={() => setProfileOpen(false)}
           />
         )}
         <h1 className="empty__title">Itinerary</h1>

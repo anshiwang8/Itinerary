@@ -28,6 +28,7 @@
 // for "happening now / just changed" and appears nowhere here, including on the
 // confirmation: a stored preference is not a live event.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import TasteQuestions from "./TasteQuestions";
 import {
   EMPTY_ANSWERS,
   SURVEY_QUESTIONS,
@@ -161,30 +162,10 @@ export default function TasteSurvey({
         </div>
 
         <div className="taste__body">
-          {SURVEY_QUESTIONS.map((question) => (
-            <fieldset className="taste__q" key={question.id}>
-              <legend className="taste__qLabel">{question.question}</legend>
-              <div className="taste__opts">
-                {question.options.map((opt) => {
-                  const on = answers[question.id].includes(opt.value);
-                  return (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      className={"taste__opt" + (on ? " taste__opt--on" : "")}
-                      // A multi-select chip is a checkbox, whatever it looks
-                      // like — screen readers must hear "pressed", not a
-                      // button that seems to do nothing.
-                      aria-pressed={on}
-                      onClick={() => toggle(question.id, opt.value)}
-                    >
-                      {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </fieldset>
-          ))}
+          {/* Rendering only. The grid is shared with the edit-profile panel;
+              everything this screen does with an answer — the blank start, the
+              escape-writes-a-skip, the send-off — stays here. */}
+          <TasteQuestions answers={answers} onToggle={toggle} />
         </div>
 
         <div className="taste__foot">
