@@ -70,6 +70,7 @@ import TasteSurvey from "./TasteSurvey";
 import {
   EMPTY_ANSWERS,
   profileGateState,
+  shouldRearmSurvey,
   shouldShowSurvey,
   type ProfileGateState,
   type TasteAnswers,
@@ -336,6 +337,13 @@ export default function Home() {
   // Without this, the gap between closing the survey and the write landing is a
   // window in which the effect below would mount it a second time.
   const surveyOffered = useRef(false);
+  // WHOSE survey state the two above describe — the latch AND `profileGate`.
+  // A page session can outlive a user (sign out, sign in as someone else), and
+  // both of those are per-USER facts, so without this they carried across and
+  // the second account of a session was never asked. Only ever a real uid: the
+  // null the observer delivers between a sign-out and the anonymous sign-in
+  // that replaces it is an absence, not a different person.
+  const surveyIdentityUid = useRef<string | null>(null);
   // The survey's write, while it is still in the air. The screen deliberately
   // does not wait for it (see saveTasteProfile); the PLANNER does, because it
   // reads the profile back server-side and would otherwise race a write the
@@ -343,9 +351,16 @@ export default function Home() {
   // which is every plan except the one right after a submit.
   const pendingProfileWrite = useRef<Promise<void> | null>(null);
 
-  // Does this person already have a profile? Asked once, and only of a REAL
-  // account: a guest's profile is never written, so asking about one is a round
-  // trip with a known answer — the same call HistoryPanel declines to make.
+  // Does this person already have a profile? Asked once PER IDENTITY, and only
+  // of a REAL account: a guest's profile is never written, so asking about one
+  // is a round trip with a known answer — the same call HistoryPanel declines
+  // to make. "Once per identity" and not once per page load, because a session
+  // can hold two accounts: the gate effect below returns this to "unknown" when
+  // the user changes, and that dependency change is what re-fires the read for
+  // the new uid. A read still in flight for the OLD one is cancelled by the
+  // same mechanism — reaching a second account always passes through the guest
+  // that signing out mints, so `signedInForReal` goes false and back, and
+  // either dependency moving runs this effect's cleanup.
   useEffect(() => {
     if (!signedInForReal) return;
     if (profileGate !== "unknown") return;
@@ -372,7 +387,38 @@ export default function Home() {
   // The decision itself lives in `shouldShowSurvey`, not here: guest, returning
   // user, mid-read and failed-read are four distinct "no"s, and they are worth
   // testing without a browser.
+  //
+  // RE-ARMING COMES FIRST, IN THIS SAME EFFECT, and that placement is the
+  // point. A different account in one page session has to re-enter this gate
+  // with clean inputs, and BOTH of them are dirty: the latch says "asked" and
+  // `profileGate` still holds the previous account's answer. Deciding on either
+  // is wrong, so an identity change RETURNS without deciding — the state it
+  // just invalidated re-runs this effect, and the fresh read decides then. Done
+  // as a separate effect it would race this one within the same commit, where
+  // `profileGate` still reads stale.
+  //
+  // It only ever RE-ARMS. Nothing here forces the survey open; `shouldShowSurvey`
+  // still has the only vote, now on the new user's real profile.
   useEffect(() => {
+    const uid = auth.user?.uid ?? null;
+    if (shouldRearmSurvey(surveyIdentityUid.current, uid)) {
+      surveyIdentityUid.current = uid;
+      surveyOffered.current = false;
+      // WHETHER, never WHICH — the same line `planner_plan` draws. A uid here
+      // would put someone's identity in a log about their taste, and the only
+      // question this has to answer is "did the session notice the person
+      // changed?", which is exactly what to check first when a second account
+      // is or isn't asked.
+      console.log("[survey-gate] identity changed — re-armed, profile re-read");
+      // A survey still open belongs to the person who is no longer here, and
+      // submitting it would file their answers under the new account's token.
+      setSurveyOpen(false);
+      // The read is per-user too. "unknown" is what re-fires it (the read
+      // effect above depends on it) and what cancels one still in flight.
+      setProfileGate("unknown");
+      return;
+    }
+    if (uid) surveyIdentityUid.current = uid;
     const show = shouldShowSurvey({
       authStatus: auth.status,
       isAnonymous: auth.user ? auth.user.isAnonymous : null,

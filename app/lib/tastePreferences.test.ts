@@ -14,6 +14,7 @@ import {
   normalizeTasteAnswers,
   parseTasteProfile,
   profileGateState,
+  shouldRearmSurvey,
   shouldShowSurvey,
   toTasteProfileDocument,
   type SurveyGateInput,
@@ -186,6 +187,104 @@ const cases: Array<[string, () => void]> = [
       // and never will, so "absent" is not evidence they should be asked.
       assert.strictEqual(
         shouldShowSurvey(gate({ isAnonymous: true, profile: "absent" })),
+        false
+      );
+    },
+  ],
+
+  // ── whether the ask is still ARMED for whoever is here now ──
+  //
+  // `alreadyShown` is a PAGE-SESSION fact and the person is not. Everything
+  // below is one page load; only the uid moves.
+  [
+    "re-arms when a DIFFERENT account takes over the session",
+    () => {
+      assert.strictEqual(shouldRearmSurvey("uid-account-1", "uid-account-2"), true);
+    },
+  ],
+  [
+    "does NOT re-arm on the same uid — a token refresh must not re-pop it",
+    () => {
+      // The observer is `onIdTokenChanged`, so it fires hourly and on every
+      // getIdToken() renewal. Same person, same uid, nothing to re-ask.
+      assert.strictEqual(shouldRearmSurvey("uid-account-1", "uid-account-1"), false);
+    },
+  ],
+  [
+    "does NOT re-arm on the anonymous→account LINK, which keeps the uid",
+    () => {
+      // `signIn()` upgrades a guest with linkWithPopup precisely because that
+      // preserves the uid (the in-progress plan stays theirs). Same identity
+      // gaining an account is not a new audience — and it needs no re-arm,
+      // because nothing was shown or read for a guest in the first place.
+      assert.strictEqual(shouldRearmSurvey("uid-guest", "uid-guest"), false);
+    },
+  ],
+  [
+    "does NOT re-arm while there is no current uid",
+    () => {
+      // The gap between signOut() and the anonymous sign-in that replaces it:
+      // the observer delivers null. Nobody to arm for.
+      assert.strictEqual(shouldRearmSurvey("uid-account-1", null), false);
+      assert.strictEqual(shouldRearmSurvey("uid-account-1", undefined), false);
+    },
+  ],
+  [
+    "does NOT re-arm on the FIRST identity of a session",
+    () => {
+      // Nothing has been shown and nothing has been read yet, so there is
+      // nothing to invalidate — the caller is only recording who it is.
+      assert.strictEqual(shouldRearmSurvey(null, "uid-guest"), false);
+      assert.strictEqual(shouldRearmSurvey(undefined, "uid-guest"), false);
+    },
+  ],
+  [
+    "a blank uid is an absence on either side, never an identity",
+    () => {
+      assert.strictEqual(shouldRearmSurvey("uid-account-1", "   "), false);
+      assert.strictEqual(shouldRearmSurvey("  ", "uid-account-2"), false);
+      // and surrounding space does not make the same person a new one
+      assert.strictEqual(shouldRearmSurvey("uid-account-1", " uid-account-1 "), false);
+    },
+  ],
+  [
+    "the ORDINARY account switch: the guest hop between two accounts re-arms",
+    () => {
+      // The real sequence, and the one the bug rode: signing out mints a
+      // BRAND-NEW anonymous uid, so the re-arm lands on that hop — before the
+      // second account has even chosen its Google identity. Nothing here needs
+      // to know whether a uid belongs to a guest or an account.
+      const first = "uid-guest-a"; // guest, then linked to account 1
+      const second = "uid-guest-b"; // the guest minted by signing out
+      assert.strictEqual(shouldRearmSurvey(first, null), false); // signed out
+      assert.strictEqual(shouldRearmSurvey(first, second), true); // new guest
+      assert.strictEqual(shouldRearmSurvey(second, second), false); // linked
+    },
+  ],
+  [
+    "composes with the gate: the second account of a session IS asked again",
+    () => {
+      // THE BUG, end to end. Account 1 was offered the survey, so the latch is
+      // set; account 2 arrives in the same page session with a profile of its
+      // own that says absent.
+      const latched = { alreadyShown: true, profile: "absent" as const };
+      assert.strictEqual(shouldShowSurvey(gate(latched)), false);
+      // The uid moved, so the latch is not account 2's to honour.
+      assert.strictEqual(shouldRearmSurvey("uid-account-1", "uid-account-2"), true);
+      assert.strictEqual(
+        shouldShowSurvey(gate({ ...latched, alreadyShown: false })),
+        true
+      );
+      // …and a re-arm is never a reason on its own: account 2 having already
+      // answered still says no, on its OWN profile read.
+      assert.strictEqual(
+        shouldShowSurvey(gate({ alreadyShown: false, profile: "present" })),
+        false
+      );
+      // …nor does it out-vote the read still being in flight, which is the
+      // state a re-arm deliberately returns the gate to.
+      assert.strictEqual(
+        shouldShowSurvey(gate({ alreadyShown: false, profile: "unknown" })),
         false
       );
     },

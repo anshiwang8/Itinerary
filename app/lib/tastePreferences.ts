@@ -312,6 +312,54 @@ export function shouldShowSurvey(input: SurveyGateInput): boolean {
   return input.profile === "absent";
 }
 
+/** Blank is absent, the rule `ownerUidOf` and `toAppUser` both apply: a uid is
+ *  either a real identity or it is nothing. */
+function uidOrNull(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Has the person the survey state describes CHANGED?
+ *
+ * `alreadyShown` above and the profile read that feeds `profile` are both
+ * PER-USER facts held for the length of a PAGE SESSION, and a page session can
+ * outlive a user: sign out, sign in as someone else, and the latch still says
+ * "asked" while the gate still holds the previous account's profile. That is
+ * the whole bug this answers — the second account was never asked, and a
+ * refresh "fixed" it because a refresh is how the session ended.
+ *
+ * Keyed on the UID and nothing else, for the same reason `sameAppUserIdentity`
+ * exists: `useAuth` watches `onIdTokenChanged`, which also fires on every
+ * hourly refresh and on every `getIdToken()` that renews. Re-arming on each of
+ * those would re-open the survey mid-session for someone who just answered it.
+ * A refresh carries the same uid, so it is inert here by construction.
+ *
+ * Two "no"s beyond that, and both are real states rather than defensive noise:
+ *  - NO CURRENT UID. The moment between `signOut()` and the anonymous sign-in
+ *    that replaces it, when the observer has delivered null. Nobody to arm for,
+ *    and the previous uid is KEPT by the caller so the identity that arrives
+ *    next is still compared against a real predecessor, not against null.
+ *  - NO PREVIOUS UID. The first identity of the session. Nothing has been shown
+ *    and nothing has been read, so there is nothing to re-arm; recording it is
+ *    the caller's whole job on that pass.
+ *
+ * Note what is NOT special-cased: a guest. Signing out mints a BRAND-NEW
+ * anonymous uid, so the guest → guest hop between two accounts is a genuine
+ * identity change and is exactly where the re-arm lands on the ordinary path.
+ */
+export function shouldRearmSurvey(
+  previousUid: string | null | undefined,
+  currentUid: string | null | undefined
+): boolean {
+  const current = uidOrNull(currentUid);
+  if (current === null) return false;
+  const previous = uidOrNull(previousUid);
+  if (previous === null) return false;
+  return previous !== current;
+}
+
 /** The `/api/profile` response → the gate state. An unreadable body is a FAILED
  *  read, never an absent profile, for the reason spelled out above. */
 export function profileGateState(value: unknown): {
