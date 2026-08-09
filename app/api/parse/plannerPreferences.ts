@@ -18,7 +18,7 @@
 // already state a cuisine?" is a semantic question, so the model answers it,
 // and its answer goes through the same unchanged validator as any other plan.
 //
-// THREE DECISIONS LIVE HERE, and they are why this is a module rather than
+// FOUR DECISIONS LIVE HERE, and they are why this is a module rather than
 // three lines in the route:
 //
 //  1. A preference the app cannot act on is never sent. `dietary: ["none"]` is
@@ -28,8 +28,8 @@
 //     object, which the model would still have to interpret.
 //  2. The planner's words are not the survey's words. The phrase table below is
 //     a second, small mapping rather than a reuse of `SurveyOption.label`:
-//     "Cultural (art, music, history)" is BUTTON COPY, and rewording a button
-//     must not silently change how plans are searched. The phrases are also
+//     "Games & competition" is BUTTON COPY, and rewording a button must not
+//     silently change how plans are searched. The phrases are also
 //     kept short and punctuation-free on purpose — `aesthetic` is prepended
 //     VERBATIM into the Places text query (searchPlaces.buildQuery), so a
 //     phrase with an em-dash in it is a worse SEARCH, not just a worse
@@ -37,11 +37,17 @@
 //  3. A stored dietary preference is SUPPRESSED when the request names a venue
 //     type it contradicts — see the dietary section below. This is the one
 //     guarantee 3B makes in code rather than in prompt wording.
+//  4. An injected ACTIVITY phrase that comes back as a CONSTRAINT is stripped —
+//     see isLeakedActivityConstraint at the foot of this file. The second
+//     guarantee made in code, added when `activities` shipped, and for the same
+//     reason as the third: the failure it prevents is a permanent refusal the
+//     user did nothing to earn.
 import {
   type TasteDimension,
   type TasteProfilePayload,
 } from "../../lib/tastePreferences";
 import { dietaryConflictsWithPrompt } from "../../lib/planGuards";
+import { normalizeConstraint } from "../../lib/constraints";
 
 /**
  * Real answers that carry NO planning signal, per dimension.
@@ -55,20 +61,35 @@ export const NON_PLANNING_OPTIONS: Readonly<Record<TasteDimension, readonly stri
   style: [],
   foods: ["other"],
   dietary: ["none", "other"],
+  // Every activity option is actionable by construction — the five that
+  // shipped are exactly the ones the planner can reliably steer toward, and an
+  // option that could not be steered to was not added rather than added and
+  // dropped here.
+  activities: [],
 };
 
 /** Stored slug → the short phrase the planner is handed. Short and
- *  punctuation-free by policy; see the header note on buildQuery. */
+ *  punctuation-free by policy; see the header note on buildQuery.
+ *
+ *  The ACTIVITY phrases obey a second rule the others do not: each is a
+ *  PLACE KIND, never a venue FEATURE. That is not style — it is what makes the
+ *  leak strip safe. "live music" is a genuine, provider-provable constraint
+ *  someone may really ask for; "live music venue" is a kind of place and can
+ *  never be one, so stripping it can never remove something the user stated.
+ *  A phrase here that named a feature would put those two cases on the same
+ *  string, and the strip would start eating real requests. */
 export const PLANNER_PHRASES: Readonly<
   Record<TasteDimension, Readonly<Record<string, string>>>
 > = {
+  // PURE VIBE. "cultural" was retired when `activities` shipped: it is an
+  // INTEREST, not a vibe, and leaving it here would have steered the same
+  // choice twice — once as a query adjective and once as the activity kind.
   style: {
     chill: "low-key",
     lively: "lively",
     trendy: "trendy",
     cozy: "cozy",
     adventurous: "adventurous",
-    cultural: "cultural",
   },
   foods: {
     japanese: "Japanese",
@@ -86,6 +107,19 @@ export const PLANNER_PHRASES: Readonly<
     halal: "halal",
     "gluten-free": "gluten-free",
   },
+  // A REPRESENTATIVE place kind per interest, not an exhaustive list. The
+  // planner is told to use the kind itself or a close sibling, so "art
+  // gallery" reaches a museum and "park" reaches a garden or a waterfront
+  // trail — the model is the right thing to hold that judgment, and a wider
+  // phrase ("art galleries and museums") would be a worse SEARCH on the days
+  // the model copies it into a searchQuery verbatim.
+  activities: {
+    art: "art gallery",
+    outdoors: "park",
+    games: "board game cafe",
+    active: "climbing gym",
+    music: "live music venue",
+  },
 };
 
 /** Map rather than plain-object lookup: the slug is data, and `table["toString"]`
@@ -96,6 +130,7 @@ const PHRASE_BY_SLUG: Record<TasteDimension, Map<string, string>> = {
   style: new Map(Object.entries(PLANNER_PHRASES.style)),
   foods: new Map(Object.entries(PLANNER_PHRASES.foods)),
   dietary: new Map(Object.entries(PLANNER_PHRASES.dietary)),
+  activities: new Map(Object.entries(PLANNER_PHRASES.activities)),
 };
 
 /**
@@ -109,6 +144,10 @@ export interface PlannerPreferences {
   style?: string[];
   foods?: string[];
   dietary?: string[];
+  /** The KIND of non-food stop this user enjoys — the searchQuery NOUN, not
+   *  the `aesthetic` adjective the other three shade. This is the only
+   *  dimension that decides WHICH STOP EXISTS. */
+  activities?: string[];
 }
 
 function phrasesFor(dimension: TasteDimension, slugs: readonly string[] | undefined): string[] {
@@ -159,12 +198,69 @@ export function toPlannerPreferences(
   const dietary = phrasesFor("dietary", profile.dietary).filter(
     (diet) => !dietaryConflictsWithPrompt(diet, prompt)
   );
+  // No suppression pass for activities, and that is a decision rather than an
+  // omission. The dietary one exists because a stored diet plus an explicit
+  // venue is a FAIL-LOUD contradiction; an activity preference against a
+  // stated activity is an ordinary aspect the request simply wins, which the
+  // per-aspect rule in the prompt already settles.
+  const activities = phrasesFor("activities", profile.activities);
 
-  if (style.length === 0 && foods.length === 0 && dietary.length === 0) return null;
+  if (
+    style.length === 0 &&
+    foods.length === 0 &&
+    dietary.length === 0 &&
+    activities.length === 0
+  ) {
+    return null;
+  }
 
   const preferences: PlannerPreferences = {};
   if (style.length > 0) preferences.style = style;
   if (foods.length > 0) preferences.foods = foods;
   if (dietary.length > 0) preferences.dietary = dietary;
+  if (activities.length > 0) preferences.activities = activities;
   return preferences;
+}
+
+/**
+ * Did an injected ACTIVITY phrase come back as a `constraints` entry?
+ *
+ * THE FAILURE THIS PREVENTS IS TOTAL, WHICH IS WHY IT IS CODE AND NOT WORDING.
+ * `constraints` is ONE plan-level array applied to EVERY slot: `buildQuery`
+ * splices it verbatim into every category's Places text query, and
+ * `selectVenues` proves each entry from `constraintEvidence` — six provider
+ * booleans, and nothing else. A kind of PLACE is unprovable by construction, so
+ * a leaked "art gallery" makes `placeMeetsAllConstraints` false for every
+ * candidate in every pool: the correction retry fails identically and the whole
+ * plan comes back `unmet_constraint`. "Couldn't find a restaurant that's really
+ * art gallery" — over a preference the user never restated.
+ *
+ * This is the same bug, and the same fix, the swap engine already carries for a
+ * leaked price word and a leaked category (swap.ts's `isLeakedConstraint`). The
+ * planner path had only prompt wording, and CLAUDE.md records that the
+ * equivalent dietary wording has been seen to leak live.
+ *
+ * AN EQUALITY TEST, deliberately, and normalised with `normalizeConstraint` —
+ * the SAME function the judge normalises with, so this removes exactly the
+ * strings that would have choked it and nothing else. NOT a keyword list, and
+ * not a containment test: "live music" is contained in the phrase "live music
+ * venue" and is ALSO a genuine, provable constraint a user may really have
+ * asked for, so anything looser than equality would start deleting real
+ * requests. That the phrases are place kinds rather than features (see
+ * PLANNER_PHRASES) is what keeps equality sufficient.
+ *
+ * KNOWN RESIDUAL, stated rather than papered over: a model that leaks a
+ * VARIANT ("art" for "art gallery") is not caught here. The prompt forbids it
+ * in as many words, the phrase table keeps the caught case the likely one, and
+ * a looser rule would cost more than it saves.
+ */
+export function isLeakedActivityConstraint(
+  constraint: string,
+  preferences: PlannerPreferences | null
+): boolean {
+  const injected = preferences?.activities;
+  if (!injected || injected.length === 0) return false;
+  const normalized = normalizeConstraint(constraint);
+  if (!normalized) return false;
+  return injected.some((phrase) => normalizeConstraint(phrase) === normalized);
 }

@@ -14,10 +14,16 @@ import assert from "node:assert";
 import {
   NON_PLANNING_OPTIONS,
   PLANNER_PHRASES,
+  isLeakedActivityConstraint,
   toPlannerPreferences,
   type PlannerPreferences,
 } from "./plannerPreferences";
-import { buildPlannerMessages } from "./planner";
+import {
+  buildPlannerMessages,
+  stripLeakedPreferenceConstraints,
+  validatePlan,
+  type PlanIntent,
+} from "./planner";
 import { SURVEY_QUESTIONS, type TasteProfilePayload } from "../../lib/tastePreferences";
 import { contradictionReason } from "../../lib/planGuards";
 import type { ParsedPrompt } from "../places/search/filter";
@@ -32,11 +38,48 @@ function profile(over: Partial<TasteProfilePayload> = {}): TasteProfilePayload {
     style: ["cozy"],
     foods: ["japanese", "italian"],
     dietary: ["vegetarian"],
+    activities: ["art"],
     surveySeen: true,
     surveyCompleted: true,
     updatedAt: "2026-08-01T12:00:00.000Z",
     ...over,
   };
+}
+
+/** A validated plan carrying exactly these constraints — built through the
+ *  REAL validator, so the strip is exercised against the shape the pipeline
+ *  actually hands it rather than a hand-rolled object. */
+function planWithConstraints(constraints: string[]): PlanIntent {
+  const attempt = validatePlan(
+    {
+      activities: [
+        {
+          slot: 0,
+          intent: "visit a gallery",
+          searchQuery: "art gallery",
+          estimatedMinutes: 90,
+          confident: true,
+        },
+      ],
+      timeIntent: {
+        startISO: "2026-08-06T19:00:00-04:00",
+        endISO: null,
+        kind: "explicit",
+        label: "7pm",
+      },
+      questions: [],
+      context: {
+        aesthetic: "unspecified",
+        groupContext: "unspecified",
+        budget: null,
+        constraints,
+        location: "",
+      },
+    },
+    NOW
+  );
+  assert.ok(attempt.ok, "fixture plan must be valid");
+  return attempt.plan;
 }
 
 /** The un-personalized parse, for the contradiction guard: the guard reads the
@@ -126,6 +169,7 @@ const cases: Array<[string, () => void]> = [
         style: [],
         foods: [],
         dietary: [],
+        activities: [],
         surveyCompleted: false,
       });
       assert.strictEqual(toPlannerPreferences(skipped, "dinner tonight"), null);
@@ -137,18 +181,33 @@ const cases: Array<[string, () => void]> = [
       // "No restrictions" and "Other" are real answers that say nothing a plan
       // can act on. `dietary: ["none"]` in particular must never reach a model,
       // which would read it as the presence of a restriction called "none".
-      const empty = profile({ style: [], foods: ["other"], dietary: ["none", "other"] });
+      const empty = profile({
+        style: [],
+        foods: ["other"],
+        dietary: ["none", "other"],
+        activities: [],
+      });
       assert.strictEqual(toPlannerPreferences(empty, "dinner tonight"), null);
     },
   ],
   [
     "unknown slugs are dropped, and a profile of ONLY unknown slugs injects nothing",
     () => {
-      const stale = profile({ style: ["retired-option"], foods: [], dietary: [] });
+      const stale = profile({
+        style: ["retired-option"],
+        foods: [],
+        dietary: [],
+        activities: [],
+      });
       assert.strictEqual(toPlannerPreferences(stale, "dinner"), null);
 
       const mixed = toPlannerPreferences(
-        profile({ style: ["retired-option", "cozy"], foods: [], dietary: [] }),
+        profile({
+          style: ["retired-option", "cozy"],
+          foods: [],
+          dietary: [],
+          activities: [],
+        }),
         "dinner"
       );
       assert.deepStrictEqual(mixed, { style: ["cozy"] });
@@ -158,7 +217,7 @@ const cases: Array<[string, () => void]> = [
     "an empty dimension is OMITTED, not sent as an empty list",
     () => {
       const injected = toPlannerPreferences(
-        profile({ style: [], foods: ["korean"], dietary: [] }),
+        profile({ style: [], foods: ["korean"], dietary: [], activities: [] }),
         "dinner"
       );
       assert.deepStrictEqual(injected, { foods: ["Korean"] });
@@ -174,6 +233,47 @@ const cases: Array<[string, () => void]> = [
         style: ["cozy"],
         foods: ["Japanese", "Italian"],
         dietary: ["vegetarian"],
+        activities: ["art gallery"],
+      });
+    },
+  ],
+  [
+    "every activity slug projects to a PLACE KIND, never a venue feature",
+    () => {
+      // The property that makes the leak strip safe to run at all: an activity
+      // phrase must never be a string someone could legitimately put in
+      // `constraints`. "live music" is provable from a provider boolean and is
+      // a real thing to ask for; "live music venue" is a kind of place and can
+      // never be one, so stripping it can never delete a genuine request.
+      const provableFeatures = [
+        "live music",
+        "patio",
+        "outdoor seating",
+        "vegetarian",
+        "family friendly",
+        "dog friendly",
+        "wheelchair accessible",
+        "accessible",
+      ];
+      for (const phrase of Object.values(PLANNER_PHRASES.activities)) {
+        assert.ok(
+          !provableFeatures.includes(phrase.toLowerCase()),
+          `activity phrase "${phrase}" is also a provable CONSTRAINT — the strip would start deleting real user requests`
+        );
+      }
+    },
+  ],
+  [
+    "an activities-only profile still injects — it is a dimension in its own right",
+    () => {
+      // slugs arrive in the QUESTION's order — `normalizeAnswerSet` guarantees
+      // that upstream, so two identical profiles project identically
+      const injected = toPlannerPreferences(
+        profile({ style: [], foods: [], dietary: [], activities: ["outdoors", "music"] }),
+        "something to do"
+      );
+      assert.deepStrictEqual(injected, {
+        activities: ["park", "live music venue"],
       });
     },
   ],
@@ -250,6 +350,106 @@ const cases: Array<[string, () => void]> = [
           `dietary phrase "${phrase}" trips the contradiction guard against a neutral prompt`
         );
       }
+      // An ACTIVITY phrase lands in a searchQuery, which reaches the guard as
+      // `category_signals` — a different field from the two above, and the one
+      // the dietary-vs-venue half of the guard actually reads. Swept against a
+      // budget prompt (the cheap/fancy half) and a dietary one (the venue
+      // half), because those are the two ways a phrase could manufacture a
+      // refusal nobody asked for.
+      for (const phrase of Object.values(PLANNER_PHRASES.activities)) {
+        for (const prompt of ["a cheap night out", "a vegan dinner and something to do"]) {
+          assert.strictEqual(
+            contradictionReason(prompt, parsedWith({ category_signals: [phrase] })),
+            null,
+            `activity phrase "${phrase}" trips the contradiction guard against "${prompt}"`
+          );
+        }
+        assert.strictEqual(
+          contradictionReason("a cheap night out", parsedWith({ aesthetic: phrase })),
+          null,
+          `activity phrase "${phrase}" trips the guard from the aesthetic field`
+        );
+      }
+    },
+  ],
+
+  // ── the constraint-leak guard: the second thing this stage guarantees in
+  //    code rather than in prompt wording ──
+  [
+    "an injected activity phrase is STRIPPED when it comes back as a constraint",
+    () => {
+      // The failure being prevented: `constraints` is one plan-level array
+      // applied to EVERY slot and proved from six provider booleans, so a
+      // leaked "art gallery" refuses the whole plan with unmet_constraint.
+      const preferences = toPlannerPreferences(
+        profile({ style: [], foods: [], dietary: [], activities: ["art"] }),
+        "something to do"
+      );
+      const leaked = planWithConstraints(["art gallery", "patio"]);
+      const cleaned = stripLeakedPreferenceConstraints(leaked, preferences);
+      assert.deepStrictEqual(
+        cleaned.context.constraints,
+        ["patio"],
+        "the activity kind goes, the genuine provable constraint stays"
+      );
+    },
+  ],
+  [
+    "the strip normalises exactly as the judge does — case and hyphens included",
+    () => {
+      const preferences: PlannerPreferences = { activities: ["board game cafe"] };
+      for (const leak of ["Board Game Cafe", "board-game-cafe", "  board game cafe  "]) {
+        assert.strictEqual(
+          isLeakedActivityConstraint(leak, preferences),
+          true,
+          `"${leak}" should normalise onto the injected phrase`
+        );
+      }
+    },
+  ],
+  [
+    "a GENUINE constraint the request stated is never stripped",
+    () => {
+      // The case that decides equality-not-containment. "live music" is
+      // contained in the injected phrase "live music venue" AND is a real,
+      // provider-provable thing to ask for. Anything looser than equality
+      // would delete it and silently drop what the user actually said.
+      const preferences: PlannerPreferences = { activities: ["live music venue"] };
+      assert.strictEqual(isLeakedActivityConstraint("live music", preferences), false);
+
+      const plan = planWithConstraints(["live music", "wheelchair accessible"]);
+      assert.deepStrictEqual(
+        stripLeakedPreferenceConstraints(plan, preferences).context.constraints,
+        ["live music", "wheelchair accessible"]
+      );
+    },
+  ],
+  [
+    "the strip only ever removes what THIS request injected",
+    () => {
+      // No activity preference — an "art gallery" constraint here came from
+      // the request, not from a profile, and is none of this guard's business.
+      const plan = planWithConstraints(["art gallery"]);
+      for (const preferences of [null, { style: ["cozy"] }, { activities: [] }] as Array<
+        PlannerPreferences | null
+      >) {
+        assert.strictEqual(
+          stripLeakedPreferenceConstraints(plan, preferences),
+          plan,
+          "an untouched plan must be the SAME object, not a rebuilt clone"
+        );
+      }
+    },
+  ],
+  [
+    "a plan with no constraints at all is returned untouched",
+    () => {
+      // The ordinary case, and the one every guest hits.
+      const plan = planWithConstraints([]);
+      assert.strictEqual(
+        stripLeakedPreferenceConstraints(plan, { activities: ["art gallery"] }),
+        plan
+      );
     },
   ],
 
@@ -267,6 +467,7 @@ const cases: Array<[string, () => void]> = [
         style: ["cozy"],
         foods: ["Japanese", "Italian"],
         dietary: ["vegetarian"],
+        activities: ["art gallery"],
       });
 
       const without = userPayload(

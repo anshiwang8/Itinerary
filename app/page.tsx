@@ -67,6 +67,7 @@ import SwapEndTimeDialog from "./SwapEndTimeDialog";
 import HistoryPanel from "./HistoryPanel";
 import TasteSurvey from "./TasteSurvey";
 import {
+  EMPTY_ANSWERS,
   profileGateState,
   shouldShowSurvey,
   type ProfileGateState,
@@ -2478,7 +2479,12 @@ export default function Home() {
         {surveyOpen && (
           <TasteSurvey
             onSubmit={(answers) => saveTasteProfile(answers, true)}
-            onSkip={() => saveTasteProfile({ style: [], foods: [], dietary: [] }, false)}
+            onSkip={() => {
+              // EMPTY_ANSWERS, never a literal: a dimension added to the
+              // survey must reach the skip path automatically, or a skip
+              // would file a document missing the new field.
+              saveTasteProfile(EMPTY_ANSWERS, false);
+            }}
             onClose={() => setSurveyOpen(false)}
           />
         )}

@@ -2,15 +2,25 @@
 
 // The onboarding taste survey — asked once, of a brand-new signed-in user.
 //
-// CAPTURE ONLY (Stage 3A). Every answer here is filed and nothing more: no plan
-// this user makes today behaves any differently for having answered. Spending
-// these preferences is 3B, and this component deliberately has no way to.
+// CAPTURE ONLY — still true of THIS COMPONENT, and no longer true of the
+// answers. It files them and has deliberately no way to spend them; what they
+// then MEAN to a plan is decided in `api/parse/plannerPreferences.ts` and in
+// the planner prompt. (The original comment here said no plan behaves any
+// differently for having answered. That stopped being true when Stage 3B
+// shipped, and the activities dimension made it emphatically untrue: an
+// answer to the fourth question can change which KIND of stop a vague day
+// gets.)
 //
-// THREE OPTIONAL QUESTIONS, all multi-select. "Optional" is load-bearing —
-// submitting with nothing ticked is a valid answer and is stored as one, so the
-// primary button never disables and never scolds. The only irreversible thing
-// on this screen is that it will not be shown again, which is true of the skip
-// too; both write the same `surveySeen` flag.
+// FOUR OPTIONAL QUESTIONS, all multi-select. They come from SURVEY_QUESTIONS
+// and are rendered by mapping it, so a new dimension needs no change here —
+// except the COUNT in the sub-heading below, which is written out in words and
+// is the one thing that has to move with the list.
+//
+// "Optional" is load-bearing — submitting with nothing ticked is a valid
+// answer and is stored as one, so the primary button never disables and never
+// scolds. The only irreversible thing on this screen is that it will not be
+// shown again, which is true of the skip too; both write the same `surveySeen`
+// flag.
 //
 // Structure mirrors LoginScreen and HistoryPanel — a centred card over a dimmed
 // stage, escape to leave, focus moved inside on open. Palette is the app's own:
@@ -146,7 +156,7 @@ export default function TasteSurvey({
             Tell us your taste
           </h2>
           <p className="taste__sub" id="taste-sub">
-            Three quick questions, all optional. Pick as many as you like.
+            Four quick questions, all optional. Pick as many as you like.
           </p>
         </div>
 

@@ -45,12 +45,56 @@ function skipped() {
 const cases: Array<[string, () => void]> = [
   // ── the survey definition ──
   [
-    "asks exactly the three dimensions, in order",
+    "asks exactly the four dimensions, in order",
     () => {
       assert.deepStrictEqual(
         SURVEY_QUESTIONS.map((q) => q.id),
-        ["style", "foods", "dietary"]
+        ["style", "foods", "dietary", "activities"]
       );
+    },
+  ],
+  [
+    "the activities question offers exactly the five steerable kinds",
+    () => {
+      // The closed set is the whole point: these are the interests the planner
+      // can actually steer a vague plan toward. Adding a sixth means proving
+      // it first — see the note beside the options.
+      const activities = SURVEY_QUESTIONS.find((q) => q.id === "activities");
+      assert.deepStrictEqual(
+        activities?.options.map((o) => o.value),
+        ["art", "outdoors", "games", "active", "music"]
+      );
+    },
+  ],
+  [
+    "style is PURE VIBE — 'cultural' was retired to the activities question",
+    () => {
+      const style = SURVEY_QUESTIONS.find((q) => q.id === "style");
+      assert.deepStrictEqual(
+        style?.options.map((o) => o.value),
+        ["chill", "lively", "trendy", "cozy", "adventurous"]
+      );
+    },
+  ],
+  [
+    "a RETIRED slug in a stored profile is silently dropped on read",
+    () => {
+      // What makes retiring an option safe with no migration: the closed set
+      // is applied on the way OUT of storage too, so a profile written when
+      // "cultural" existed simply comes back without it — and the rest of that
+      // person's answers are untouched.
+      assert.deepStrictEqual(normalizeAnswerSet("style", ["chill", "cultural"]), ["chill"]);
+      const stored = parseTasteProfile({
+        surveySeen: true,
+        surveyCompleted: true,
+        style: ["cultural", "cozy"],
+        foods: ["thai"],
+        updatedAt: AT,
+      });
+      assert.deepStrictEqual(stored?.style, ["cozy"]);
+      assert.deepStrictEqual(stored?.foods, ["thai"]);
+      // and a pre-activities document reads as "chose nothing", not undefined
+      assert.deepStrictEqual(stored?.activities, []);
     },
   ],
   [
@@ -151,9 +195,13 @@ const cases: Array<[string, () => void]> = [
   [
     "keeps known values",
     () => {
-      assert.deepStrictEqual(normalizeAnswerSet("style", ["chill", "cultural"]), [
+      assert.deepStrictEqual(normalizeAnswerSet("style", ["chill", "cozy"]), [
         "chill",
-        "cultural",
+        "cozy",
+      ]);
+      assert.deepStrictEqual(normalizeAnswerSet("activities", ["music", "art"]), [
+        "art",
+        "music",
       ]);
     },
   ],
@@ -206,7 +254,12 @@ const cases: Array<[string, () => void]> = [
     () => {
       // Firestore rejects undefined outright; this is where that is prevented.
       const answers = normalizeTasteAnswers({ style: ["cozy"] });
-      assert.deepStrictEqual(answers, { style: ["cozy"], foods: [], dietary: [] });
+      assert.deepStrictEqual(answers, {
+        style: ["cozy"],
+        foods: [],
+        dietary: [],
+        activities: [],
+      });
       for (const value of Object.values(answers)) assert.ok(Array.isArray(value));
     },
   ],
@@ -226,17 +279,30 @@ const cases: Array<[string, () => void]> = [
     "recognises an all-empty answer set",
     () => {
       assert.strictEqual(isEmptyAnswers(EMPTY_ANSWERS), true);
-      assert.strictEqual(isEmptyAnswers({ style: [], foods: ["thai"], dietary: [] }), false);
+      assert.strictEqual(
+        isEmptyAnswers({ style: [], foods: ["thai"], dietary: [], activities: [] }),
+        false
+      );
+      // the new dimension counts too — a survey answered ONLY here is answered
+      assert.strictEqual(
+        isEmptyAnswers({ style: [], foods: [], dietary: [], activities: ["art"] }),
+        false
+      );
     },
   ],
 
   // ── what actually gets filed ──
   [
-    "stores the three answer sets, both flags and a timestamp",
+    "stores the four answer sets, both flags and a timestamp",
     () => {
       const doc = toTasteProfileDocument(
         "uid-1",
-        { style: ["chill"], foods: ["korean", "italian"], dietary: ["vegetarian"] },
+        {
+          style: ["chill"],
+          foods: ["korean", "italian"],
+          dietary: ["vegetarian"],
+          activities: ["music", "art"],
+        },
         { completed: true, updatedAt: AT }
       );
       assert.deepStrictEqual(doc, {
@@ -244,6 +310,7 @@ const cases: Array<[string, () => void]> = [
         style: ["chill"],
         foods: ["italian", "korean"],
         dietary: ["vegetarian"],
+        activities: ["art", "music"],
         surveySeen: true,
         surveyCompleted: true,
         updatedAt: AT,
@@ -286,6 +353,7 @@ const cases: Array<[string, () => void]> = [
       }
       assert.deepStrictEqual(doc.foods, []);
       assert.deepStrictEqual(doc.dietary, []);
+      assert.deepStrictEqual(doc.activities, []);
     },
   ],
   [
@@ -293,7 +361,7 @@ const cases: Array<[string, () => void]> = [
     () => {
       const doc = toTasteProfileDocument(
         "  uid-1  ",
-        { style: ["chill", "not-an-option"], foods: [], dietary: [] },
+        { style: ["chill", "not-an-option"], foods: [], dietary: [], activities: [] },
         { completed: true, updatedAt: AT }
       );
       assert.deepStrictEqual(doc.style, ["chill"]);
@@ -307,13 +375,19 @@ const cases: Array<[string, () => void]> = [
     () => {
       const doc = toTasteProfileDocument(
         "uid-1",
-        { style: ["lively"], foods: ["japanese"], dietary: ["halal"] },
+        {
+          style: ["lively"],
+          foods: ["japanese"],
+          dietary: ["halal"],
+          activities: ["outdoors"],
+        },
         { completed: true, updatedAt: AT }
       );
       assert.deepStrictEqual(parseTasteProfile(doc), {
         style: ["lively"],
         foods: ["japanese"],
         dietary: ["halal"],
+        activities: ["outdoors"],
         surveySeen: true,
         surveyCompleted: true,
         updatedAt: AT,

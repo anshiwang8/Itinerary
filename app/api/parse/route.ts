@@ -18,7 +18,13 @@ import { verifyCaller } from "../_shared/caller";
 import { readTasteProfile } from "../profile/profileStore";
 import { toPlannerPreferences, type PlannerPreferences } from "./plannerPreferences";
 import { DEFAULT_ZONE, normalizeZone } from "../../lib/zoneTime";
-import { applyTimeFloors, buildPlannerMessages, planToParsed, planWithModel } from "./planner";
+import {
+  applyTimeFloors,
+  buildPlannerMessages,
+  planToParsed,
+  planWithModel,
+  stripLeakedPreferenceConstraints,
+} from "./planner";
 
 // The PLANNER step: natural-language prompt → the SHAPE of a day (which
 // activities, how long, what to search for, what to ask about) plus the
@@ -152,7 +158,14 @@ export async function POST(request: NextRequest) {
             : (msgs: unknown[]) => callGroq(apiKey, msgs, model)
         )
     );
-    const plan = applyTimeFloors(modelPlan, prompt, now, timeZone);
+    // Two floors over the model's answer, both correcting facts it does not
+    // get to be wrong about: the time floors, then the preference-leak strip.
+    // The strip is a no-op (same object) for every caller with no activity
+    // preference, which is every guest and every mock e2e run.
+    const timed = applyTimeFloors(modelPlan, prompt, now, timeZone);
+    const plan = stripLeakedPreferenceConstraints(timed, preferences);
+    const strippedConstraints =
+      timed.context.constraints.length - plan.context.constraints.length;
     // Permanent observability at the resolution point, same spirit as
     // [swap-apply] and [reroute-apply]: which rung answered, what shape came
     // back, and — when a rung was rejected — exactly why.
@@ -167,6 +180,12 @@ export async function POST(request: NextRequest) {
       // tuning; a log line naming someone's dietary restriction is a different
       // thing entirely, and this file is not where that gets written down.
       personalized: preferences !== null,
+      // HOW MANY leaked preference constraints code had to remove, never WHICH
+      // — a count is the tuning signal (the prompt half of that guard is
+      // wording, and wording drifts between models), and a count names nobody's
+      // taste. Omitted entirely when the strip did nothing, which is the
+      // ordinary case.
+      ...(strippedConstraints > 0 ? { strippedConstraints } : {}),
       ...(problems.length > 0 ? { problems: problems.slice(0, 6) } : {}),
     });
     return apiJson(ctx, { plan, parsed: planToParsed(plan) });

@@ -15,7 +15,7 @@
 // findPlanProblems() → one correction retry → deterministic fallback. A
 // correction is not trusted merely because it parsed.
 import type { ParsedPrompt } from "../places/search/filter";
-import type { PlannerPreferences } from "./plannerPreferences";
+import { isLeakedActivityConstraint, type PlannerPreferences } from "./plannerPreferences";
 import { hasImmediateTimeSignal } from "../../lib/immediateTime";
 import { hasAllDaySignal } from "../../lib/allDayTime";
 import {
@@ -210,9 +210,13 @@ TASTE PREFERENCES — only when a "preferences" object is present
 - Apply it ASPECT BY ASPECT, never as a whole. For each aspect — the cuisine, the vibe, the kind of activity — ask: does THIS request state it? If it does, the request wins and the preference does not apply to that aspect at all. If it does not, use the preference as a REAL default, not a faint tilt.
 - "foods" fills an unstated cuisine. "dinner" with foods ["Japanese", "Italian"] means a searchQuery of "japanese restaurant" or "italian restaurant" — not a generic "restaurant". "sushi dinner" states the cuisine already, so "foods" does not apply to that stop.
 - "style" fills an unstated vibe: put it in "aesthetic" and let it steer which venues the searchQueries describe. A stated vibe ("somewhere lively", "a quiet night") wins outright.
-- A preference that DIRECTLY answers an open aspect RESOLVES it: with "foods", a bare "dinner" is settled — set "confident": true and do NOT ask what they are craving. You already know.
-- A preference that only tilts a still-open choice does NOT resolve it: with style ["cultural"], "something to do" is still open — let the style steer which options you offer, keep "confident": false, and still ask what kind of thing.
-- Preferences never ADD or REMOVE a stop, and never change the time, the count, or anything the user stated. Liking Japanese food is not a reason to put dinner in "a walk in the park".
+- "activities" fills an unstated NON-FOOD activity, and it is the one preference that decides WHICH STOP EXISTS rather than what flavour a stop has. Each entry is a representative PLACE KIND ("art gallery", "park", "live music venue"). When the request leaves an activity open, make that stop's "searchQuery" that kind — or a close sibling of the same kind, which is usually the better plan: "art gallery" also reaches a museum or an exhibition, "park" also reaches a garden, a waterfront trail or a lookout, "board game cafe" also reaches an arcade, bowling or an escape room, "climbing gym" also reaches skating, swimming or a bouldering hall, "live music venue" also reaches a jazz club or a gig. Vary the sibling across plans rather than returning the same venue kind every time.
+- "activities" is a NOUN and belongs ONLY in a "searchQuery". Never put it in "aesthetic" — that field is the vibe, it is prepended to every stop's search, and an activity kind there searches for "art gallery restaurant" and finds nothing.
+- A stated activity wins outright and completely: "bowling tonight" is bowling, "a museum this afternoon" is a museum, whatever "activities" says. The preference only ever fills a gap the request left.
+- A preference that DIRECTLY answers an open aspect RESOLVES it: with "foods", a bare "dinner" is settled — set "confident": true and do NOT ask what they are craving. With "activities", a bare "something to do" is settled the same way — choose the kind, set "confident": true, and do NOT ask what kind of thing. You already know.
+- A preference that only tilts a still-open choice does NOT resolve it: with style ["lively"] and no "activities", "something to do" is still open — let the style steer which options you offer, keep "confident": false, and still ask what kind of thing.
+- Preferences never ADD or REMOVE a stop, and never change the time, the count, or anything the user stated. Liking Japanese food is not a reason to put dinner in "a walk in the park", and liking galleries is not a reason to add a fourth stop.
+- A PREFERENCE IS NEVER A CONSTRAINT. Nothing from "preferences" — a cuisine, a vibe, a diet, an activity kind — may appear in "constraints", ever. "constraints" is only for hard requirements THIS request stated. An activity kind in "constraints" is always wrong twice over: it is the KIND of stop, which the searchQuery already carries, and it cannot be verified, so it makes every venue in every category fail and the whole plan refuse.
 - "dietary" is a SOFT default. Express it in the searchQuery of the food stop ("vegetarian restaurant") and NEVER in "constraints" — "constraints" is for hard requirements THIS request stated, and a preference is not one.
 - If the request names food that pulls against the dietary preference, THE REQUEST WINS COMPLETELY: drop that preference from the whole plan — not the searchQuery, not the intent, not the constraints. Someone with a vegetarian preference who asks for the best steakhouse gets a steakhouse. Never refuse, never hedge, never combine the two into one contradictory search.
 - Never mention the preferences anywhere the user reads. Nothing in "intent" or a question says "because you like…". The plan is quietly theirs; it is not annotated.
@@ -915,6 +919,35 @@ export function applyTimeFloors(
   }
   // no immediacy or all-day signal — a named weekday may still need fixing
   return applyWeekdayFloor(plan, prompt, now, zone);
+}
+
+// ── the leak strip over the model's output ────────────────────────────────
+
+/**
+ * Remove any `constraints` entry that is just an injected ACTIVITY preference
+ * coming back at us. A floor over the model's answer, exactly like the time
+ * floors above, and placed beside them for the same reason: it corrects a fact
+ * the model does not get to be wrong about.
+ *
+ * The prompt forbids this in as many words. That is not enough on its own —
+ * CLAUDE.md records the equivalent dietary wording leaking on a live run, and
+ * the swap engine already carries the same strip for a leaked price word and a
+ * leaked category. `isLeakedActivityConstraint` holds the reasoning and the
+ * equality-not-keywords argument; this function is only the plan-level apply.
+ *
+ * Returns the SAME object when nothing was stripped, so every caller without an
+ * activity preference — which is every guest, every mock e2e run and everyone
+ * who skipped the survey — gets an untouched plan rather than a rebuilt clone.
+ */
+export function stripLeakedPreferenceConstraints(
+  plan: PlanIntent,
+  preferences: PlannerPreferences | null
+): PlanIntent {
+  const kept = plan.context.constraints.filter(
+    (constraint) => !isLeakedActivityConstraint(constraint, preferences)
+  );
+  if (kept.length === plan.context.constraints.length) return plan;
+  return { ...plan, context: { ...plan.context, constraints: kept } };
 }
 
 // ── the adapter to the legacy pipeline currency ───────────────────────────

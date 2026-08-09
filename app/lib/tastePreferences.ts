@@ -26,7 +26,7 @@ export interface SurveyOption {
   label: string;
 }
 
-/** The three dimensions, in the order they are asked. Each is MULTI-SELECT and
+/** The four dimensions, in the order they are asked. Each is MULTI-SELECT and
  *  each is optional — a question left blank stores an empty array, which is a
  *  real answer ("they were asked and chose nothing"), not a missing one. */
 export interface SurveyQuestion {
@@ -36,7 +36,7 @@ export interface SurveyQuestion {
   options: SurveyOption[];
 }
 
-export type TasteDimension = "style" | "foods" | "dietary";
+export type TasteDimension = "style" | "foods" | "dietary" | "activities";
 
 const option = (value: string, label: string): SurveyOption => ({ value, label });
 
@@ -50,7 +50,13 @@ export const SURVEY_QUESTIONS: readonly SurveyQuestion[] = [
       option("trendy", "Trendy & stylish"),
       option("cozy", "Cozy & intimate"),
       option("adventurous", "Adventurous"),
-      option("cultural", "Cultural (art, music, history)"),
+      // "cultural" was RETIRED when the activities question shipped. It was an
+      // INTEREST wearing a vibe's clothes, and it now has a real home: style
+      // shades the venue a stop lands on, activities decides which stop
+      // exists, and keeping "cultural" here would have steered the same choice
+      // through both. Retiring a slug is safe by construction —
+      // `normalizeAnswerSet` intersects against the options below, so a stored
+      // "cultural" is dropped the moment an old profile is read.
     ],
   },
   {
@@ -80,12 +86,42 @@ export const SURVEY_QUESTIONS: readonly SurveyQuestion[] = [
       option("other", "Other"),
     ],
   },
+  {
+    // FIVE OPTIONS, AND THE SHORTNESS IS THE POINT. Every option here is one
+    // the planner can actually steer a vague plan toward: each maps to a place
+    // KIND that searches cleanly, carries a sensible length, and is not
+    // weather- or schedule-broken. Theatre and shows, classes and workshops,
+    // nightlife, shopping and spas were all considered and left out — a
+    // theatre or a class is a SHOWTIME product and this app has no showtimes,
+    // and nightlife pulls against the variety caps the planner applies to an
+    // un-named day. Asking a question whose answer nothing can act on is how
+    // the profile fills up with dead weight, so an option that cannot be
+    // steered to is not collected.
+    //
+    // There is deliberately no "Other": it would name no kind, so it could
+    // only ever be dropped (`NON_PLANNING_OPTIONS`), and offering a choice
+    // that is discarded on read is worse than not offering it.
+    id: "activities",
+    question: "What do you like to do?",
+    options: [
+      option("art", "Art & museums"),
+      option("outdoors", "Outdoors & nature"),
+      option("games", "Games & competition"),
+      option("active", "Active & sporty"),
+      option("music", "Live music"),
+    ],
+  },
 ] as const;
 
 /** One answer set per dimension. Always all three keys, always an array. */
 export type TasteAnswers = Record<TasteDimension, string[]>;
 
-export const EMPTY_ANSWERS: TasteAnswers = { style: [], foods: [], dietary: [] };
+export const EMPTY_ANSWERS: TasteAnswers = {
+  style: [],
+  foods: [],
+  dietary: [],
+  activities: [],
+};
 
 const QUESTION_BY_ID = new Map(SURVEY_QUESTIONS.map((q) => [q.id, q]));
 
@@ -120,6 +156,7 @@ export function normalizeTasteAnswers(raw: unknown): TasteAnswers {
     style: normalizeAnswerSet("style", source.style),
     foods: normalizeAnswerSet("foods", source.foods),
     dietary: normalizeAnswerSet("dietary", source.dietary),
+    activities: normalizeAnswerSet("activities", source.activities),
   };
 }
 
@@ -146,6 +183,11 @@ export interface TasteProfileDocument {
   style: string[];
   foods: string[];
   dietary: string[];
+  /** The KINDS of non-food thing this user enjoys. Added after style/foods/
+   *  dietary, so a document written before it simply has no field — which
+   *  `parseTasteProfile` reads as the empty set, the same answer a user who
+   *  ticked nothing gives. No migration, no backfill. */
+  activities: string[];
   surveySeen: boolean;
   surveyCompleted: boolean;
   /** ISO instant, absolute — like every other timestamp this app files. */
@@ -182,6 +224,7 @@ export function toTasteProfileDocument(
     style: normalized.style,
     foods: normalized.foods,
     dietary: normalized.dietary,
+    activities: normalized.activities,
     surveySeen: true,
     surveyCompleted: options.completed,
     updatedAt: options.updatedAt,
@@ -210,6 +253,7 @@ export function parseTasteProfile(value: unknown): TasteProfilePayload | null {
     style: normalizeAnswerSet("style", value.style),
     foods: normalizeAnswerSet("foods", value.foods),
     dietary: normalizeAnswerSet("dietary", value.dietary),
+    activities: normalizeAnswerSet("activities", value.activities),
     surveySeen: value.surveySeen === true,
     surveyCompleted: value.surveyCompleted === true,
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
