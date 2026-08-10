@@ -38,6 +38,76 @@ export interface SurveyQuestion {
 
 export type TasteDimension = "style" | "foods" | "dietary" | "activities";
 
+/** The slug both "Other" chips store. Named rather than spelled at each use:
+ *  it is the one option value that means something to code. */
+export const OTHER_OPTION = "other";
+
+/**
+ * The ONE dimension whose "Other" opens a text box, and the shortness of that
+ * list is the same decision the activities question already records.
+ *
+ * FOODS ONLY, because a typed cuisine is the only free text this app can act
+ * on. It reaches the planner as one more entry in `preferences.foods`,
+ * indistinguishable from a curated one, and becomes "<cuisine> restaurant" —
+ * a searchQuery. Nothing else here clears that bar:
+ *  - ACTIVITIES has no "Other" at all, deliberately, and giving it one would
+ *    break the constraint-leak strip: that strip is an EQUALITY test against
+ *    the phrases WE injected (plannerPreferences.isLeakedActivityConstraint),
+ *    and it is safe only because every injected activity phrase is a place
+ *    KIND that can never be a provable constraint. A user-typed activity is
+ *    free to be "live music" — a real, provable constraint — and stripping it
+ *    would start deleting things people actually asked for.
+ *  - DIETARY's "Other" is a restriction, and an unverified typed one is a
+ *    claim about safety spliced into a search. The curated four are the ones
+ *    the contradiction table knows how to reason about.
+ */
+export const FREE_TEXT_DIMENSION: TasteDimension = "foods";
+
+/**
+ * The hard cap on a stored free-text answer, in characters.
+ *
+ * A cuisine is one or two words — "Ethiopian", "Trinidadian roti" — so 40 is
+ * generous for every real answer and still a ceiling. The ceiling is the
+ * point: this string is filed on a profile the planner reads back on EVERY
+ * plan and hands to the model, so an unbounded field is an unbounded payload
+ * on the hot path. `readJsonBody`'s byte limit stops the extreme case at the
+ * door; this stops the merely silly one from being stored at all.
+ */
+export const MAX_FREE_TEXT_LENGTH = 40;
+
+/** Leading/trailing space or hyphen. Legal characters, but not a legal START:
+ *  the phrase invariant demands a letter first. */
+const EDGE_SEPARATORS = /^[\s-]+|[\s-]+$/g;
+
+/**
+ * Free text → the same shape the curated phrases have, or "".
+ *
+ * THE INVARIANT IS NOT COSMETIC. A projected preference is handed to the model
+ * and can be copied into a Places text query verbatim (`buildQuery` prepends
+ * `aesthetic` and splices `constraints` in as written), which is why
+ * `PLANNER_PHRASES` are punctuation-free and why a test pins them against
+ * `/^[A-Za-z][A-Za-z -]*$/`. A curated phrase satisfies that because a human
+ * wrote it; typed text has to be MADE to, and this is the one place that
+ * happens. Everything outside letters, spaces and hyphens becomes a space
+ * rather than vanishing — "thai/korean" is two words, not one invented one —
+ * runs collapse, the ends are trimmed of separators, and the result is capped.
+ *
+ * The cap is applied BEFORE the final trim, because a cut lands wherever it
+ * lands and must not be allowed to leave a trailing separator behind.
+ *
+ * EMPTY IS UNSET. Text that sanitizes to nothing ("!!!", "   ", 12345) is the
+ * same as never having typed anything, and every caller treats it that way.
+ */
+export function normalizeFreeText(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const cleaned = raw
+    .replace(/[^A-Za-z -]+/g, " ")
+    .replace(/-{2,}/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(EDGE_SEPARATORS, "");
+  return cleaned.slice(0, MAX_FREE_TEXT_LENGTH).replace(EDGE_SEPARATORS, "");
+}
+
 const option = (value: string, label: string): SurveyOption => ({ value, label });
 
 export const SURVEY_QUESTIONS: readonly SurveyQuestion[] = [
@@ -113,8 +183,30 @@ export const SURVEY_QUESTIONS: readonly SurveyQuestion[] = [
   },
 ] as const;
 
-/** One answer set per dimension. Always all three keys, always an array. */
-export type TasteAnswers = Record<TasteDimension, string[]>;
+/**
+ * One answer set per dimension. Always all four keys, always an array.
+ *
+ * `other` is the EDITABLE companion to those arrays, and it is a separate,
+ * nested, optional key rather than a fifth entry for one reason: the four
+ * above are `string[]` drawn from a CLOSED SET, and `normalizeAnswerSet`
+ * guarantees that closure. Typed text is neither, so it is kept somewhere the
+ * closed-set guarantee is not being claimed — `answers[question.id]` still
+ * means exactly what it meant, and every consumer that maps over
+ * SURVEY_QUESTIONS is untouched.
+ *
+ * OMITTED WHEN EMPTY, like `PlannerPreferences`' own dimensions: an answer set
+ * with nothing typed has no `other` key at all, so `EMPTY_ANSWERS` is still
+ * literally the empty answer set and two records with the same answers still
+ * compare equal.
+ *
+ * A `Partial<Record<TasteDimension, …>>` rather than a lone `foods` string,
+ * because the SHAPE should not have to change if a second dimension ever earns
+ * a text box. Only `FREE_TEXT_DIMENSION` is ever read — see the note there for
+ * why that is one dimension and not four.
+ */
+export interface TasteAnswers extends Record<TasteDimension, string[]> {
+  other?: Partial<Record<TasteDimension, string>>;
+}
 
 export const EMPTY_ANSWERS: TasteAnswers = {
   style: [],
@@ -144,24 +236,55 @@ export function normalizeAnswerSet(dimension: TasteDimension, raw: unknown): str
   return question.options.map((o) => o.value).filter((value) => chosen.has(value));
 }
 
-/** Every dimension normalised. Missing keys become empty arrays — Firestore
- *  rejects `undefined` outright, the same reason `toArchivedPlan` normalises
- *  each optional stop field to null. */
+/**
+ * Every dimension normalised. Missing keys become empty arrays — Firestore
+ * rejects `undefined` outright, the same reason `toArchivedPlan` normalises
+ * each optional stop field to null.
+ *
+ * THIS IS ALSO WHERE FREE TEXT IS GATED, and it is the only place. The text
+ * box exists only while the "Other" chip is pressed, so text left behind by a
+ * chip that has since been un-pressed is text the user cannot see — and a
+ * preference nobody can see steering their plans is the worst version of this
+ * feature. Un-ticking "Other" and saving therefore clears it, which is what
+ * the disappearing box already told them would happen.
+ *
+ * Everything writes through here (`POST /api/profile` normalises the body,
+ * `toTasteProfileDocument` normalises again on the way to the document), so
+ * the gate holds for every stored record. Nothing downstream re-checks it.
+ */
 export function normalizeTasteAnswers(raw: unknown): TasteAnswers {
-  const source: Record<string, unknown> =
-    typeof raw === "object" && raw !== null && !Array.isArray(raw)
-      ? (raw as Record<string, unknown>)
-      : {};
-  return {
+  const source: Record<string, unknown> = isRecord(raw) ? raw : {};
+  const answers: TasteAnswers = {
     style: normalizeAnswerSet("style", source.style),
     foods: normalizeAnswerSet("foods", source.foods),
     dietary: normalizeAnswerSet("dietary", source.dietary),
     activities: normalizeAnswerSet("activities", source.activities),
   };
+  const typed = gatedFreeText(answers[FREE_TEXT_DIMENSION], source.other);
+  if (typed) answers.other = { [FREE_TEXT_DIMENSION]: typed };
+  return answers;
+}
+
+/** THE gate, in one function with two callers, because two copies of "is the
+ *  Other chip on" would be free to drift and the whole point of the rule is
+ *  that storage and the screen agree about it. */
+function gatedFreeText(chosen: readonly string[], rawOther: unknown): string {
+  if (!chosen.includes(OTHER_OPTION)) return "";
+  const bag = isRecord(rawOther) ? rawOther : {};
+  return normalizeFreeText(bag[FREE_TEXT_DIMENSION]);
+}
+
+/** The sanitized, gated free text on an answer set, or "". One reader, so no
+ *  caller has to know the key is nested, that it may be absent, or that text
+ *  behind an un-pressed "Other" chip does not count. */
+export function freeTextAnswer(answers: TasteAnswers): string {
+  return gatedFreeText(answers[FREE_TEXT_DIMENSION], answers.other);
 }
 
 /** True when the user selected nothing at all — a submit that answered no
- *  question. Stored as such; it is still a completed survey. */
+ *  question. Stored as such; it is still a completed survey. (Typed text needs
+ *  no clause of its own: it only counts while "Other" is pressed, and that
+ *  chip already makes the foods set non-empty.) */
 export function isEmptyAnswers(answers: TasteAnswers): boolean {
   return SURVEY_QUESTIONS.every((q) => answers[q.id].length === 0);
 }
@@ -188,6 +311,21 @@ export interface TasteProfileDocument {
    *  `parseTasteProfile` reads as the empty set, the same answer a user who
    *  ticked nothing gives. No migration, no backfill. */
   activities: string[];
+  /**
+   * The cuisine typed into the foods question's "Other" box, sanitized, or "".
+   *
+   * A SIBLING FIELD, NOT A FIFTH ENTRY IN `foods`. The four arrays above are
+   * closed sets and `normalizeAnswerSet` is what guarantees it — dropping a
+   * free string in among them would quietly end that guarantee for the one
+   * dimension it matters most in. Kept flat rather than nested because that is
+   * how every other field on this document is stored.
+   *
+   * ALWAYS A STRING, never undefined: Firestore rejects undefined outright,
+   * exactly as it does for the empty answer arrays. A document written before
+   * this field existed simply has no key, which `parseTasteProfile` reads as
+   * "" — the same answer someone who typed nothing gives. No migration.
+   */
+  foodsOther: string;
   surveySeen: boolean;
   surveyCompleted: boolean;
   /** ISO instant, absolute — like every other timestamp this app files. */
@@ -225,6 +363,9 @@ export function toTasteProfileDocument(
     foods: normalized.foods,
     dietary: normalized.dietary,
     activities: normalized.activities,
+    // Sanitized and gated by the normaliser above; "" whenever "Other" is not
+    // among the foods, which is what makes the gate hold for every record.
+    foodsOther: freeTextAnswer(normalized),
     surveySeen: true,
     surveyCompleted: options.completed,
     updatedAt: options.updatedAt,
@@ -254,10 +395,35 @@ export function parseTasteProfile(value: unknown): TasteProfilePayload | null {
     foods: normalizeAnswerSet("foods", value.foods),
     dietary: normalizeAnswerSet("dietary", value.dietary),
     activities: normalizeAnswerSet("activities", value.activities),
+    // Sanitized on the way OUT of storage as well as in, the habit
+    // `normalizeAnswerSet` keeps: a record is only ever as trustworthy as the
+    // client that wrote it, and this string is handed to the planner. Absent
+    // (every pre-2026-08-09 document) reads as "".
+    foodsOther: normalizeFreeText(value.foodsOther),
     surveySeen: value.surveySeen === true,
     surveyCompleted: value.surveyCompleted === true,
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
   };
+}
+
+/**
+ * A stored profile → the EDITABLE answer set, free text included.
+ *
+ * The two shapes differ in exactly one place: the document keeps `foodsOther`
+ * flat beside the arrays, and an editor keeps it nested under `other` where the
+ * closed-set guarantee is not being claimed. This is the one function that
+ * knows both, so no screen has to.
+ *
+ * Funnelled through `normalizeTasteAnswers`, which means the "Other" gate
+ * applies here too: a record with text but no "other" chip seeds without it,
+ * rather than showing a box the user cannot see a chip for.
+ */
+export function answersFromProfile(profile: TasteProfilePayload | null): TasteAnswers {
+  if (!profile) return normalizeTasteAnswers(null);
+  return normalizeTasteAnswers({
+    ...profile,
+    other: { [FREE_TEXT_DIMENSION]: profile.foodsOther },
+  });
 }
 
 // ── the "should we show this" decision ───────────────────────────────────

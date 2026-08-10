@@ -107,12 +107,16 @@ export default function ProfilePanel({
 
   const dirty = state.phase === "ready" && answersDirty(state.seed, state.answers);
 
-  const toggle = useCallback((dimension: TasteDimension, value: string) => {
-    // Editing IS "keep editing": a chip pressed while the discard prompt is up
-    // answers it, rather than leaving the two in a stand-off.
+  /** Editing IS "keep editing", and a stale "Saved" beside answers that have
+   *  moved on since would be a lie. Both edit paths — a chip and the text box
+   *  — start here so the two cannot drift. */
+  const beginEdit = useCallback(() => {
     setConfirmDiscard(false);
-    // A stale "Saved" beside answers that have moved on since would be a lie.
     setSaveState((current) => (current === "saving" ? current : "idle"));
+  }, []);
+
+  const toggle = useCallback((dimension: TasteDimension, value: string) => {
+    beginEdit();
     setState((current) => {
       if (current.phase !== "ready") return current;
       const chosen = current.answers[dimension];
@@ -130,16 +134,40 @@ export default function ProfilePanel({
         },
       };
     });
-  }, []);
+  }, [beginEdit]);
+
+  /** The typed cuisine. Held RAW while the user types — sanitizing per
+   *  keystroke would eat the space in "soul food" — and cleaned by the same
+   *  normaliser on both sides of the dirty comparison and again on the way
+   *  into storage, so "Ethiopian!" over a stored "Ethiopian" correctly reads
+   *  as no change at all. */
+  const setOther = useCallback(
+    (dimension: TasteDimension, value: string) => {
+      beginEdit();
+      setState((current) =>
+        current.phase === "ready"
+          ? {
+              ...current,
+              answers: {
+                ...current.answers,
+                other: { ...current.answers.other, [dimension]: value },
+              },
+            }
+          : current
+      );
+    },
+    [beginEdit]
+  );
 
   const commit = useCallback(async () => {
     if (state.phase !== "ready" || saveState === "saving") return;
     const answers = state.answers;
     setSaveState("saving");
-    // ALL FOUR DIMENSIONS, ALWAYS — `answers` is a complete TasteAnswers seeded
-    // from the stored profile, so a dimension the user never touched is sent
-    // back exactly as it was filed. The write is `set` with no merge; anything
-    // omitted here would be erased.
+    // ALL FOUR DIMENSIONS AND THE FREE TEXT, ALWAYS — `answers` is a complete
+    // TasteAnswers seeded from the stored profile, and the typed cuisine rides
+    // INSIDE it (`answers.other`) rather than as a second argument, so a
+    // dimension the user never touched is sent back exactly as it was filed.
+    // The write is `set` with no merge; anything omitted here would be erased.
     const result = await save(answers);
     if (!mounted.current) return;
     if (result.saved) {
@@ -227,7 +255,11 @@ export default function ProfilePanel({
                 These shade the plans we make when your request leaves something
                 open. Change as much or as little as you like.
               </p>
-              <TasteQuestions answers={state.answers} onToggle={toggle} />
+              <TasteQuestions
+                answers={state.answers}
+                onToggle={toggle}
+                onOtherChange={setOther}
+              />
             </>
           )}
         </div>

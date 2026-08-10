@@ -16,7 +16,8 @@
 import {
   EMPTY_ANSWERS,
   SURVEY_QUESTIONS,
-  normalizeTasteAnswers,
+  answersFromProfile,
+  freeTextAnswer,
   profileGateState,
   type TasteAnswers,
 } from "./tastePreferences";
@@ -48,12 +49,14 @@ export interface ProfileEditLoad {
 export function parseProfileEditLoad(value: unknown): ProfileEditLoad {
   const { state, profile } = profileGateState(value);
   if (state === "failed") return { answers: EMPTY_ANSWERS, readFailed: true };
-  // `normalizeTasteAnswers` fills every dimension, so a profile written before
+  // `answersFromProfile` fills every dimension, so a profile written before
   // `activities` existed — or none at all — seeds as "chose nothing" rather
   // than as a missing key. Retired slugs are already gone by this point:
   // `parseTasteProfile` intersects against the closed option set on the way out
-  // of storage.
-  return { answers: normalizeTasteAnswers(profile), readFailed: false };
+  // of storage. It is also the one place the stored `foodsOther` becomes the
+  // editor's nested `other`, so the typed cuisine comes back in the box the
+  // user typed it into.
+  return { answers: answersFromProfile(profile), readFailed: false };
 }
 
 /** What a save reports back. The route answers `{ saved: boolean }` and answers
@@ -91,10 +94,18 @@ function sameChoices(a: readonly string[], b: readonly string[]): boolean {
  * Iterates SURVEY_QUESTIONS rather than the object's own keys, the habit
  * `EMPTY_ANSWERS` and `isEmptyAnswers` already keep: a fifth dimension is then
  * covered by adding it to the survey, with nothing here to remember.
+ *
+ * THE FREE TEXT IS COMPARED SANITIZED, and that is the honest definition of
+ * dirty for it: this flag answers "would saving change what is stored", and
+ * what would be stored is the sanitized form. Typing a "!" after a cuisine
+ * that is already filed changes nothing, so it must not light up Save or
+ * trigger a discard prompt — while "Thai" over "Ethiopian" plainly does.
+ * Comparing raw would make both dirty; comparing nothing would make neither.
  */
 export function answersEqual(a: TasteAnswers, b: TasteAnswers): boolean {
-  return SURVEY_QUESTIONS.every((question) =>
-    sameChoices(a[question.id], b[question.id])
+  return (
+    SURVEY_QUESTIONS.every((question) => sameChoices(a[question.id], b[question.id])) &&
+    freeTextAnswer(a) === freeTextAnswer(b)
   );
 }
 

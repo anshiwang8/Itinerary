@@ -676,9 +676,9 @@ button { font-family: var(--grot); cursor: pointer; }
 .acct__signin:hover { background: #FFFFFF; box-shadow: var(--shadow-lift); transform: translateY(-1px); }
 .acct__signin:active { transform: translateY(0); }
 
-/* signed-in: avatar + name, with sign-out as a quiet sibling. The pill is a
-   BUTTON — it opens the preferences editor — so it gets the same lift the
-   other account controls have on hover, and nothing else about it moved. */
+/* signed-in: the name pill is now the corner's ONLY control, and it opens a
+   dropdown holding Preferences / History / Sign out. The pill keeps every one
+   of its old rules — avatar, clamp, hover lift — and gains a caret. */
 .acct__who {
   display: inline-flex; align-items: center; gap: 8px;
   min-height: 38px; padding: 5px 14px 5px 5px;
@@ -704,14 +704,46 @@ button { font-family: var(--grot); cursor: pointer; }
   font-family: var(--grot); font-size: 13px; color: var(--ink);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
 }
-.acct__out {
-  min-height: 38px; padding: 8px 13px;
-  background: rgba(255, 255, 255, 0.72); color: var(--ink-soft);
-  border: 1px solid rgba(255, 255, 255, 0.85); border-radius: 999px;
-  font-family: var(--grot); font-size: 12px; font-weight: 500;
-  transition: background 0.16s ease, color 0.16s ease;
+/* ── the account dropdown ──
+   An ANCHORED popover, not an overlay: it hangs off the trigger inside .acct,
+   which is already excluded from the `.empty > *:not(…)` demotion rule and
+   already carries z-index 3. Being a grandchild of .empty, that rule never
+   selects it, so this needs no exclusion-list entry of its own — the trap the
+   full-screen panels (.auth/.hist/.taste/.prof) each had to be added to. */
+.acctmenu { position: relative; }
+.acctmenu__caret {
+  font-size: 10px; color: var(--ink-soft); line-height: 1;
+  margin-left: 1px; flex: none;
 }
-.acct__out:hover { background: #FFFFFF; color: var(--ink); }
+.acctmenu__pop {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 4;
+  min-width: 186px;
+  display: flex; flex-direction: column;
+  padding: 6px;
+  background: var(--card); border: 1px solid var(--rule); border-radius: 14px;
+  box-shadow: var(--shadow-lift);
+  animation: acctmenu-in 0.14s ease-out;
+}
+@keyframes acctmenu-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.acctmenu__item {
+  min-height: 38px; padding: 9px 12px;
+  background: transparent; color: var(--ink);
+  border: 0; border-radius: 9px;
+  font-family: var(--grot); font-size: 13.5px; font-weight: 500;
+  text-align: left; white-space: nowrap;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+.acctmenu__item:hover { background: var(--accent-soft); }
+/* The line between "opens something" and "ends the session". */
+.acctmenu__rule {
+  height: 1px; margin: 5px 6px;
+  background: var(--rule);
+}
+.acctmenu__item--out { color: var(--ink-soft); font-size: 13px; }
+.acctmenu__item--out:hover { background: var(--card-2); color: var(--ink); }
 
 /* ── the login screen: centred card over a dimmed hero ── */
 .auth {
@@ -1096,6 +1128,29 @@ button { font-family: var(--grot); cursor: pointer; }
 }
 .taste__opt--on:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
 
+/* The one free-text box, revealed under the foods question's "Other" chip.
+   Same card/ink/accent language as everything else here; no --live. It is a
+   <label> wrapping its own caption, so the association needs no id. */
+.taste__other { display: block; margin-top: 11px; }
+.taste__otherLabel {
+  display: block;
+  font-family: var(--grot); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.16em; text-transform: uppercase; color: var(--label);
+  margin-bottom: 7px;
+}
+.taste__otherInput {
+  width: 100%; min-height: 40px; padding: 9px 13px;
+  background: var(--card); color: var(--ink);
+  border: 1px solid var(--rule-strong); border-radius: 12px;
+  font-family: var(--grot); font-size: 13.5px;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.taste__otherInput::placeholder { color: var(--ink-soft); opacity: 0.7; }
+.taste__otherInput:focus-visible {
+  outline: none;
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .taste__foot {
   display: flex; align-items: center; gap: 12px;
   padding: 16px 28px 24px;
@@ -1292,8 +1347,10 @@ button { font-family: var(--grot); cursor: pointer; }
   /* the wordmark hides on mobile, but the account corner is functional, not
      decorative — it stays, at a 44px target */
   .acct { top: 12px; right: 12px; }
-  .acct__signin, .acct__out, .acct__who, .acct__hist { min-height: 44px; }
+  .acct__signin, .acct__who, .acct__hist, .acctmenu__item { min-height: 44px; }
   .acct__name { max-width: 96px; }
+  /* room for a thumb, and never off the right edge of a narrow screen */
+  .acctmenu__pop { min-width: 190px; max-width: calc(100vw - 24px); }
   /* the card goes near-full-height on a phone: a list needs the room */
   .hist__card { max-height: 88vh; }
   .hist__head { padding: 16px 14px 12px 18px; }
@@ -1352,7 +1409,9 @@ button { font-family: var(--grot); cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   .chip, .ecard, .mk__dot, .leglab, .banner { transition: opacity 0.2s ease !important; }
   .auth, .auth__card { animation: none !important; }
-  .acct__signin, .acct__out, .auth__google, .auth__guest { transition: none !important; }
+  .acct__signin, .auth__google, .auth__guest { transition: none !important; }
+  .acctmenu__pop { animation: none !important; }
+  .acctmenu__item { transition: none !important; }
   .stopdlg, .stopdlg__card { animation: none !important; }
   .stopdlg__btn, .topbar__stop { transition: none !important; }
   .hist, .hist__card { animation: none !important; }
@@ -1365,7 +1424,9 @@ button { font-family: var(--grot); cursor: pointer; }
      carried by text. */
   .taste, .taste__card, .taste__check, .taste__spark { animation: none !important; }
   .taste__spark { display: none; }
-  .taste__opt, .taste__skip, .taste__save { transition: none !important; }
+  .taste__opt, .taste__skip, .taste__save, .taste__otherInput {
+    transition: none !important;
+  }
   .taste__save:hover { transform: none !important; }
   .prof, .prof__card { animation: none !important; }
   .prof__close, .prof__cancel, .prof__save, .prof__discard, .acct__who {

@@ -39,6 +39,9 @@ function profile(over: Partial<TasteProfilePayload> = {}): TasteProfilePayload {
     foods: ["japanese", "italian"],
     dietary: ["vegetarian"],
     activities: ["art"],
+    // The default is a profile with nothing TYPED — the ordinary case, and the
+    // one every pre-free-text document is in. The cases below opt in.
+    foodsOther: "",
     surveySeen: true,
     surveyCompleted: true,
     updatedAt: "2026-08-01T12:00:00.000Z",
@@ -369,6 +372,209 @@ const cases: Array<[string, () => void]> = [
           null,
           `activity phrase "${phrase}" trips the guard from the aesthetic field`
         );
+      }
+    },
+  ],
+
+  // ── the typed cuisine: free text as one more food phrase ──
+  [
+    "a TYPED cuisine is projected as a food phrase, after the curated ones",
+    () => {
+      const injected = toPlannerPreferences(
+        profile({ foods: ["japanese", "other"], foodsOther: "Ethiopian" }),
+        "dinner tonight"
+      );
+      assert.deepStrictEqual(injected?.foods, ["Japanese", "Ethiopian"]);
+    },
+  ],
+  [
+    "the 'other' SLUG itself is still dropped — the box carries the meaning",
+    () => {
+      // Ticking "Other" and typing nothing is a chip with no answer behind it.
+      // Injecting the literal word "other" would put it in someone's dinner
+      // search; injecting nothing is correct.
+      const injected = toPlannerPreferences(
+        profile({ foods: ["other"], foodsOther: "" }),
+        "dinner tonight"
+      );
+      assert.strictEqual(injected?.foods, undefined);
+    },
+  ],
+  [
+    "FREE TEXT ALONE still injects — it is an answer like any other",
+    () => {
+      // The null return is the one that must not fire by accident: a profile
+      // whose ONLY usable answer is typed is still a personalized plan.
+      const injected = toPlannerPreferences(
+        {
+          style: [],
+          foods: ["other"],
+          dietary: [],
+          activities: [],
+          foodsOther: "Ethiopian",
+          surveySeen: true,
+          surveyCompleted: true,
+          updatedAt: "2026-08-01T12:00:00.000Z",
+        },
+        "dinner tonight"
+      );
+      assert.deepStrictEqual(injected, { foods: ["Ethiopian"] });
+    },
+  ],
+  [
+    "junk in the box is no answer at all, and can still leave the profile null",
+    () => {
+      const injected = toPlannerPreferences(
+        {
+          style: [],
+          foods: ["other"],
+          dietary: ["none"],
+          activities: [],
+          foodsOther: "!!!",
+          surveySeen: true,
+          surveyCompleted: true,
+          updatedAt: "2026-08-01T12:00:00.000Z",
+        },
+        "dinner tonight"
+      );
+      assert.strictEqual(injected, null, "nothing usable must stay the un-personalized path");
+    },
+  ],
+  [
+    "the projected free text is SANITIZED — a stored string is not trusted",
+    () => {
+      // Belt to the write-side braces. A record is only ever as trustworthy as
+      // the client that wrote it, and this string reaches a Places query.
+      const injected = toPlannerPreferences(
+        profile({ foods: ["other"], foodsOther: "  hot/pot!!  " }),
+        "dinner tonight"
+      );
+      assert.deepStrictEqual(injected?.foods, ["hot pot"]);
+      for (const phrase of injected?.foods ?? []) {
+        assert.ok(
+          /^[A-Za-z][A-Za-z -]*$/.test(phrase),
+          `"${phrase}" is not query-safe: buildQuery splices these in verbatim`
+        );
+      }
+    },
+  ],
+
+  // ── the cross-preference contradiction guard: TWO preferences must never
+  //    manufacture a fail-loud refusal between them ──
+  [
+    "a typed food that fights a STORED DIET is suppressed, not fought",
+    () => {
+      // THE LOAD-BEARING CASE. Stored "vegetarian" + typed "steakhouse" are two
+      // preferences, neither restated by this request. Let both through and the
+      // model writes both into searchQueries, `category_signals` ends up holding
+      // both halves of a DIETARY_VENUE_CONFLICTS pair, and the whole plan hard-
+      // refuses over something the user never said.
+      const injected = toPlannerPreferences(
+        profile({
+          foods: ["other"],
+          foodsOther: "steakhouse",
+          dietary: ["vegetarian"],
+        }),
+        "dinner tonight"
+      );
+      assert.strictEqual(
+        injected?.foods,
+        undefined,
+        "the typed food must be dropped when a stored diet contradicts it"
+      );
+      // ONLY the free text goes. The diet is the user's standing restriction
+      // and everything else about them still applies.
+      assert.deepStrictEqual(injected?.dietary, ["vegetarian"]);
+      assert.deepStrictEqual(injected?.style, ["cozy"]);
+      assert.deepStrictEqual(injected?.activities, ["art gallery"]);
+
+      // and the pair really would have refused, had both been injected
+      assert.ok(
+        contradictionReason(
+          "dinner tonight",
+          parsedWith({ category_signals: ["vegetarian restaurant", "steakhouse"] })
+        ),
+        "fixture check: this is a pair the guard genuinely refuses"
+      );
+    },
+  ],
+  [
+    "suppression is per PAIR here too — a diet it does not fight survives with it",
+    () => {
+      // Reusing the guard's own table means its distinctions come along free:
+      // halal steak exists, halal pork does not.
+      const ok = toPlannerPreferences(
+        profile({ foods: ["other"], foodsOther: "steakhouse", dietary: ["halal"] }),
+        "dinner tonight"
+      );
+      assert.deepStrictEqual(ok?.foods, ["steakhouse"]);
+      assert.deepStrictEqual(ok?.dietary, ["halal"]);
+
+      const clash = toPlannerPreferences(
+        profile({ foods: ["other"], foodsOther: "oyster bar", dietary: ["halal"] }),
+        "dinner tonight"
+      );
+      assert.strictEqual(clash?.foods, undefined);
+      assert.deepStrictEqual(clash?.dietary, ["halal"]);
+    },
+  ],
+  [
+    "a typed food that fights a diet the REQUEST states is suppressed too",
+    () => {
+      // The same failure with the diet stated instead of stored. The request is
+      // not the thing to give way — the user said it — so the preference does,
+      // exactly as it does everywhere else in this file.
+      const injected = toPlannerPreferences(
+        profile({ foods: ["other"], foodsOther: "seafood", dietary: [] }),
+        "a vegan dinner somewhere nearby"
+      );
+      assert.strictEqual(injected?.foods, undefined);
+      assert.deepStrictEqual(injected?.style, ["cozy"]);
+    },
+  ],
+  [
+    "an unrelated request and an unrelated diet keep the typed food",
+    () => {
+      // Suppression is not the default: the ordinary case is that the typed
+      // cuisine simply gets used.
+      const injected = toPlannerPreferences(
+        profile({ foods: ["other"], foodsOther: "Ethiopian", dietary: ["vegetarian"] }),
+        "dinner tonight"
+      );
+      assert.deepStrictEqual(injected?.foods, ["Ethiopian"]);
+      assert.deepStrictEqual(injected?.dietary, ["vegetarian"]);
+    },
+  ],
+  [
+    "NEITHER preference nor request can be left holding a contradiction",
+    () => {
+      // The whole-projection statement of the rule, swept over the conflicting
+      // pairs the guard knows: whatever comes out must not refuse against the
+      // prompt it came out for.
+      const pairs: Array<[string, string]> = [
+        ["vegetarian", "steakhouse"],
+        ["vegan", "seafood"],
+        ["halal", "oyster bar"],
+        ["gluten-free", "steakhouse"],
+      ];
+      for (const [diet, typedFood] of pairs) {
+        for (const prompt of ["dinner tonight", "a vegan dinner", "somewhere for a bbq"]) {
+          const injected = toPlannerPreferences(
+            profile({ foods: ["other"], foodsOther: typedFood, dietary: [diet] }),
+            prompt
+          );
+          // Everything that survived, as the model would end up writing it into
+          // the parse: diets and cuisines both land in searchQueries.
+          const signals = [
+            ...(injected?.dietary ?? []).map((d) => `${d} restaurant`),
+            ...(injected?.foods ?? []),
+          ];
+          assert.strictEqual(
+            contradictionReason(prompt, parsedWith({ category_signals: signals })),
+            null,
+            `"${diet}" + typed "${typedFood}" against "${prompt}" manufactured a refusal: ${signals.join(", ")}`
+          );
+        }
       }
     },
   ],

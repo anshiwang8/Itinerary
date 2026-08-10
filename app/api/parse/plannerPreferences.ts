@@ -36,13 +36,18 @@
 //     sentence.
 //  3. A stored dietary preference is SUPPRESSED when the request names a venue
 //     type it contradicts — see the dietary section below. This is the one
-//     guarantee 3B makes in code rather than in prompt wording.
+//     guarantee 3B makes in code rather than in prompt wording. The typed
+//     cuisine from the foods question's "Other" box is suppressed by the same
+//     rule and the same table (`dietaryConflictsWithText`), because two
+//     PREFERENCES fighting each other is the same fail-loud with neither half
+//     restated by the user.
 //  4. An injected ACTIVITY phrase that comes back as a CONSTRAINT is stripped —
 //     see isLeakedActivityConstraint at the foot of this file. The second
 //     guarantee made in code, added when `activities` shipped, and for the same
 //     reason as the third: the failure it prevents is a permanent refusal the
 //     user did nothing to earn.
 import {
+  normalizeFreeText,
   type TasteDimension,
   type TasteProfilePayload,
 } from "../../lib/tastePreferences";
@@ -59,6 +64,11 @@ import { normalizeConstraint } from "../../lib/constraints";
  */
 export const NON_PLANNING_OPTIONS: Readonly<Record<TasteDimension, readonly string[]>> = {
   style: [],
+  // "other" STAYS DROPPED even now that the foods question has a text box
+  // behind it. The slug still names no cuisine — it is the chip that reveals
+  // the box, not an answer — and the meaning lives in `foodsOther`, which is
+  // projected separately below. Turning the slug itself into a phrase would
+  // inject the literal word "other" into someone's dinner search.
   foods: ["other"],
   dietary: ["none", "other"],
   // Every activity option is actionable by construction — the five that
@@ -150,6 +160,51 @@ export interface PlannerPreferences {
   activities?: string[];
 }
 
+/**
+ * Would injecting this typed cuisine manufacture a contradiction refusal?
+ *
+ * THE SAME TRAP AS THE DIETARY ONE, REACHED FROM THE OTHER SIDE. The existing
+ * suppression drops a stored DIET when the REQUEST names a venue it fights,
+ * because `contradictionReason` cannot tell a preference from a statement once
+ * both are in the parse and would fail the whole plan loud. Free text opens the
+ * mirror image of that: a stored "vegetarian" plus a typed "steakhouse" are two
+ * PREFERENCES, neither of them restated, and the model writes both into
+ * searchQueries — so `category_signals` ends up holding both halves of a
+ * `DIETARY_VENUE_CONFLICTS` pair and the plan hard-refuses over something the
+ * user never said in the same breath.
+ *
+ * BOTH DIRECTIONS ARE CHECKED, with the same function and the same table:
+ *  - against each diet that SURVIVED the prompt filter, because a diet already
+ *    dropped is not going to be in the plan to fight with; and
+ *  - against the RAW PROMPT, because "a vegan dinner" plus a typed "seafood"
+ *    is the identical failure with the diet stated instead of stored. The
+ *    request is not the thing to suppress there — the user said it — so the
+ *    preference gives way, exactly as it does everywhere else in this file.
+ *
+ * `dietaryConflictsWithPrompt` is reused rather than re-encoded: whatever pair
+ * the guard would refuse on is the pair we decline to inject, by construction.
+ * (It takes two texts — a diet side and a venue side — and the free text is
+ * the venue side in both calls.) It errs toward suppression in one narrow
+ * place: it does not strip the accommodation phrasing `contradictionReason`
+ * does, so "somewhere with vegan options" plus a typed "seafood" drops the
+ * typed food for that one plan. Losing a cuisine hint is the cheap direction;
+ * a refusal is not.
+ *
+ * ONLY THE FREE TEXT IS DROPPED. The diet, the curated foods, the style and
+ * the activities all still apply — the same "only the conflicting one" rule
+ * the dietary suppression keeps.
+ */
+function dietaryConflictsWithText(
+  food: string,
+  keptDiets: readonly string[],
+  prompt: string
+): boolean {
+  return (
+    keptDiets.some((diet) => dietaryConflictsWithPrompt(diet, food)) ||
+    dietaryConflictsWithPrompt(prompt, food)
+  );
+}
+
 function phrasesFor(dimension: TasteDimension, slugs: readonly string[] | undefined): string[] {
   const table = PHRASE_BY_SLUG[dimension];
   const phrases: string[] = [];
@@ -198,6 +253,15 @@ export function toPlannerPreferences(
   const dietary = phrasesFor("dietary", profile.dietary).filter(
     (diet) => !dietaryConflictsWithPrompt(diet, prompt)
   );
+  // A TYPED CUISINE IS ONE MORE FOOD PHRASE, and deliberately nothing more
+  // than that: appended to the curated ones, indistinguishable from them by
+  // the time the model reads them, and subject to the same suppression. It
+  // goes last because the curated eight were picked from a list and this one
+  // was typed, so ties should fall to the deliberate answer.
+  const typedFood = normalizeFreeText(profile.foodsOther);
+  if (typedFood && !dietaryConflictsWithText(typedFood, dietary, prompt)) {
+    foods.push(typedFood);
+  }
   // No suppression pass for activities, and that is a decision rather than an
   // omission. The dietary one exists because a stored diet plus an explicit
   // venue is a FAIL-LOUD contradiction; an activity preference against a

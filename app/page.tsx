@@ -68,6 +68,7 @@ import SwapEndTimeDialog from "./SwapEndTimeDialog";
 import HistoryPanel from "./HistoryPanel";
 import TasteSurvey from "./TasteSurvey";
 import ProfilePanel from "./ProfilePanel";
+import AccountMenu from "./AccountMenu";
 import {
   EMPTY_ANSWERS,
   profileGateState,
@@ -345,6 +346,11 @@ export default function Home() {
   // corner lives inside `if (!itinerary)`, so this is unreachable mid-plan by
   // construction rather than by a check.
   const [profileOpen, setProfileOpen] = useState(false);
+  // The account corner's dropdown — Preferences / History / Sign out. The
+  // state lives HERE rather than inside `AccountMenu` so the identity re-arm
+  // below can shut it: a menu belonging to the person who just signed out must
+  // not still be hanging open for whoever signs in next.
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   // The survey is offered ONCE per session, whatever the profile write does.
   // Without this, the gap between closing the survey and the write landing is a
   // window in which the effect below would mount it a second time.
@@ -422,6 +428,10 @@ export default function Home() {
       // switch passes through has already taken it off screen; this is what
       // stops it reappearing when the next account arrives.)
       setProfileOpen(false);
+      // Same reasoning for the menu that now opens it. The corner unmounts
+      // during the guest hop, so an open menu is invisible rather than closed
+      // — without this it would reappear over the NEW account's name.
+      setAccountMenuOpen(false);
       // WHETHER, never WHICH — the same line `planner_plan` draws. A uid here
       // would put someone's identity in a log about their taste, and the only
       // question this has to answer is "did the session notice the person
@@ -2524,66 +2534,56 @@ export default function Home() {
             "Sign in" that might flip to a name a moment later. */}
         {auth.status !== "loading" && (
           <div className="acct">
-            {/* History is offered to EVERYONE, not only to accounts. A guest
-                who opens it meets the reason to sign in — that empty state is
-                the nudge, and hiding the door would make it unreachable by
-                exactly the people it is written for. */}
-            <button
-              type="button"
-              className="acct__hist"
-              onClick={() => setHistoryOpen(true)}
-            >
-              History
-            </button>
             {signedInForReal && auth.user ? (
+              // ONE trigger, three destinations. The name opens a menu holding
+              // Preferences, History and Sign out, which is where the two
+              // standalone pills beside it went. Offered only inside the
+              // real-account branch — a guest sees `.acct__signin` and the
+              // History pill above, so the editor stays structurally
+              // unreachable for one rather than merely hidden from it.
+              <AccountMenu
+                label={userLabel(auth.user)}
+                initials={userInitials(auth.user)}
+                photoURL={auth.user.photoURL}
+                open={accountMenuOpen}
+                onToggle={() => setAccountMenuOpen((current) => !current)}
+                onClose={() => setAccountMenuOpen(false)}
+                onPreferences={() => setProfileOpen(true)}
+                onHistory={() => setHistoryOpen(true)}
+                onSignOut={() => void auth.signOut()}
+              />
+            ) : (
               <>
-                {/* The name is the way IN to your stored taste. Offered only
-                    here, inside the real-account branch — a guest sees
-                    `.acct__signin` instead, so the editor is structurally
-                    unreachable for one rather than hidden from it. The
-                    accessible name CONTAINS the visible label, so speaking it
-                    still matches what is on screen. */}
+                {/* HISTORY STAYS A PILL FOR A GUEST, and that is not an
+                    oversight of the menu above. It is offered to EVERYONE, not
+                    only to accounts — a guest who opens it meets the reason to
+                    sign in, and that empty state IS the nudge. There is no
+                    account menu on this branch to move it into, so folding it
+                    in with the others would make it unreachable by exactly the
+                    people it was written for. */}
                 <button
                   type="button"
-                  className="acct__who"
-                  aria-haspopup="dialog"
-                  aria-label={`${userLabel(auth.user)} — your preferences`}
-                  onClick={() => setProfileOpen(true)}
+                  className="acct__hist"
+                  onClick={() => setHistoryOpen(true)}
                 >
-                  {auth.user.photoURL ? (
-                    // eslint-disable-next-line @next/next/no-img-element -- provider avatar on an unconfigurable remote host
-                    <img
-                      className="acct__avatar"
-                      src={auth.user.photoURL}
-                      alt=""
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <span className="acct__initials" aria-hidden="true">
-                      {userInitials(auth.user)}
-                    </span>
-                  )}
-                  <span className="acct__name">{userLabel(auth.user)}</span>
+                  History
                 </button>
-                <button type="button" className="acct__out" onClick={() => void auth.signOut()}>
-                  Sign out
+                {/* A guest is now signed in ANONYMOUSLY rather than not signed
+                    in at all, so this can no longer key off "signed-out" —
+                    that state is reached only when Firebase is unavailable.
+                    Both cases offer the same thing: a way in, with nothing
+                    gated behind it. */}
+                <button
+                  type="button"
+                  className="acct__signin"
+                  onClick={() => {
+                    auth.clearError();
+                    setLoginOpen(true);
+                  }}
+                >
+                  Sign in
                 </button>
               </>
-            ) : (
-              // A guest is now signed in ANONYMOUSLY rather than not signed in
-              // at all, so this can no longer key off "signed-out" — that
-              // state is reached only when Firebase is unavailable. Both cases
-              // offer the same thing: a way in, with nothing gated behind it.
-              <button
-                type="button"
-                className="acct__signin"
-                onClick={() => {
-                  auth.clearError();
-                  setLoginOpen(true);
-                }}
-              >
-                Sign in
-              </button>
             )}
           </div>
         )}

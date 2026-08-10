@@ -8,9 +8,15 @@
 import assert from "node:assert";
 import {
   EMPTY_ANSWERS,
+  FREE_TEXT_DIMENSION,
+  MAX_FREE_TEXT_LENGTH,
+  OTHER_OPTION,
   SURVEY_QUESTIONS,
+  answersFromProfile,
+  freeTextAnswer,
   isEmptyAnswers,
   normalizeAnswerSet,
+  normalizeFreeText,
   normalizeTasteAnswers,
   parseTasteProfile,
   profileGateState,
@@ -20,6 +26,24 @@ import {
   type SurveyGateInput,
   type TasteAnswers,
 } from "./tastePreferences";
+
+/** The shape every projected preference has to have, because `aesthetic` and
+ *  `constraints` are spliced into a Places text query verbatim. Copied from
+ *  `plannerPreferences.test.ts`, where it pins the CURATED phrases — free text
+ *  has to clear the same bar, and this is the only place it is made to. */
+const QUERY_SAFE = /^[A-Za-z][A-Za-z -]*$/;
+
+/** An answer set with the foods "Other" chip pressed and `text` in the box. */
+function typed(text: string, over: Partial<TasteAnswers> = {}): TasteAnswers {
+  return {
+    style: [],
+    foods: [OTHER_OPTION],
+    dietary: [],
+    activities: [],
+    other: { [FREE_TEXT_DIMENSION]: text },
+    ...over,
+  };
+}
 
 /** The showable case — a brand-new signed-in user with no profile. Every test
  *  below changes exactly one thing about it, so what each "no" is caused by is
@@ -390,6 +414,153 @@ const cases: Array<[string, () => void]> = [
     },
   ],
 
+  // ── free text: the sanitizer ──
+  // This is the only string in the profile a user AUTHORS, and it is handed to
+  // the planner and can be copied verbatim into a Places query. Everything the
+  // curated phrases get for free — no punctuation, no control characters, a
+  // sane length — has to be MADE true here.
+  [
+    "trims, and collapses runs of whitespace",
+    () => {
+      assert.strictEqual(normalizeFreeText("  Ethiopian  "), "Ethiopian");
+      assert.strictEqual(normalizeFreeText("soul    food"), "soul food");
+      assert.strictEqual(normalizeFreeText("\tThai\n"), "Thai");
+    },
+  ],
+  [
+    "strips every character outside letters, spaces and hyphens",
+    () => {
+      // The stripped character becomes a SPACE, not nothing: "thai/korean" is
+      // two cuisines badly separated, never one invented word "thaikorean".
+      assert.strictEqual(normalizeFreeText("thai/korean"), "thai korean");
+      assert.strictEqual(normalizeFreeText("Sichuan (spicy)"), "Sichuan spicy");
+      assert.strictEqual(normalizeFreeText("café"), "caf");
+      assert.strictEqual(normalizeFreeText("top 10 pizza"), "top pizza");
+      assert.strictEqual(normalizeFreeText("<script>alert</script>"), "script alert script");
+      // A hyphen is kept — "gluten-free", "Tex-Mex" — but a run is not.
+      assert.strictEqual(normalizeFreeText("Tex-Mex"), "Tex-Mex");
+      assert.strictEqual(normalizeFreeText("Tex--Mex"), "Tex-Mex");
+    },
+  ],
+  [
+    "removes control characters and newlines",
+    () => {
+      assert.strictEqual(normalizeFreeText("Kor\u0000ean"), "Kor ean");
+      assert.strictEqual(normalizeFreeText("Thai\r\nvegan"), "Thai vegan");
+      assert.strictEqual(normalizeFreeText("a\u200bb"), "a b");
+    },
+  ],
+  [
+    "never starts or ends with a separator — the invariant demands a LETTER first",
+    () => {
+      assert.strictEqual(normalizeFreeText("-thai"), "thai");
+      assert.strictEqual(normalizeFreeText("thai-"), "thai");
+      assert.strictEqual(normalizeFreeText(" - thai - "), "thai");
+    },
+  ],
+  [
+    "caps the length, and the cut cannot leave a dangling separator",
+    () => {
+      const long = "a".repeat(200);
+      assert.strictEqual(normalizeFreeText(long).length, MAX_FREE_TEXT_LENGTH);
+      // 39 letters then a space then more: the slice lands on the space, and
+      // the second trim is what stops it being stored.
+      const onEdge = `${"b".repeat(MAX_FREE_TEXT_LENGTH - 1)} tail`;
+      assert.strictEqual(normalizeFreeText(onEdge), "b".repeat(MAX_FREE_TEXT_LENGTH - 1));
+      // The point of the cap: an enormous body cannot become an enormous
+      // string on the planner's hot path.
+      assert.ok(normalizeFreeText("x ".repeat(50_000)).length <= MAX_FREE_TEXT_LENGTH);
+    },
+  ],
+  [
+    "empty after sanitizing is UNSET — no text, not a string of debris",
+    () => {
+      for (const junk of ["", "   ", "!!!", "12345", "——", "---", "\u{1f355}"]) {
+        assert.strictEqual(normalizeFreeText(junk), "", JSON.stringify(junk));
+      }
+    },
+  ],
+  [
+    "anything that is not a string is no text at all",
+    () => {
+      for (const junk of [null, undefined, 7, {}, ["thai"], true]) {
+        assert.strictEqual(normalizeFreeText(junk), "", JSON.stringify(junk) ?? "undefined");
+      }
+    },
+  ],
+  [
+    "whatever survives is QUERY-SAFE — the same bar the curated phrases clear",
+    () => {
+      const inputs = [
+        "Ethiopian",
+        "  soul food  ",
+        "thai/korean",
+        "Tex--Mex",
+        "-hot pot-",
+        "café food",
+        "<b>bbq</b>",
+        "a".repeat(120),
+        `${"c".repeat(MAX_FREE_TEXT_LENGTH - 1)} tail`,
+        "north indian & pakistani",
+      ];
+      for (const raw of inputs) {
+        const cleaned = normalizeFreeText(raw);
+        assert.ok(cleaned.length > 0, `${JSON.stringify(raw)} sanitized to nothing`);
+        assert.ok(
+          QUERY_SAFE.test(cleaned),
+          `${JSON.stringify(raw)} → ${JSON.stringify(cleaned)} is not query-safe`
+        );
+        assert.ok(cleaned.length <= MAX_FREE_TEXT_LENGTH, `${JSON.stringify(raw)} is too long`);
+      }
+    },
+  ],
+
+  // ── free text: the "Other" gate ──
+  [
+    "free text counts only while the Other chip is pressed",
+    () => {
+      assert.strictEqual(freeTextAnswer(typed("Ethiopian")), "Ethiopian");
+      // Un-ticking hides the box, so text left behind is text the user cannot
+      // see. A preference nobody can see steering their plans is the worst
+      // version of this feature.
+      assert.strictEqual(freeTextAnswer(typed("Ethiopian", { foods: [] })), "");
+      assert.strictEqual(freeTextAnswer(typed("Ethiopian", { foods: ["thai"] })), "");
+      assert.strictEqual(freeTextAnswer(EMPTY_ANSWERS), "");
+    },
+  ],
+  [
+    "the normaliser applies the gate AND the sanitizer, and omits an empty one",
+    () => {
+      assert.deepStrictEqual(normalizeTasteAnswers(typed("  Ethiopian!  ")).other, {
+        foods: "Ethiopian",
+      });
+      // Omitted, never `{}` or `{foods:""}`: EMPTY_ANSWERS stays literally the
+      // empty answer set, and two records with the same answers compare equal.
+      assert.strictEqual(normalizeTasteAnswers(typed("!!!")).other, undefined);
+      assert.strictEqual(normalizeTasteAnswers(typed("Thai", { foods: [] })).other, undefined);
+      assert.strictEqual(normalizeTasteAnswers({ foods: ["thai"] }).other, undefined);
+    },
+  ],
+  [
+    "the SLUG ARRAYS are untouched by any of this — the closed set is still closed",
+    () => {
+      const answers = normalizeTasteAnswers({
+        ...typed("Ethiopian"),
+        foods: ["other", "thai", "not-a-cuisine"],
+        style: ["cozy", "cultural"],
+      });
+      assert.deepStrictEqual(answers.foods, ["thai", "other"]);
+      assert.deepStrictEqual(answers.style, ["cozy"]);
+      // and the free text never leaks INTO them
+      for (const question of SURVEY_QUESTIONS) {
+        assert.ok(
+          !answers[question.id].includes("Ethiopian"),
+          `free text leaked into ${question.id}`
+        );
+      }
+    },
+  ],
+
   // ── what actually gets filed ──
   [
     "stores the four answer sets, both flags and a timestamp",
@@ -410,6 +581,9 @@ const cases: Array<[string, () => void]> = [
         foods: ["italian", "korean"],
         dietary: ["vegetarian"],
         activities: ["art", "music"],
+        // Always present, always a string. Firestore rejects undefined, and
+        // "" is the honest value for a submission with nothing typed.
+        foodsOther: "",
         surveySeen: true,
         surveyCompleted: true,
         updatedAt: AT,
@@ -487,10 +661,67 @@ const cases: Array<[string, () => void]> = [
         foods: ["japanese"],
         dietary: ["halal"],
         activities: ["outdoors"],
+        foodsOther: "",
         surveySeen: true,
         surveyCompleted: true,
         updatedAt: AT,
       });
+    },
+  ],
+  [
+    "round-trips the TYPED cuisine, sanitized, with the slug arrays intact",
+    () => {
+      const doc = toTasteProfileDocument("uid-1", typed("  Ethiopian!  ", {
+        foods: [OTHER_OPTION, "thai"],
+        dietary: ["vegan"],
+      }), { completed: true, updatedAt: AT });
+      assert.strictEqual(doc.foodsOther, "Ethiopian");
+      // THE CLOSED-SET GUARANTEE IS THE PROPERTY BEING PROTECTED: free text
+      // gets its own field and never becomes a slug.
+      assert.deepStrictEqual(doc.foods, ["thai", "other"]);
+      assert.deepStrictEqual(doc.dietary, ["vegan"]);
+
+      const read = parseTasteProfile(doc);
+      assert.strictEqual(read?.foodsOther, "Ethiopian");
+      assert.deepStrictEqual(read?.foods, ["thai", "other"]);
+    },
+  ],
+  [
+    "foodsOther is ALWAYS a string — \"\" when unset, never undefined",
+    () => {
+      // Firestore rejects undefined outright, which is why every empty
+      // dimension is [] rather than missing. Same rule, same reason.
+      assert.strictEqual(toTasteProfileDocument("uid-1", EMPTY_ANSWERS, {
+        completed: true,
+        updatedAt: AT,
+      }).foodsOther, "");
+      assert.strictEqual(skipped().foodsOther, "");
+      // ticked "Other" but typed nothing usable
+      assert.strictEqual(
+        toTasteProfileDocument("uid-1", typed("!!!"), { completed: true, updatedAt: AT })
+          .foodsOther,
+        ""
+      );
+      // and a document written BEFORE the field existed reads as "" too
+      assert.strictEqual(
+        parseTasteProfile({ surveySeen: true, foods: ["other"], updatedAt: AT })?.foodsOther,
+        ""
+      );
+    },
+  ],
+  [
+    "a stored profile seeds the EDITOR with its free text back in the box",
+    () => {
+      const doc = toTasteProfileDocument("uid-1", typed("Ethiopian"), {
+        completed: true,
+        updatedAt: AT,
+      });
+      const answers = answersFromProfile(parseTasteProfile(doc));
+      assert.deepStrictEqual(answers.foods, ["other"]);
+      assert.strictEqual(freeTextAnswer(answers), "Ethiopian");
+      // no profile, and a profile with nothing typed, both seed clean
+      assert.deepStrictEqual(answersFromProfile(null), EMPTY_ANSWERS);
+      assert.strictEqual(answersFromProfile(parseTasteProfile(skipped()))?.other, undefined);
     },
   ],
   [

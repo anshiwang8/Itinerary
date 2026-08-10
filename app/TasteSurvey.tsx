@@ -32,6 +32,7 @@ import TasteQuestions from "./TasteQuestions";
 import {
   EMPTY_ANSWERS,
   SURVEY_QUESTIONS,
+  freeTextAnswer,
   type TasteAnswers,
   type TasteDimension,
 } from "./lib/tastePreferences";
@@ -71,6 +72,18 @@ export default function TasteSurvey({
           : [...chosen, value],
       };
     });
+  }, []);
+
+  /** The typed cuisine, held RAW. Sanitizing per keystroke would fight the
+   *  typist — a trim eats the space in "soul food" the moment it is pressed —
+   *  so the text is cleaned once, on the way into storage, by the same
+   *  normaliser the server runs. Text left behind by an un-pressed "Other" is
+   *  dropped there too, so nothing needs clearing here. */
+  const setOther = useCallback((dimension: TasteDimension, value: string) => {
+    setAnswers((current) => ({
+      ...current,
+      other: { ...current.other, [dimension]: value },
+    }));
   }, []);
 
   const submit = useCallback(() => {
@@ -133,8 +146,12 @@ export default function TasteSurvey({
     skipRef.current?.focus();
   }, []);
 
+  // A typed cuisine counts as an answer given — someone who ticked "Other" and
+  // wrote "Ethiopian" should see "Save preferences", not "Continue".
   const chosenCount = useMemo(
-    () => SURVEY_QUESTIONS.reduce((total, q) => total + answers[q.id].length, 0),
+    () =>
+      SURVEY_QUESTIONS.reduce((total, q) => total + answers[q.id].length, 0) +
+      (freeTextAnswer(answers) ? 1 : 0),
     [answers]
   );
 
@@ -165,7 +182,7 @@ export default function TasteSurvey({
           {/* Rendering only. The grid is shared with the edit-profile panel;
               everything this screen does with an answer — the blank start, the
               escape-writes-a-skip, the send-off — stays here. */}
-          <TasteQuestions answers={answers} onToggle={toggle} />
+          <TasteQuestions answers={answers} onToggle={toggle} onOtherChange={setOther} />
         </div>
 
         <div className="taste__foot">

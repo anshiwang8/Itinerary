@@ -34,6 +34,13 @@ function filled(over: Partial<TasteAnswers> = {}): TasteAnswers {
   };
 }
 
+/** The same answers with `text` in the foods question's free-text box. Kept as
+ *  a helper because `other` is nested and every case below would otherwise
+ *  spell the nesting out. */
+function withText(answers: TasteAnswers, text: string): TasteAnswers {
+  return { ...answers, other: { ...answers.other, foods: text } };
+}
+
 /** The wire shape `GET /api/profile` answers with. */
 function response(profile: unknown, readFailed = false) {
   return { profile, readFailed };
@@ -212,6 +219,58 @@ const cases: Array<[string, () => void]> = [
         answersDirty(load.answers, parseProfileEditLoad(response(stored(filled()))).answers),
         false
       );
+    },
+  ],
+  [
+    "TYPING IN THE FREE-TEXT BOX IS DIRTY — without this, Save never lights up",
+    () => {
+      // The comparison is per-dimension arrays, so the typed cuisine had to be
+      // added to it explicitly. Miss it and the editor is unusable for this
+      // feature: the box accepts text, Save stays disabled, and closing never
+      // asks about the work.
+      const seed = withText(filled({ foods: ["other"] }), "Ethiopian");
+      assert.strictEqual(answersDirty(seed, withText(seed, "Thai")), true);
+      // typed where there was nothing, and cleared where there was something
+      assert.strictEqual(answersDirty(filled({ foods: ["other"] }), seed), true);
+      assert.strictEqual(answersDirty(seed, withText(seed, "")), true);
+    },
+  ],
+  [
+    "the free text is compared SANITIZED — dirty means a save would change it",
+    () => {
+      // "Ethiopian!" stores as "Ethiopian", so over a stored "Ethiopian" it is
+      // not a change and must not light up Save or trigger a discard prompt.
+      const seed = withText(filled({ foods: ["other"] }), "Ethiopian");
+      assert.strictEqual(answersEqual(seed, withText(seed, "  Ethiopian!  ")), true);
+      assert.strictEqual(answersDirty(seed, withText(seed, "Ethiopian ")), false);
+      // but a real edit under the punctuation still registers
+      assert.strictEqual(answersDirty(seed, withText(seed, "Ethiopian food")), true);
+    },
+  ],
+  [
+    "text behind an UN-PRESSED Other chip is not a change of its own",
+    () => {
+      // Un-ticking hides the box and clears the field on save, so the leftover
+      // string is not something a save would file. The chip moving is the
+      // change; the text is along for the ride.
+      const seed = withText(filled({ foods: ["other"] }), "Ethiopian");
+      const untickedThenRetyped = withText(filled({ foods: [] }), "Thai");
+      const unticked = withText(filled({ foods: [] }), "Ethiopian");
+      assert.strictEqual(answersEqual(untickedThenRetyped, unticked), true);
+      // and both are dirty against the seed, because the CHIP moved
+      assert.strictEqual(answersDirty(seed, unticked), true);
+    },
+  ],
+  [
+    "a stored typed cuisine seeds the editor clean, box and all",
+    () => {
+      const answers = withText(filled({ foods: ["other", "thai"] }), "Ethiopian");
+      const load = parseProfileEditLoad(response(stored(answers)));
+      assert.strictEqual(load.readFailed, false);
+      assert.deepStrictEqual(load.answers.foods, ["thai", "other"]);
+      assert.deepStrictEqual(load.answers.other, { foods: "Ethiopian" });
+      // Born clean — the round trip through storage must not read as an edit.
+      assert.strictEqual(answersDirty(load.answers, answers), false);
     },
   ],
 
