@@ -7,10 +7,54 @@ import {
   validLongitude,
 } from "../_shared/http";
 import { ProviderError, requireProviderRecord } from "../_shared/provider";
+import { haversineMeters } from "../schedule/travel";
 
 const GEOCODING_URL = "https://maps.googleapis.com/maps/api/geocode/json";
 const MAX_PROVIDER_RESULTS = 50;
 const MAX_CANDIDATES = 5;
+
+/**
+ * How far a starting address may sit from the selected city's centre and
+ * still be a plausible place to start a day IN that city. People live in
+ * suburbs: Mississauga is ~25 km from downtown Toronto, Oakville ~35 km,
+ * Hamilton ~60 km, and every one of them is a real commute into the city.
+ * A start beyond this is not a commute — it is a typo'd city or the wrong
+ * Springfield, and refusing it is the honest answer.
+ *
+ * This is also the app's ONLY distance cap on a starting point. Without
+ * it a 200 km typo geocodes fine and turns into a silent multi-hour
+ * home → first stop leg, because `getSingleLeg` will happily estimate any
+ * distance. The bad address never resolves, so that leg is never built.
+ */
+export const MAX_START_DISTANCE_FROM_CITY_METERS = 75_000;
+
+/**
+ * Inside this radius a region (province/state) mismatch is NOT a refusal.
+ * The region check is a SECONDARY signal to the distance test, and every
+ * near-but-cross-region address is a real metro suburb rather than a
+ * mistake — Gatineau QC for an Ottawa ON plan is 2 km away, Jersey City NJ
+ * for New York is 10 km, Kansas City KS for Kansas City MO is 5 km. Past
+ * this radius a different region is genuine evidence of a wrong city.
+ */
+export const SAME_METRO_METERS = 25_000;
+
+/** Verdict on a geocoded start against the selected city. PURE, and the
+ *  whole "is this a plausible start" rule: one distance comparison plus a
+ *  secondary region signal. Distance is code's fact to own, never a
+ *  judgment call, so it is decided here and not by name equality. */
+export type StartProximity = "in-range" | "wrong-region" | "too-far";
+
+export function judgeStartProximity(
+  start: GeocodePoint,
+  city: GeocodePoint,
+  regionMatches: boolean,
+  maxMeters: number = MAX_START_DISTANCE_FROM_CITY_METERS
+): StartProximity {
+  const meters = haversineMeters(start, city);
+  if (meters > maxMeters) return "too-far";
+  if (!regionMatches && meters > SAME_METRO_METERS) return "wrong-region";
+  return "in-range";
+}
 
 const CITY_RESULT_TYPES = new Set([
   "locality",
@@ -282,11 +326,16 @@ export function buildGeocodeUrl(request: GeocodeRequest, apiKey: string): URL {
   let address = request.query;
   if (request.kind === "address" && request.cityContext) {
     const context = request.cityContext;
-    const suffix = [
-      context.locality,
-      context.administrativeArea,
-      context.country,
-    ].filter((part): part is string => Boolean(part));
+    // The city's LOCALITY is deliberately NOT appended. A start outside the
+    // city is legitimate (people commute in), and "12 Elm St, Mississauga"
+    // + ", Toronto" is a self-contradictory query: the geocoder either
+    // relocates it into Toronto or flags partial_match — so the address the
+    // validator below is meant to judge never even arrives. Region and
+    // country still disambiguate, and the city viewport still biases
+    // ranking, which is what those two are for.
+    const suffix = [context.administrativeArea, context.country].filter(
+      (part): part is string => Boolean(part)
+    );
     address = [address, ...suffix].join(", ");
     url.searchParams.set(
       "bounds",
@@ -352,10 +401,19 @@ function parseResult(value: unknown): ParsedResult {
     "postal_town",
     "administrative_area_level_3",
   ]);
-  const administrativeArea = componentWithType(components, [
-    "administrative_area_level_1",
-    "administrative_area_level_2",
-  ]);
+  // The PROVINCE/STATE, and level_1 wins outright rather than by component
+  // order. Asking for both at once returns whichever the provider happened
+  // to list first, and for Toronto that is level_2 — which is also spelled
+  // "Toronto". So the city's "region" came back as the city's own name,
+  // which then went into the query suffix and the region check: the
+  // locality rule this change removes was still running, wearing a region's
+  // clothes. Live proof (2026-08-13): an Oakville start was refused as a
+  // different region, and a Hamilton address was relocated INTO Toronto by
+  // the suffix. Level_2 survives only as the fallback for the countries
+  // that have no level_1 at all.
+  const administrativeArea =
+    componentWithType(components, ["administrative_area_level_1"]) ??
+    componentWithType(components, ["administrative_area_level_2"]);
   const country = componentWithType(components, ["country"]);
   if (country && !/^[A-Za-z]{2}$/.test(country.shortName)) invalidProvider();
   const placeId =
@@ -496,7 +554,8 @@ export function resolveGeocodeResponse(
 
   let incomplete = false;
   let wrongCountry = false;
-  let outsideCity = false;
+  let wrongRegion = false;
+  let tooFar = false;
   const valid: ParsedResult[] = [];
   for (const result of results) {
     const { candidate, components, partial } = result;
@@ -519,25 +578,28 @@ export function resolveGeocodeResponse(
       wrongCountry = true;
       continue;
     }
-    if (
-      !candidate.locality ||
-      !matchesComponent(components, context.locality, [
-        "locality",
-        "postal_town",
-        "administrative_area_level_3",
-      ])
-    ) {
-      outsideCity = true;
-      continue;
-    }
-    if (
-      context.administrativeArea &&
-      !matchesComponent(components, context.administrativeArea, [
+    // The start does NOT have to be in the selected city. It has to be
+    // near enough to it to be a day's start there — which is a DISTANCE,
+    // a fact code owns, not a locality-name equality. Name equality used
+    // to decide this, and it refused every commuter suburb while passing
+    // any same-named place the country check let through.
+    const regionMatches =
+      !context.administrativeArea ||
+      matchesComponent(components, context.administrativeArea, [
         "administrative_area_level_1",
         "administrative_area_level_2",
-      ])
-    ) {
-      outsideCity = true;
+      ]);
+    const proximity = judgeStartProximity(
+      candidate.location,
+      context.location,
+      regionMatches
+    );
+    if (proximity === "too-far") {
+      tooFar = true;
+      continue;
+    }
+    if (proximity === "wrong-region") {
+      wrongRegion = true;
       continue;
     }
     valid.push(result);
@@ -552,11 +614,18 @@ export function resolveGeocodeResponse(
       "That address resolved outside the selected city's country. Add a postal code or choose a more specific address."
     );
   }
-  if (outsideCity) {
+  if (tooFar) {
+    throw new ApiError(
+      422,
+      "geocode_far_from_city",
+      `That address is very far from ${context.locality} — check the city or the address.`
+    );
+  }
+  if (wrongRegion) {
     throw new ApiError(
       422,
       "geocode_outside_city",
-      "That address did not resolve within the selected city. Check the city or add a postal code."
+      `That address is in a different region than ${context.locality}. Check the city or add a postal code.`
     );
   }
   if (incomplete) {

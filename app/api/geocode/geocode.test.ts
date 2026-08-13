@@ -5,7 +5,10 @@ import { POST } from "./route";
 import {
   CityContext,
   GeocodeRequest,
+  MAX_START_DISTANCE_FROM_CITY_METERS,
+  SAME_METRO_METERS,
   buildGeocodeUrl,
+  judgeStartProximity,
   resolveGeocodeResponse,
 } from "./geocode";
 
@@ -27,6 +30,20 @@ const addressRequest: GeocodeRequest = {
   kind: "address",
   cityContext: toronto,
 };
+
+// The rule's own haversine, run backwards: a point exactly `meters` due
+// north of Toronto's centre. Boundary cases are then exact rather than
+// approximately-a-suburb, so "75 km is allowed, past it is not" is pinned
+// on both sides instead of near it.
+const EARTH_RADIUS_METERS = 6_371_000;
+function northOfCity(meters: number): { lat: number; lng: number } {
+  return {
+    lat:
+      toronto.location.latitude +
+      (meters * 180) / (Math.PI * EARTH_RADIUS_METERS),
+    lng: toronto.location.longitude,
+  };
+}
 
 function component(
   longName: string,
@@ -250,9 +267,13 @@ const cases: Array<[string, () => void | Promise<void>]> = [
       const url = buildGeocodeUrl(addressRequest, "geocoding-only-key");
       assert.strictEqual(url.origin, "https://maps.googleapis.com");
       assert.strictEqual(url.pathname, "/maps/api/geocode/json");
+      // The city's LOCALITY is deliberately absent: appending it turns a
+      // suburb address into an in-city query (or a partial_match), so the
+      // validator never sees the address it is meant to judge. Region +
+      // country still disambiguate, and the viewport still biases ranking.
       assert.strictEqual(
         url.searchParams.get("address"),
-        "100 Queen Street West, Toronto, Ontario, Canada"
+        "100 Queen Street West, Ontario, Canada"
       );
       assert.strictEqual(
         url.searchParams.get("bounds"),
@@ -261,6 +282,184 @@ const cases: Array<[string, () => void | Promise<void>]> = [
       assert.strictEqual(url.searchParams.get("components"), "country:CA");
       assert.strictEqual(url.searchParams.get("region"), "ca");
       assert.strictEqual(url.searchParams.get("key"), "geocoding-only-key");
+    },
+  ],
+  [
+    "a commuter suburb OUTSIDE the selected city is a valid starting address",
+    () => {
+      const mississauga = northOfCity(25_000);
+      const outcome = resolveGeocodeResponse(
+        response([
+          result({
+            formatted: "100 Elm Dr, Mississauga, ON, Canada",
+            types: ["street_address"],
+            locality: "Mississauga",
+            lat: mississauga.lat,
+            lng: mississauga.lng,
+          }),
+        ]),
+        addressRequest
+      );
+      assert.strictEqual(outcome.outcome, "resolved");
+      if (outcome.outcome !== "resolved") return;
+      assert.strictEqual(outcome.locality, "Mississauga");
+      assert.strictEqual(
+        outcome.formattedAddress,
+        "100 Elm Dr, Mississauga, ON, Canada"
+      );
+    },
+  ],
+  [
+    "the distance boundary itself is allowed — exactly the cap is in range",
+    () => {
+      const edge = northOfCity(MAX_START_DISTANCE_FROM_CITY_METERS);
+      const outcome = resolveGeocodeResponse(
+        response([
+          result({
+            formatted: "1 Boundary Rd, Somewhere, ON, Canada",
+            types: ["street_address"],
+            locality: "Somewhere",
+            lat: edge.lat,
+            lng: edge.lng,
+          }),
+        ]),
+        addressRequest
+      );
+      assert.strictEqual(outcome.outcome, "resolved");
+    },
+  ],
+  [
+    "a start beyond the distance cap is refused as far from the city",
+    () => {
+      const far = northOfCity(MAX_START_DISTANCE_FROM_CITY_METERS + 200);
+      assert.throws(
+        () =>
+          resolveGeocodeResponse(
+            response([
+              result({
+                formatted: "1 Main St, Faraway, ON, Canada",
+                types: ["street_address"],
+                locality: "Faraway",
+                lat: far.lat,
+                lng: far.lng,
+              }),
+            ]),
+            addressRequest
+          ),
+        (error: unknown) =>
+          error instanceof ApiError &&
+          error.status === 422 &&
+          error.code === "geocode_far_from_city" &&
+          // the refusal has to NAME the city, or "very far from where?"
+          error.publicMessage.includes("Toronto")
+      );
+    },
+  ],
+  [
+    "a different region is refused once it is outside the metro",
+    () => {
+      const across = northOfCity(SAME_METRO_METERS + 200);
+      assert.throws(
+        () =>
+          resolveGeocodeResponse(
+            response([
+              result({
+                formatted: "1 Rue Principale, Elsewhere, QC, Canada",
+                types: ["street_address"],
+                locality: "Elsewhere",
+                admin: "Quebec",
+                lat: across.lat,
+                lng: across.lng,
+              }),
+            ]),
+            addressRequest
+          ),
+        (error: unknown) =>
+          error instanceof ApiError &&
+          error.status === 422 &&
+          error.code === "geocode_outside_city"
+      );
+    },
+  ],
+  [
+    "a different region INSIDE the metro still resolves — proximity outranks the region signal",
+    () => {
+      const nextDoor = northOfCity(5_000);
+      const outcome = resolveGeocodeResponse(
+        response([
+          result({
+            formatted: "1 Rue Laurier, Gatineau, QC, Canada",
+            types: ["street_address"],
+            locality: "Gatineau",
+            admin: "Quebec",
+            lat: nextDoor.lat,
+            lng: nextDoor.lng,
+          }),
+        ]),
+        addressRequest
+      );
+      assert.strictEqual(outcome.outcome, "resolved");
+    },
+  ],
+  [
+    "an out-of-city address and its in-city lookalike BOTH reach the candidate panel",
+    () => {
+      const suburb = northOfCity(20_000);
+      const outcome = resolveGeocodeResponse(
+        response([
+          result({
+            formatted: "100 Queen St W, Toronto, ON, Canada",
+            types: ["street_address"],
+            placeId: "queen-toronto",
+          }),
+          result({
+            formatted: "100 Queen St W, Mississauga, ON, Canada",
+            types: ["street_address"],
+            locality: "Mississauga",
+            lat: suburb.lat,
+            lng: suburb.lng,
+            placeId: "queen-mississauga",
+          }),
+        ]),
+        addressRequest
+      );
+      // The locality rule used to silently reduce this to the in-city one.
+      // Both are plausible now, so the choice belongs to the user.
+      assert.strictEqual(outcome.outcome, "ambiguous");
+      if (outcome.outcome !== "ambiguous") return;
+      assert.deepStrictEqual(
+        outcome.candidates.map((candidate) => candidate.formattedAddress),
+        [
+          "100 Queen St W, Toronto, ON, Canada",
+          "100 Queen St W, Mississauga, ON, Canada",
+        ]
+      );
+    },
+  ],
+  [
+    "judgeStartProximity decides the whole rule on both sides of both thresholds",
+    () => {
+      const city = toronto.location;
+      const at = (meters: number) => {
+        const point = northOfCity(meters);
+        return { latitude: point.lat, longitude: point.lng };
+      };
+      const cap = MAX_START_DISTANCE_FROM_CITY_METERS;
+      assert.strictEqual(judgeStartProximity(at(0), city, true), "in-range");
+      assert.strictEqual(judgeStartProximity(at(cap), city, true), "in-range");
+      assert.strictEqual(judgeStartProximity(at(cap + 200), city, true), "too-far");
+      // a region mismatch never turns a far address into a near one
+      assert.strictEqual(judgeStartProximity(at(cap + 200), city, false), "too-far");
+      // ...and inside the metro it is forgiven, because every near
+      // cross-region address is a real suburb rather than a mistake
+      assert.strictEqual(
+        judgeStartProximity(at(SAME_METRO_METERS), city, false),
+        "in-range"
+      );
+      assert.strictEqual(
+        judgeStartProximity(at(SAME_METRO_METERS + 200), city, false),
+        "wrong-region"
+      );
     },
   ],
   [

@@ -148,6 +148,19 @@ export function parseParsedPrompt(value: unknown): ParsedPrompt {
       longitude: value.home.longitude,
     };
   }
+  if (value.cityCenter !== undefined) {
+    if (
+      !isRecord(value.cityCenter) ||
+      !validLatitude(value.cityCenter.latitude) ||
+      !validLongitude(value.cityCenter.longitude)
+    ) {
+      badRequest("`parsed.cityCenter` must contain valid latitude and longitude.");
+    }
+    parsed.cityCenter = {
+      latitude: value.cityCenter.latitude,
+      longitude: value.cityCenter.longitude,
+    };
+  }
   return normalizeStopCountSlots(parsed);
 }
 

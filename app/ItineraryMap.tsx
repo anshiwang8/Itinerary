@@ -84,6 +84,53 @@ const loadMapLibs = createRetryableLoader(async () => {
 type MapPoint = { x: number | string; y: number | string };
 const MAX_MAP_RETRIES = 2;
 
+/**
+ * How far the START may sit from the day's stops and still be folded into
+ * the opening fit. A start outside the city is legitimate now — the
+ * geocoder allows one up to 75 km away, because people commute in — but a
+ * far home and a downtown cluster of stops cannot share one readable
+ * frame: fitting both squeezes the whole outing, which is the thing the
+ * user came to look at, into a smudge at one corner.
+ *
+ * The test is RELATIVE, because "too far" is a fact about the plan's own
+ * size rather than a number of kilometres: home may sit a few times the
+ * stops' own radius away, with a floor so a compact plan (or a single
+ * stop, radius zero) still keeps a sensible allowance. A live plan from
+ * Oakville — 35 km out, inside the geocoder's cap — is what set these:
+ * an absolute 40 km ceiling admitted it and the two downtown stops landed
+ * on top of each other.
+ *
+ * Past the threshold the view fits the STOPS. The home marker is still
+ * drawn at its real coordinates and is one zoom-out away — it is off the
+ * opening frame, not missing, and nothing about where it sits is faked to
+ * keep it on screen.
+ */
+const HOME_FIT_RADIUS_MULTIPLE = 3;
+const HOME_FIT_MIN_RADIUS_METERS = 1_500;
+
+/** Would including home still leave the stops readable? Measured from the
+ *  stops' own centre — the thing the frame exists to show. Uses the Maps
+ *  geometry library, already loaded here, rather than a second copy of the
+ *  haversine in `travel.ts` (which is server-only and cannot be imported
+ *  into a client component). */
+function homeFitsWithStops(
+  home: google.maps.LatLngLiteral,
+  stops: google.maps.LatLngLiteral[]
+): boolean {
+  if (stops.length === 0) return true;
+  const bounds = new google.maps.LatLngBounds();
+  stops.forEach((p) => bounds.extend(p));
+  const centre = bounds.getCenter();
+  const { computeDistanceBetween } = google.maps.geometry.spherical;
+  const stopsRadius = Math.max(
+    ...stops.map((stop) => computeDistanceBetween(centre, stop))
+  );
+  const allowance =
+    Math.max(stopsRadius, HOME_FIT_MIN_RADIUS_METERS) *
+    HOME_FIT_RADIUS_MULTIPLE;
+  return computeDistanceBetween(centre, home) <= allowance;
+}
+
 interface Props {
   stops: MapStop[];
   home?: MapHome | null;
@@ -246,7 +293,12 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     const map = mapRef.current;
     if (!map || mapState !== "ready") return;
     const pts: google.maps.LatLngLiteral[] = stops.map((s) => ({ lat: s.lat, lng: s.lng }));
-    if (home) pts.push({ lat: home.lat, lng: home.lng });
+    // Home joins the fit only while it doesn't take the frame over — see
+    // HOME_FIT_MAX_METERS. With no stops yet, home IS the geography.
+    if (home) {
+      const homePt = { lat: home.lat, lng: home.lng };
+      if (homeFitsWithStops(homePt, pts)) pts.push(homePt);
+    }
     if (pts.length === 1) {
       map.setCenter(pts[0]);
       map.setZoom(15);

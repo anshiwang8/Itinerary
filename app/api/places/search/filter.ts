@@ -52,6 +52,14 @@ export interface ParsedPrompt {
    * distance from it so picks aren't distance-blind. Rides on parsed so
    * swap/reroute re-searches inherit the anchor. Absent on older plans. */
   home?: { latitude: number; longitude: number };
+  /** the selected CITY's centre (injected by the app after geocode, NOT
+   * inferred by the LLM). Distinct from `home`, which is where the user
+   * STARTS: a start may now sit well outside the city (a suburb), and the
+   * weather gate must judge the forecast where the DAY happens, not where
+   * the commute begins. Rides on parsed for the same reason `home` does —
+   * so swap and reroute inherit it. Absent on plans made before starts
+   * outside the city were allowed; those fall back to `home`. */
+  cityCenter?: { latitude: number; longitude: number };
 }
 
 export type DropRule =

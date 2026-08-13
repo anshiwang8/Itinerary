@@ -297,7 +297,11 @@ export async function rerouteItinerary(
   // Pools and weather are fetched once for the whole proposal. Subsequent
   // stabilization passes only exclude proven-invalid candidate IDs.
   const rawPools = await deps.searchPools(parsed, categories);
-  const weatherOrigin = work.home?.location ?? parsed.home ?? null;
+  // The CITY's forecast, not the start's: a start may sit up to 75 km
+  // outside the city, and every venue this gates is in the city. Older
+  // plans carry no cityCenter and keep their original home fallback.
+  const weatherOrigin =
+    parsed.cityCenter ?? work.home?.location ?? parsed.home ?? null;
   const weather = weatherOrigin
     ? await deps.getWeather(weatherOrigin.latitude, weatherOrigin.longitude)
     : null;

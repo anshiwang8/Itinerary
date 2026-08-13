@@ -696,10 +696,15 @@ function placeOf(stop: ItineraryStop): Place {
   };
 }
 
-/** Forecast for the plan's origin, or null when there's nothing to ask
- *  about (pre-multi-city plans carry no home) — keep-on-missing. */
+/** Forecast for the plan's CITY, or null when there's nothing to ask about
+ *  (pre-multi-city plans carry neither point) — keep-on-missing.
+ *
+ *  The city, not `home`: a start may now sit up to 75 km outside the city,
+ *  and the venues this forecast gates are all in the city. Plans made
+ *  before `cityCenter` existed fall back to home, which is what they always
+ *  used and — for those plans — was in the city by rule anyway. */
 async function weatherFor(itinerary: Itinerary, deps: SwapDeps): Promise<WeatherHour[] | null> {
-  const origin = itinerary.home?.location;
+  const origin = itinerary.parsed?.cityCenter ?? itinerary.home?.location;
   return origin ? deps.getWeather(origin.latitude, origin.longitude) : null;
 }
 

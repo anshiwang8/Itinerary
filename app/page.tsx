@@ -143,6 +143,10 @@ interface ResolvedPlace {
   hp: { label: string; location: { latitude: number; longitude: number } };
   /** the formatted city, which rides on parsed.city into every Places query */
   cityLabel: string;
+  /** the CITY's centre — where the day happens, which is no longer the same
+   *  place as `hp` now that a start may sit outside the city. The weather
+   *  sample point, and it rides on parsed.cityCenter for swap/reroute. */
+  cityLocation: { latitude: number; longitude: number };
   geocode: PipelineGeocode;
 }
 
@@ -749,7 +753,14 @@ export default function Home() {
     // Once the user/provider has resolved an ambiguous city, carry its
     // formatted locality/region/country into every Places query. Keeping
     // the original bare "London" here would reintroduce ambiguity later.
-    let planZone: string = cityData.timeZone;
+    //
+    // THE ZONE IS THE CITY'S, and stays the city's even when a starting
+    // address is given. It used to be taken from the address, which was the
+    // same thing back when an address had to BE in the city; a start may now
+    // sit up to 75 km outside it, far enough to cross a zone boundary, and
+    // this one string drives every scheduled time and every label in the
+    // plan. The day happens in the city, so it is told in the city's time.
+    const planZone: string = cityData.timeZone;
     let hp: { label: string; location: { latitude: number; longitude: number } } = {
       label: `Start · ${cityData.formattedAddress} centre`,
       location: cityData.location,
@@ -783,12 +794,17 @@ export default function Home() {
       }
       geocode.address = addrData;
       hp = { label: `Start · ${addrData.formattedAddress}`, location: addrData.location };
-      planZone = addrData.timeZone;
     }
 
     setHomePoint(hp);
     setPlanZone(planZone);
-    return { planZone, hp, cityLabel: cityData.formattedAddress, geocode };
+    return {
+      planZone,
+      hp,
+      cityLabel: cityData.formattedAddress,
+      cityLocation: cityData.location,
+      geocode,
+    };
   }
 
   /**
@@ -844,6 +860,10 @@ export default function Home() {
     // parse so swap/reroute re-searches inherit it from the store
     parsed.city = place.cityLabel;
     parsed.home = place.hp.location;
+    // the city's own centre, for the same reason: swap and reroute re-fetch
+    // the forecast from the stored parse, and it must be the CITY's forecast
+    // even when the start is a suburb an hour out
+    parsed.cityCenter = place.cityLocation;
     setParsedObj(parsed);
 
     // planner extracted nothing AND the prompt is degenerate → "couldn't
@@ -906,7 +926,7 @@ export default function Home() {
     parseData: ParsedPrompt,
     place: ResolvedPlace
   ) {
-    const { planZone, hp } = place;
+    const { planZone, hp, cityLocation } = place;
     const fail = (reason: string) => {
       setError(reason);
       setLoadingText(null);
@@ -919,11 +939,15 @@ export default function Home() {
 
       let weather: WeatherHour[] | null = null;
       try {
+        // Sampled at the CITY, not at the start. The gate this feeds empties
+        // outdoor categories, and the venues it empties are in the city — so
+        // judging them against a suburb's forecast an hour away answers the
+        // wrong question. Same reason the ambient chip should read the
+        // PLAN's city rather than wherever the user happens to live.
         weather = await fetchJson(
-          `/api/weather?lat=${hp.location.latitude}&lng=${hp.location.longitude}`,
+          `/api/weather?lat=${cityLocation.latitude}&lng=${cityLocation.longitude}`,
           { parse: parseWeatherPayload }
         );
-        // the ambient chip should show the PLAN's city, not the default
         setWeather(weather);
       } catch {
         weather = null;
