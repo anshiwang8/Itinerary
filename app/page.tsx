@@ -2291,7 +2291,10 @@ export default function Home() {
               headsign: leg.transit?.headsign ?? null,
               stopCount: leg.transit?.stopCount ?? null,
               departStop: leg.transit?.departStop ?? null,
-              boardISO: s.end_time,
+              // the scheduler's own two instants: dwell end and next start.
+              // The REAL board time is the provider's and rides on the
+              // segments below — this pair is leave/arrive, nothing else.
+              leaveISO: s.end_time,
               arriveISO: next?.start_time ?? null,
               // pre-segments stored plans fall back to the single ride
               segments: leg.transitSegments ?? (leg.transit ? [leg.transit] : null),
@@ -2319,7 +2322,7 @@ export default function Home() {
         headsign: homeLeg.transit?.headsign ?? null,
         stopCount: homeLeg.transit?.stopCount ?? null,
         departStop: homeLeg.transit?.departStop ?? null,
-        boardISO: leaveISO,
+        leaveISO,
         arriveISO: first?.start_time ?? null,
         segments: homeLeg.transitSegments ?? (homeLeg.transit ? [homeLeg.transit] : null),
       },

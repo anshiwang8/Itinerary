@@ -55,6 +55,76 @@ function mkRoute(
     ],
   };
 }
+
+// The board/alight instants and stop coordinates arrive under the SAME
+// field mask (routes.legs.steps.transitDetails is a parent path) and were
+// being dropped at the parser. A ride that publishes none of them keeps
+// these four nulls — honest absence, never an invented time or place.
+const NO_PROVIDER_TIMES = {
+  boardISO: null,
+  alightISO: null,
+  boardLocation: null,
+  alightLocation: null,
+};
+
+/** A two-ride journey WITH the provider's stop times and coordinates, in
+ *  the exact nesting computeRoutes returns them. */
+const MULTI_RIDE_WITH_TIMES: ComputeRoutesResponse = {
+  routes: [
+    {
+      duration: "2700s",
+      distanceMeters: 11400,
+      polyline: { encodedPolyline: "enc_times" },
+      legs: [
+        {
+          steps: [
+            { transitDetails: undefined }, // walk to the stop
+            {
+              transitDetails: {
+                headsign: "Eglinton Station",
+                stopCount: 15,
+                transitLine: { name: "Ossington", nameShort: "63" },
+                stopDetails: {
+                  departureStop: {
+                    name: "Ossington Ave at Dundas",
+                    location: { latLng: { latitude: 43.6501, longitude: -79.4204 } },
+                  },
+                  arrivalStop: {
+                    name: "Ossington Station",
+                    location: { latLng: { latitude: 43.6624, longitude: -79.4262 } },
+                  },
+                  departureTime: "2026-07-03T23:07:00Z",
+                  arrivalTime: "2026-07-03T23:24:00Z",
+                },
+              },
+            },
+            { transitDetails: undefined }, // the transfer walk
+            {
+              transitDetails: {
+                headsign: "Kennedy",
+                stopCount: 6,
+                transitLine: { name: "Line 2 Bloor–Danforth", nameShort: "2" },
+                stopDetails: {
+                  departureStop: {
+                    name: "Ossington Station",
+                    location: { latLng: { latitude: 43.6626, longitude: -79.4264 } },
+                  },
+                  arrivalStop: {
+                    name: "Yonge Station",
+                    location: { latLng: { latitude: 43.6709, longitude: -79.3857 } },
+                  },
+                  departureTime: "2026-07-03T23:29:00Z",
+                  arrivalTime: "2026-07-03T23:41:00Z",
+                },
+              },
+            },
+            { transitDetails: undefined }, // walk to the venue
+          ],
+        },
+      ],
+    },
+  ],
+};
 const NO_ROUTE: ComputeRoutesResponse = {};
 
 const cases: Array<[string, () => void]> = [
@@ -199,6 +269,8 @@ const cases: Array<[string, () => void]> = [
         stopCount: 4,
         departStop: "Ossington Ave",
         arriveStop: "Yonge St",
+        // this fixture's stopDetails carry names only
+        ...NO_PROVIDER_TIMES,
       });
       // the singular field IS the first segment — same object shape, so
       // old readers and the new array can't disagree
@@ -283,6 +355,113 @@ const cases: Array<[string, () => void]> = [
       );
       // compat: the singular field is still exactly the FIRST ride
       assert.deepStrictEqual(leg.transit, leg.transitSegments![0]);
+    },
+  ],
+  [
+    "provider board/alight INSTANTS survive onto the ride (they already arrived; the parser dropped them)",
+    () => {
+      const leg = buildLeg(0, MULTI_RIDE_WITH_TIMES, null);
+      assert.strictEqual(leg.mode, "transit");
+      assert.deepStrictEqual(
+        leg.transitSegments!.map((s) => [s.boardISO, s.alightISO]),
+        [
+          ["2026-07-03T23:07:00Z", "2026-07-03T23:24:00Z"],
+          ["2026-07-03T23:29:00Z", "2026-07-03T23:41:00Z"],
+        ],
+        "each ride carries ITS OWN board and alight time"
+      );
+      // the singular compat field is still exactly the first ride
+      assert.strictEqual(leg.transit?.boardISO, "2026-07-03T23:07:00Z");
+      // and none of this touched what the leg is scheduled on: 45 min of
+      // provider duration plus the boarding margin, exactly as before
+      assert.strictEqual(leg.rawMinutes, 45);
+      assert.strictEqual(leg.totalMinutes, 45 + TRANSIT_MARGIN_MIN);
+    },
+  ],
+  [
+    "provider stop COORDINATES survive onto the ride — the transfer point is a real place",
+    () => {
+      const leg = buildLeg(0, MULTI_RIDE_WITH_TIMES, null);
+      const [first, second] = leg.transitSegments!;
+      assert.deepStrictEqual(first.boardLocation, {
+        latitude: 43.6501,
+        longitude: -79.4204,
+      });
+      // where ride 1 ends and ride 2 begins: the transfer, at the
+      // provider's own coordinates for each side of it
+      assert.deepStrictEqual(first.alightLocation, {
+        latitude: 43.6624,
+        longitude: -79.4262,
+      });
+      assert.deepStrictEqual(second.boardLocation, {
+        latitude: 43.6626,
+        longitude: -79.4264,
+      });
+      assert.deepStrictEqual(second.alightLocation, {
+        latitude: 43.6709,
+        longitude: -79.3857,
+      });
+    },
+  ],
+  [
+    "a response WITHOUT stop times/coordinates yields nulls — no throw, no fabrication",
+    () => {
+      // mkRoute's stopDetails carry names only, which is a real provider
+      // shape: plenty of rides publish no scheduled times.
+      const leg = buildLeg(0, mkRoute(1080, 4200, { transitStep: true }), null);
+      const ride = leg.transit!;
+      assert.strictEqual(ride.boardISO, null);
+      assert.strictEqual(ride.alightISO, null);
+      assert.strictEqual(ride.boardLocation, null);
+      assert.strictEqual(ride.alightLocation, null);
+      // the names it DOES publish are untouched — this is additive
+      assert.strictEqual(ride.departStop, "Ossington Ave");
+      assert.strictEqual(ride.arriveStop, "Yonge St");
+    },
+  ],
+  [
+    "junk times and half-coordinates are DROPPED rather than carried",
+    () => {
+      const res: ComputeRoutesResponse = {
+        routes: [
+          {
+            duration: "900s",
+            distanceMeters: 3000,
+            legs: [
+              {
+                steps: [
+                  {
+                    transitDetails: {
+                      transitLine: { name: "501 Queen", nameShort: "501" },
+                      stopDetails: {
+                        departureStop: {
+                          name: "Queen St",
+                          // longitude missing — half a coordinate is not a place
+                          location: { latLng: { latitude: 43.65 } },
+                        },
+                        arrivalStop: {
+                          name: "Broadview",
+                          // out of range — a provider can't publish this
+                          location: { latLng: { latitude: 43.65, longitude: 999 } },
+                        },
+                        departureTime: "not a time",
+                        arrivalTime: "",
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      const ride = buildLeg(0, res, null).transit!;
+      assert.deepStrictEqual(
+        [ride.boardISO, ride.alightISO, ride.boardLocation, ride.alightLocation],
+        [null, null, null, null],
+        "unreadable values become null; a marker is never drawn at a guess"
+      );
+      assert.strictEqual(ride.lineName, "501 Queen", "the rest of the ride survives");
     },
   ],
   [

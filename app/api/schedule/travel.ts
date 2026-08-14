@@ -89,9 +89,17 @@ export interface ComputeRoutesResponse {
             textColor?: string;
             vehicle?: { type?: string };
           };
+          // Same parent path, same free ride: the board/alight INSTANTS and
+          // the two stops' COORDINATES arrive on every transit response and
+          // were being dropped at the parser. Reading them costs no field
+          // mask change, no extra call and no cent.
           stopDetails?: {
-            departureStop?: { name?: string };
-            arrivalStop?: { name?: string };
+            departureStop?: { name?: string; location?: { latLng?: Partial<LatLng> } };
+            arrivalStop?: { name?: string; location?: { latLng?: Partial<LatLng> } };
+            /** RFC3339 — when this ride LEAVES the departure stop */
+            departureTime?: string;
+            /** RFC3339 — when it REACHES the arrival stop */
+            arrivalTime?: string;
           };
         };
       }>;
@@ -114,6 +122,19 @@ export interface TransitSummary {
   stopCount: number | null;
   departStop: string;
   arriveStop: string;
+  /** The provider's SCHEDULED board/alight instants for this ride, as
+   * published for the departure instant this leg was priced at. DISPLAY
+   * ONLY — the schedule is built on `totalMinutes` (the padded door-to-door
+   * number) and must never be re-derived from these. Optional because a
+   * plan stored before this shipped has neither; null because a response
+   * may omit them, and null is honest where a guess would not be. */
+  boardISO?: string | null;
+  alightISO?: string | null;
+  /** Where you actually get on and off — the provider's own coordinates
+   * for the two stops. A transfer marker is drawn at one of these or not
+   * at all; nothing here is interpolated. */
+  boardLocation?: LatLng | null;
+  alightLocation?: LatLng | null;
 }
 
 export interface TravelLeg {
@@ -145,11 +166,35 @@ function parseDurationMinutes(duration?: string): number | null {
   return Math.ceil(parseFloat(m[1]) / 60);
 }
 
+/** A provider instant, kept VERBATIM when it parses and dropped when it
+ *  does not. The string crosses the wire into the store and back, so it is
+ *  checked here rather than trusted: a value we cannot read as a time can
+ *  only ever be rendered as one. */
+function instantOrNull(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 64) return null;
+  return Number.isNaN(Date.parse(value)) ? null : value;
+}
+
+/** A provider coordinate, or null. Anything that is not a real, in-range
+ *  pair is dropped whole — half a coordinate is not a place, and a marker
+ *  must never be drawn at a number we made up. */
+function latLngOrNull(value: unknown): LatLng | null {
+  if (!isRecord(value)) return null;
+  const { latitude, longitude } = value;
+  if (!finiteNumber(latitude) || latitude < -90 || latitude > 90) return null;
+  if (!finiteNumber(longitude) || longitude < -180 || longitude > 180) return null;
+  return { latitude, longitude };
+}
+
 // EVERY transit ride of the route, in riding order. This used to return
 // on the FIRST step with transitDetails — any transfer after it was
 // discarded before the data ever reached the UI, which is why the strip
 // could only ever name one line per leg.
-function extractTransitSegments(
+//
+// Exported for the MOCK fixture, which builds provider-shaped steps and
+// runs them through this same parser: the fixture layer supplies DATA and
+// never a second copy of the extraction.
+export function extractTransitSegments(
   route: NonNullable<ComputeRoutesResponse["routes"]>[number]
 ): TransitSummary[] {
   const segments: TransitSummary[] = [];
@@ -164,6 +209,7 @@ function extractTransitSegments(
         line.nameShort && line.name?.includes(line.nameShort)
           ? line.name
           : [line.nameShort, line.name].filter(Boolean).join(" ").trim();
+      const stops = td.stopDetails;
       segments.push({
         lineName: lineName || "transit",
         shortName: line.nameShort ?? null,
@@ -172,8 +218,13 @@ function extractTransitSegments(
         vehicle: line.vehicle?.type ?? null,
         headsign: td.headsign ?? "",
         stopCount: td.stopCount ?? null,
-        departStop: td.stopDetails?.departureStop?.name ?? "",
-        arriveStop: td.stopDetails?.arrivalStop?.name ?? "",
+        departStop: stops?.departureStop?.name ?? "",
+        arriveStop: stops?.arrivalStop?.name ?? "",
+        // the four facts that were arriving and being thrown away
+        boardISO: instantOrNull(stops?.departureTime),
+        alightISO: instantOrNull(stops?.arrivalTime),
+        boardLocation: latLngOrNull(stops?.departureStop?.location?.latLng),
+        alightLocation: latLngOrNull(stops?.arrivalStop?.location?.latLng),
       });
     }
   }

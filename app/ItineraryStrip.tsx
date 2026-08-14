@@ -1,9 +1,10 @@
 "use client";
 
-import { Fragment, useEffect, useId, useRef } from "react";
+import { Fragment, useEffect, useId, useRef, useState } from "react";
 import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 import { resolveCategory } from "./api/schedule/durations";
 import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
+import { RideDetail, buildTransitTimeline } from "./lib/transitDetail";
 import { originDisplayLabel } from "./lib/locationLabels";
 
 // Horizontal itinerary strip — the primary surface, sitting just under
@@ -20,11 +21,18 @@ export interface StripLeg {
   headsign?: string | null;
   stopCount?: number | null;
   departStop?: string | null;
-  boardISO?: string | null;
+  /** the SCHEDULER's two instants for this leg: when the previous stop's
+   * dwell ends (you leave) and when the next one starts (you arrive).
+   * `leaveISO` used to be called `boardISO` and was printed as "board",
+   * which named the wrong moment entirely — you do not board the train
+   * when you stand up from dinner. The real board time is the provider's,
+   * and it rides on each segment. */
+  leaveISO?: string | null;
   arriveISO?: string | null;
-  /** every ride of the leg in order (transfer bubbles); absent/empty on
-   * walk legs and on plans stored before segments existed */
-  segments?: BubbleSegment[] | null;
+  /** every ride of the leg in order (transfer bubbles + the provider's own
+   * board/alight instants); absent/empty on walk legs and on plans stored
+   * before segments existed */
+  segments?: RideDetail[] | null;
 }
 
 export interface StripStop {
@@ -125,17 +133,42 @@ function BubbleStack({ segments }: { segments: BubbleSegment[] }) {
   );
 }
 
+/**
+ * One travel leg. On a transit leg with the provider's own board/alight
+ * instants it can expand into the FOUR REAL INSTANTS — leave → board →
+ * alight → arrive, a board/alight pair per ride — so the walk to the stop,
+ * the wait, and each transfer are visible rather than folded invisibly
+ * into one span. Collapsed, it shows the two instants the scheduler owns,
+ * correctly named. Without usable provider times (a walk leg, an older
+ * stored plan, a ride the agency publishes no times for, or times that no
+ * longer match this leg's window) it keeps the single line — never a blank
+ * and never an invented time.
+ */
 function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
+  const [open, setOpen] = useState(false);
+  const timelineId = useId();
   const isTransit = leg.mode === "transit";
   const segments = isTransit ? leg.segments ?? [] : [];
+  const timeline = isTransit
+    ? buildTransitTimeline({
+        leaveISO: leg.leaveISO,
+        arriveISO: leg.arriveISO,
+        rides: segments,
+      })
+    : null;
   const legLabel =
     leg.mode === "transit"
       ? "transit leg"
       : leg.mode === "walk"
         ? "walking leg"
         : "travel estimate";
+  const at = (iso: string) => formatStopTime(iso, new Date(), timeZone);
   return (
-    <div className="lstrip__leg" role="listitem" aria-label={legLabel}>
+    <div
+      className={"lstrip__leg" + (timeline && open ? " lstrip__leg--open" : "")}
+      role="listitem"
+      aria-label={legLabel}
+    >
       {segments.length > 0 ? (
         <BubbleStack segments={segments} />
       ) : (
@@ -155,10 +188,53 @@ function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
           <div className="lstrip__legmeta">
             {leg.totalMinutes} min{leg.marginMinutes ? ` · incl ${leg.marginMinutes} buffer` : ""}
           </div>
-          {(leg.boardISO || leg.arriveISO) && (
+          {/* the two instants the SCHEDULER owns, named for what they are */}
+          {!(timeline && open) && (leg.leaveISO || leg.arriveISO) && (
             <div className="lstrip__legtimes">
-              board {formatStopTime(leg.boardISO ?? "", new Date(), timeZone)} · arrive {formatStopTime(leg.arriveISO ?? "", new Date(), timeZone)}
+              {leg.leaveISO ? `leave ${at(leg.leaveISO)}` : null}
+              {leg.leaveISO && leg.arriveISO ? " · " : null}
+              {leg.arriveISO ? `arrive ${at(leg.arriveISO)}` : null}
             </div>
+          )}
+          {timeline && (
+            <>
+              <button
+                type="button"
+                className="lstrip__legtoggle"
+                aria-expanded={open}
+                aria-controls={timelineId}
+                onClick={() => setOpen((v) => !v)}
+              >
+                {open ? "hide times" : "board times"}
+              </button>
+              {open && (
+                <ol className="lstrip__timeline" id={timelineId}>
+                  {timeline.map((row, i) => (
+                    <li
+                      key={i}
+                      className={`lstrip__tlrow lstrip__tlrow--${row.kind}`}
+                    >
+                      <span className="lstrip__tlwhat">{row.kind}</span>
+                      <span className="lstrip__tltime">{at(row.instantISO)}</span>
+                      {row.kind === "board" && (
+                        <span className="lstrip__tlwhere">
+                          {row.stop ? `${row.line} · ${row.stop}` : row.line}
+                        </span>
+                      )}
+                      {row.kind === "alight" && row.stop && (
+                        <span className="lstrip__tlwhere">{row.stop}</span>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              )}
+              {open && (
+                // The board/alight instants are the timetable for the
+                // departure this leg was priced at — a schedule, not a
+                // promise about the vehicle you will be standing on.
+                <p className="lstrip__tlnote">scheduled times</p>
+              )}
+            </>
           )}
         </>
       ) : leg.mode === "unknown" ? (

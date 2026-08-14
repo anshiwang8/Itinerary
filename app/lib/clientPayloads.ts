@@ -132,6 +132,10 @@ function nullableInstant(value: unknown): value is string | null {
   return value === null || validInstant(value);
 }
 
+function optionalInstant(value: unknown): value is string | null | undefined {
+  return value === undefined || nullableInstant(value);
+}
+
 function isLatLng(value: unknown): value is {
   latitude: number;
   longitude: number;
@@ -148,6 +152,10 @@ function isLatLng(value: unknown): value is {
     location.longitude >= -180 &&
     location.longitude <= 180
   );
+}
+
+function optionalLatLng(value: unknown): boolean {
+  return value === undefined || value === null || isLatLng(value);
 }
 
 function isHoursPoint(value: unknown): boolean {
@@ -203,7 +211,16 @@ function isTransitSummary(value: unknown): value is TransitSummary {
     (transit.stopCount === null ||
       nonNegativeInteger(transit.stopCount, 10_000)) &&
     typeof transit.departStop === "string" &&
-    typeof transit.arriveStop === "string"
+    typeof transit.arriveStop === "string" &&
+    // The provider's board/alight instants and stop coordinates. Optional
+    // AND nullable in both directions: absent on every plan stored before
+    // they were read, null whenever the response omits them. Present and
+    // malformed is the only rejection — a coordinate that fails here would
+    // otherwise be a map marker at a number nobody published.
+    optionalInstant(transit.boardISO) &&
+    optionalInstant(transit.alightISO) &&
+    optionalLatLng(transit.boardLocation) &&
+    optionalLatLng(transit.alightLocation)
   );
 }
 

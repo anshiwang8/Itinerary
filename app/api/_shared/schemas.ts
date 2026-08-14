@@ -360,6 +360,35 @@ export function parseScheduledStops(value: unknown): ScheduledStop[] {
   });
 }
 
+/**
+ * The board/alight instants and stop coordinates a transit ride now
+ * carries. Every field is OPTIONAL and NULLABLE, in both directions: a
+ * walk leg has no ride at all, a plan stored before this shipped has rides
+ * without these keys, and a provider response may publish a ride without
+ * them. Only a value that is PRESENT and malformed is rejected — the
+ * coordinates especially, since a bad one would be drawn on the map.
+ */
+function checkRideDetail(ride: unknown, where: string): void {
+  if (!isRecord(ride)) badRequest(`\`${where}\` must be an object.`);
+  for (const key of ["boardISO", "alightISO"] as const) {
+    const instant = ride[key];
+    if (instant !== undefined && instant !== null && !validIsoInstant(instant)) {
+      badRequest(`\`${where}.${key}\` must be a valid ISO timestamp or null.`);
+    }
+  }
+  for (const key of ["boardLocation", "alightLocation"] as const) {
+    const point = ride[key];
+    if (point === undefined || point === null) continue;
+    if (
+      !isRecord(point) ||
+      !validLatitude(point.latitude) ||
+      !validLongitude(point.longitude)
+    ) {
+      badRequest(`\`${where}.${key}\` must contain valid coordinates or be null.`);
+    }
+  }
+}
+
 export function parseTravelLegs(value: unknown, field = "legs"): TravelLeg[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > REQUEST_LIMITS.points - 1) {
@@ -393,6 +422,17 @@ export function parseTravelLegs(value: unknown, field = "legs"): TravelLeg[] {
       (!finiteNumber(entry.distanceMeters) || entry.distanceMeters < 0)
     ) {
       badRequest(`\`${field}[${index}].distanceMeters\` must be non-negative or null.`);
+    }
+    if (entry.transit !== undefined) {
+      checkRideDetail(entry.transit, `${field}[${index}].transit`);
+    }
+    if (entry.transitSegments !== undefined) {
+      if (!Array.isArray(entry.transitSegments)) {
+        badRequest(`\`${field}[${index}].transitSegments\` must be an array.`);
+      }
+      entry.transitSegments.forEach((ride, rideIndex) =>
+        checkRideDetail(ride, `${field}[${index}].transitSegments[${rideIndex}]`)
+      );
     }
     return entry as unknown as TravelLeg;
   });

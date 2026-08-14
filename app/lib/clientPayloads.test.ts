@@ -33,6 +33,16 @@ const transitSummary = {
   arriveStop: "Ossington Ave",
 };
 
+// the same ride as the provider now hands it over: board/alight instants
+// and the two stops' own coordinates, all optional and all nullable
+const rideWithTimes = {
+  ...transitSummary,
+  boardISO: "2026-07-03T23:07:00Z",
+  alightISO: "2026-07-03T23:24:00Z",
+  boardLocation: { latitude: 43.6501, longitude: -79.4204 },
+  alightLocation: { latitude: 43.6624, longitude: -79.4262 },
+};
+
 const transitLeg = {
   fromIndex: -1,
   mode: "transit",
@@ -174,6 +184,70 @@ const cases: Array<[string, () => void]> = [
               ...transitLeg,
               transitSegments: [{ ...transitSummary, stopCount: -1 }],
             },
+          ],
+        })
+      );
+    },
+  ],
+  [
+    "a ride's provider board/alight times + stop coordinates pass, and a leg WITHOUT them still does",
+    () => {
+      const timed = {
+        ...transitLeg,
+        transit: rideWithTimes,
+        transitSegments: [rideWithTimes],
+      };
+      const parsed = parseTravelPayload({ legs: [timed] }).legs[0];
+      assert.strictEqual(parsed.transit?.boardISO, rideWithTimes.boardISO);
+      assert.deepStrictEqual(
+        parsed.transitSegments?.[0].alightLocation,
+        rideWithTimes.alightLocation
+      );
+      // backward compat, both shapes: a plan stored before these existed
+      // (keys ABSENT) and a ride the agency published none for (null)
+      assert.ok(parseTravelPayload({ legs: [transitLeg] }).legs[0].transit);
+      assert.ok(
+        parseTravelPayload({
+          legs: [
+            {
+              ...transitLeg,
+              transit: {
+                ...transitSummary,
+                boardISO: null,
+                alightISO: null,
+                boardLocation: null,
+                alightLocation: null,
+              },
+            },
+          ],
+        }).legs[0].transit
+      );
+    },
+  ],
+  [
+    "a corrupt board time or transfer coordinate is REJECTED — it would be rendered, or drawn on the map",
+    () => {
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [{ ...transitLeg, transit: { ...transitSummary, boardISO: "soon" } }],
+        })
+      );
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [
+            {
+              ...transitLeg,
+              transitSegments: [
+                { ...transitSummary, alightLocation: { latitude: 43.6, longitude: 900 } },
+              ],
+            },
+          ],
+        })
+      );
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [
+            { ...transitLeg, transit: { ...transitSummary, boardLocation: { latitude: 43.6 } } },
           ],
         })
       );

@@ -17,6 +17,26 @@ test("mock pipeline is active and deterministic @mock", async ({ page }) => {
   // the cross-town home leg is the deterministic fixture transit line
   await expect(page.locator(".lstrip__legline").first()).toContainText("505 Fixture");
 
+  // The leg's two SCHEDULER instants are named for what they are: you
+  // LEAVE at the dwell end, you ARRIVE at the next stop's start. "board"
+  // used to label the first of those, which is the wrong moment entirely.
+  const transitLeg = page.locator('.lstrip__leg[aria-label="transit leg"]').first();
+  await expect(transitLeg.locator(".lstrip__legtimes")).toContainText(/^leave .* · arrive /);
+
+  // The fixture ride carries the provider's own board/alight times (it
+  // publishes them through the REAL parser), so the leg can expand into
+  // the four real instants. This proves the plumbing end to end — the
+  // visual itself, and any leg with a TRANSFER, stays live-verify-only.
+  const toggle = transitLeg.getByRole("button", { name: "board times" });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+  const rows = transitLeg.locator(".lstrip__tlrow");
+  await expect(rows).toHaveCount(4); // leave → board → alight → arrive
+  await expect(rows.nth(1)).toContainText("505 Fixture");
+  await expect(transitLeg.locator(".lstrip__tlnote")).toContainText("scheduled");
+  await transitLeg.getByRole("button", { name: "hide times" }).click();
+  await expect(rows).toHaveCount(0);
+
   // Google requires a caution for every displayed WALK route. It is
   // visible in each walking leg card and exposed as an accessible note.
   const walkingLegs = page.locator('.lstrip__leg[aria-label="walking leg"]');

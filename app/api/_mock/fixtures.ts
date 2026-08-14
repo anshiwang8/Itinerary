@@ -18,6 +18,7 @@ import type { GeocodeRequest } from "../geocode/geocode";
 // openness reasoning of its own (see the availability-seam note below)
 import type { CurrentOpeningHours } from "../places/search/hours";
 import type { LatLng, TravelLeg } from "../schedule/travel";
+import { extractTransitSegments } from "../schedule/travel";
 import type { Selection, SelectModelCall } from "../select/selectVenues";
 import { GENERAL_CATEGORY, isGeneralCategory } from "../places/search/searchPlaces";
 import {
@@ -1028,11 +1029,19 @@ function haversineKm(a: LatLng, b: LatLng): number {
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 
+/** How long the fixture's traveller spends walking to the stop before the
+ *  ride leaves, and off the far end after it arrives. Any pair inside the
+ *  leg's own raw minutes would do — what matters is that board and alight
+ *  are strictly INSIDE the leg, the way a real journey's are. */
+const MOCK_WALK_TO_STOP_MIN = 2;
+const MOCK_WALK_FROM_STOP_MIN = 1;
+
 export function mockLeg(
   fromIndex: number,
   from: LatLng,
   to: LatLng,
-  excludeTransit = false
+  excludeTransit = false,
+  departureISO?: string | null
 ): TravelLeg {
   const km = haversineKm(from, to);
   const distanceMeters = Math.round(km * 1000);
@@ -1049,20 +1058,60 @@ export function mockLeg(
     };
   }
   const raw = Math.max(8, Math.round(km * 4));
-  // one ride, mirrored into transitSegments exactly as the real
-  // extraction does (transit === transitSegments[0]) — the fixture layer
-  // supplies DATA, the bubble grouping is LOGIC and runs for real
-  const ride = {
-    lineName: "505 Fixture",
-    shortName: "505",
-    color: "#DA291C",
-    textColor: "#FFFFFF",
-    vehicle: "TRAM",
-    headsign: "Mockbound",
-    stopCount: Math.max(2, Math.round(km * 3)),
-    departStop: "Fixture St at Mock Ave",
-    arriveStop: "Ossington Stand-In",
-  };
+  // ONE ride, described the way the PROVIDER describes one — a
+  // steps[].transitDetails object — and read back through the REAL
+  // `extractTransitSegments`. The fixture layer supplies DATA; the parse
+  // that ships is the parse mock e2e exercises, so a change that breaks
+  // the board/alight extraction cannot pass here while passing there.
+  //
+  // Deliberately still ONE ride: the leg's minutes, line name and stop
+  // count are pinned by e2e, and a fixture transfer would rewrite the
+  // strip's leg line. Transfer MARKERS therefore have no mock coverage —
+  // the same live-verify-only wall the map's real geometry has.
+  const departureMs = departureISO ? Date.parse(departureISO) : NaN;
+  const at = (offsetMin: number): string | undefined =>
+    Number.isFinite(departureMs)
+      ? new Date(departureMs + offsetMin * 60_000).toISOString()
+      : undefined;
+  const [ride] = extractTransitSegments({
+    legs: [
+      {
+        steps: [
+          { transitDetails: undefined }, // walk to the stop
+          {
+            transitDetails: {
+              headsign: "Mockbound",
+              stopCount: Math.max(2, Math.round(km * 3)),
+              transitLine: {
+                name: "505 Fixture",
+                nameShort: "505",
+                color: "#DA291C",
+                textColor: "#FFFFFF",
+                vehicle: { type: "TRAM" },
+              },
+              stopDetails: {
+                departureStop: {
+                  name: "Fixture St at Mock Ave",
+                  location: { latLng: from },
+                },
+                arrivalStop: {
+                  name: "Ossington Stand-In",
+                  location: { latLng: to },
+                },
+                // Present only when this leg was priced at a known
+                // instant — a fixture that does not know when the ride
+                // departs must publish no time, exactly as an agency
+                // that does not would. That path is the display's
+                // single-line fallback, and it stays exercised.
+                departureTime: at(MOCK_WALK_TO_STOP_MIN),
+                arrivalTime: at(raw - MOCK_WALK_FROM_STOP_MIN),
+              },
+            },
+          },
+        ],
+      },
+    ],
+  });
   return {
     fromIndex,
     mode: "transit",
@@ -1076,9 +1125,32 @@ export function mockLeg(
   };
 }
 
-export function mockTravelLegs(points: LatLng[]): TravelLeg[] {
+/**
+ * The fixture stand-in for `getTravelLegs`, and it accumulates each leg's
+ * departure instant the same way: outing start, then travel and dwell.
+ * That is not a second copy of product logic — it is the provider-call
+ * SEQUENCE this function replaces wholesale, and the fixture's board times
+ * are only honest if they sit inside the leg the schedule actually builds.
+ */
+export function mockTravelLegs(
+  points: LatLng[],
+  departureTime?: string,
+  dwellMinutes: number[] = []
+): TravelLeg[] {
   if (points.length < 2) return [];
-  return points.slice(0, -1).map((from, i) => mockLeg(i, from, points[i + 1]));
+  let cursorMs = departureTime ? Date.parse(departureTime) : NaN;
+  const legs: TravelLeg[] = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const depart = Number.isFinite(cursorMs)
+      ? new Date(cursorMs).toISOString()
+      : undefined;
+    const leg = mockLeg(i, points[i], points[i + 1], false, depart);
+    legs.push(leg);
+    if (Number.isFinite(cursorMs)) {
+      cursorMs += (leg.totalMinutes + (dwellMinutes[i + 1] ?? 0)) * 60_000;
+    }
+  }
+  return legs;
 }
 
 /** Provider-shaped Geocoding API data. The route feeds this through the
@@ -1257,8 +1329,8 @@ export function mockSwapDeps(
     },
     searchPools: async (_parsed, categories) => mockPools(categories),
     selectVenues: async (parsed, pools) => mockSelect(parsed, pools),
-    getSingleLeg: async (origin, destination, fromIndex, _departureTime, excludeTransit) =>
-      mockLeg(fromIndex, origin, destination, excludeTransit),
+    getSingleLeg: async (origin, destination, fromIndex, departureTime, excludeTransit) =>
+      mockLeg(fromIndex, origin, destination, excludeTransit, departureTime),
     isUsableAt,
     getWeather: async () => mockWeather(),
   };
@@ -1268,8 +1340,8 @@ export function mockRerouteDeps(): RerouteDeps {
   return {
     searchPools: async (_parsed, categories) => mockPools(categories),
     selectVenues: async (parsed, pools, slots) => mockSelect(parsed, pools, slots),
-    getSingleLeg: async (origin, destination, fromIndex, _departureTime, excludeTransit) =>
-      mockLeg(fromIndex, origin, destination, excludeTransit),
+    getSingleLeg: async (origin, destination, fromIndex, departureTime, excludeTransit) =>
+      mockLeg(fromIndex, origin, destination, excludeTransit, departureTime),
     getWeather: async () => mockWeather(),
   };
 }

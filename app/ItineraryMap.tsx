@@ -5,6 +5,7 @@ import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 import { formatStopTime } from "./lib/timeLabels";
 import { originDisplayLabel } from "./lib/locationLabels";
 import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
+import { RideDetail, transferPoints } from "./lib/transitDetail";
 import { createRetryableLoader } from "./lib/retryableLoader";
 import { displayableRouteMode } from "./lib/mapRoutePolicy";
 
@@ -26,8 +27,9 @@ export interface MapStop {
   polylineToNext?: string | null;
   /** transit line detail for the leg leaving this stop */
   legLabel?: string | null;
-  /** every ride of that leg, in order (transfer bubbles) */
-  legSegments?: BubbleSegment[] | null;
+  /** every ride of that leg, in order — the bubbles, and the provider's
+   * own stop coordinates that place the transfer markers */
+  legSegments?: RideDetail[] | null;
   status?: "upcoming" | "active" | "completed" | "skipped";
   /** replanned in this session → acid green */
   changed?: boolean;
@@ -43,7 +45,7 @@ export interface MapHome {
   legModeToNext?: "transit" | "walk" | "unknown";
   polylineToNext?: string | null;
   legLabel?: string | null;
-  legSegments?: BubbleSegment[] | null;
+  legSegments?: RideDetail[] | null;
   leaveBy?: string | null;
 }
 
@@ -361,6 +363,34 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     }
   }
 
+  // Where you CHANGE LINES — pinned at the provider's own coordinate for
+  // the stop you get off at (or, failing that, the one you get on at).
+  // Deliberately NOT midPx: a leg label is a caption for the whole leg and
+  // the midpoint is a fine place to hang one, but a transfer is a REAL
+  // PLACE, and putting it anywhere but its own coordinate would be
+  // inventing a fact. A transfer with no published coordinate gets no
+  // marker at all.
+  const transferMarks: {
+    key: string;
+    x: number | string;
+    y: number | string;
+    label: string;
+  }[] = [];
+  const addTransfers = (legKey: string, segs?: RideDetail[] | null) => {
+    for (const t of transferPoints(segs)) {
+      const p = px(t.latitude, t.longitude);
+      if (!p) continue;
+      transferMarks.push({
+        key: `${legKey}-${t.key}`,
+        x: p.x,
+        y: p.y,
+        label: `change from ${t.fromLine} to ${t.toLine}${t.stopName ? ` at ${t.stopName}` : ""}`,
+      });
+    }
+  };
+  if (home) addTransfers("home", home.legSegments);
+  for (const stop of stops) addTransfers(stop.id, stop.legSegments);
+
   return (
     <div className="mapwrap" data-map-state={mapState}>
       <div
@@ -420,6 +450,25 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
               </span>
             )}
             {l.text}
+          </div>
+        ))}
+        {/* transfer points: hollow ring + change glyph, so it reads as
+            "change here" and never as another stop on the day. The full
+            "from line → to line at stop" text lives in the strip's
+            timeline, which is where a screen reader meets it. */}
+        {transferMarks.map((t) => (
+          <div
+            key={t.key}
+            className="mk mk--transfer"
+            style={{ left: t.x, top: t.y }}
+            title={t.label}
+            aria-hidden="true"
+          >
+            <div className="mk__dot">
+              <svg viewBox="0 0 24 24">
+                <path d="M7.5 4 3 8.5l4.5 4.5v-3H15V7H7.5zm9 7v3H9v2.5h7.5v3l4.5-4.5z" />
+              </svg>
+            </div>
           </div>
         ))}
         {home &&

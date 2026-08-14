@@ -33,9 +33,12 @@ export async function POST(request: NextRequest) {
     const departureTime = parseOptionalInstant(body.departureTime, "departureTime");
     const dwellMinutes = parseDwellMinutes(body.dwellMinutes, points.length);
 
-    // fixture seam: deterministic distance-derived legs, no Routes call
+    // fixture seam: deterministic distance-derived legs, no Routes call.
+    // The departure instant and dwells go in for the same reason the live
+    // call gets them — each leg is priced (and its board/alight times
+    // published) at its OWN departure, not the outing's start.
     if (isMockMode()) {
-      return apiJson(ctx, { legs: mockTravelLegs(points) });
+      return apiJson(ctx, { legs: mockTravelLegs(points, departureTime, dwellMinutes) });
     }
     const apiKey = requireServiceKey(process.env.GOOGLE_ROUTES_API_KEY);
     const legs = await getTravelLegs(apiKey, points, departureTime, dwellMinutes);
