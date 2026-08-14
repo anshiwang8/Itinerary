@@ -907,6 +907,63 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "the HOME leg is priced at when you LEAVE HOME, never at 'now'",
+    async () => {
+      // Every other inbound leg departs at the previous stop's committed
+      // end. The home leg has no previous stop and used to be priced with
+      // NO departure instant, which hands the provider the CURRENT clock:
+      // re-price an evening plan in the morning and both the minutes and
+      // the board/alight instants come back on the wrong timetable — the
+      // instants hours before you leave, which is what made the strip's
+      // home leg stop opening while every between-stops leg kept working.
+      const it = mkItinerary();
+      it.homeLeg = { ...leg(0, "transit", 20), fromIndex: -1 };
+      const departures: Array<{ fromIndex: number; departure: string | undefined }> = [];
+      const deps = mkDeps({ legMin: 10 });
+      const realLeg = deps.getSingleLeg;
+      deps.getSingleLeg = async (o, d, fi, dep, ex) => {
+        departures.push({ fromIndex: fi, departure: dep });
+        return realLeg(o, d, fi, dep, ex);
+      };
+      // swapping stop 0 re-prices its INBOUND leg, which comes from home
+      const res = await swapStop(it, 0, "somewhere else", new Date(T(17, 0)), deps);
+      assert.ok(res.swapped);
+      const home = departures.find((c) => c.fromIndex === -1);
+      assert.ok(home, `expected a home-leg fetch, got ${JSON.stringify(departures)}`);
+      assert.notStrictEqual(
+        home.departure,
+        undefined,
+        "no departure instant means the provider prices it for right now"
+      );
+      // dinner starts 19:00 and the stored home leg is 20 minutes long, so
+      // you leave at 18:40 — the same subtraction the strip renders as
+      // "leave by" under the home card
+      assert.strictEqual(new Date(home.departure!).getTime(), new Date(T(18, 40)).getTime());
+    },
+  ],
+  [
+    "a plan with NO stored home leg still prices it inside the plan, not at 'now'",
+    async () => {
+      // the legacy shape (createItinerary without a homeLeg): there is no
+      // length to subtract, so the anchor's own start stands in. Being
+      // minutes out on the timetable we ask for is a different kind of
+      // error from being hours out.
+      const it = mkItinerary();
+      assert.strictEqual(it.homeLeg, undefined, "fixture has no home leg");
+      const departures: Array<string | undefined> = [];
+      const deps = mkDeps({ legMin: 10 });
+      const realLeg = deps.getSingleLeg;
+      deps.getSingleLeg = async (o, d, fi, dep, ex) => {
+        if (fi === -1) departures.push(dep);
+        return realLeg(o, d, fi, dep, ex);
+      };
+      const res = await swapStop(it, 0, "somewhere else", new Date(T(17, 0)), deps);
+      assert.ok(res.swapped);
+      assert.strictEqual(departures.length > 0, true);
+      assert.strictEqual(new Date(departures[0]!).getTime(), new Date(T(19, 0)).getTime());
+    },
+  ],
+  [
     "MULTI-CITY: an absolute time-swap lands 6pm in the PLAN's zone, never Toronto's",
     async () => {
       // Regression pin for the Phase-5 timeChange fix. A Vancouver plan

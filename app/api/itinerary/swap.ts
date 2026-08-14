@@ -887,6 +887,40 @@ interface AnchorInbound {
   earliestStartMs: number;
 }
 
+/**
+ * When you LEAVE HOME for an anchor that starts at `anchorStart`.
+ *
+ * Every other inbound leg departs at the previous stop's committed end — a
+ * stored instant — and is priced against it. The home leg has no previous
+ * stop, and it used to be priced with NO departure instant at all, which
+ * hands Google "now": re-price a 7pm plan at 9am and the ride comes back on
+ * this morning's timetable. That is wrong twice over. The MINUTES are the
+ * wrong time of day's (verified live: 68 min at 9am against 70 at 7pm, and
+ * off-peak against rush hour it is worse), and the provider's board/alight
+ * instants — which the strip shows — land nine and a half hours before you
+ * leave, so `buildTransitTimeline`'s staleness guard refuses them and the
+ * home leg loses its breakdown for the rest of the plan's life. Every
+ * between-stops leg was unaffected, which is exactly the shape the bug
+ * showed up as: the FIRST leg, and only the first, stopped opening.
+ *
+ * The instant is the plan's own "leave by" — the anchor's start less the
+ * home leg we already have, which is the same subtraction the strip renders
+ * under the home card. Bootstrapping the new leg's departure from the old
+ * leg's length is the accumulation `getTravelLegs` already does; a leg's
+ * length cannot be known before it is priced, and being minutes out on the
+ * timetable we ASK for is not the same kind of error as being hours out.
+ * With no home leg stored (a legacy plan) `anchorStart` is the fallback:
+ * still the right evening, which is what the guard and the pricing need.
+ */
+function homeDeparture(itinerary: Itinerary, anchorStart: Date): string {
+  const travel = itinerary.homeLeg?.totalMinutes;
+  const departMs =
+    typeof travel === "number" && Number.isFinite(travel)
+      ? anchorStart.getTime() - travel * 60_000
+      : anchorStart.getTime();
+  return new Date(departMs).toISOString();
+}
+
 async function planAnchorInbound(
   itinerary: Itinerary,
   timedIdx: number[],
@@ -918,7 +952,7 @@ async function planAnchorInbound(
     origin,
     anchorLoc,
     prevStop ? timedPosition - 1 : HOME_LEG_INDEX,
-    prevStop?.end_time ?? undefined
+    prevStop?.end_time ?? homeDeparture(itinerary, anchorStart)
   );
   if (!leg) return null;
   // A FACT, not a verdict. `null` above means "we cannot verify this route at

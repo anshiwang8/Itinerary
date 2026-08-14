@@ -194,9 +194,89 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
-    "STALENESS: an alight AFTER you arrive is refused too",
+    "THE WAIT: an alight after the scheduler's arrive drops the ARRIVE ROW, not the timeline",
     () => {
-      assert.strictEqual(timeline({ arriveISO: "2026-07-03T19:20:00-04:00" }), null);
+      // Fresh data does this routinely. `arrive` is leave + totalMinutes,
+      // and totalMinutes is the provider's route duration + margin —
+      // measured from the moment you start moving, so the wait on the
+      // platform is outside it. Bracketing published instants with that
+      // forecast used to suppress the whole breakdown.
+      const rows = timeline({ arriveISO: "2026-07-03T19:20:00-04:00" })!;
+      assert.notStrictEqual(rows, null, "the published instants are all real and in order");
+      assert.deepStrictEqual(
+        rows.map((r) => r.kind),
+        ["leave", "board", "alight"],
+        "the forecast yields to the published instant it contradicts"
+      );
+      // ...and never by printing an arrival earlier than the ride that
+      // delivers you
+      const instants = rows.map((r) => Date.parse(r.instantISO));
+      assert.ok(instants.every((ms, i) => i === 0 || ms >= instants[i - 1]));
+    },
+  ],
+  [
+    "THE WAIT, measured: the live 3-ride leg this fix was found on opens",
+    () => {
+      // Verbatim from the Routes API, a cross-town home leg priced for a
+      // 00:00 departure: duration 77 min (+5 margin) while the first board
+      // is 15.5 min in — so the last alight lands 5.4 min past the
+      // scheduler's arrival, and the leg used to render no button at all.
+      const leaveISO = "2026-08-15T00:00:00.000Z";
+      const arriveISO = "2026-08-15T01:22:00.000Z"; // leave + 82 min
+      const ride = (
+        lineName: string,
+        boardISO: string,
+        alightISO: string
+      ): RideDetail => ({ lineName, shortName: null, boardISO, alightISO });
+      const rows = buildTransitTimeline({
+        leaveISO,
+        arriveISO,
+        rides: [
+          ride("42 Cummer", "2026-08-15T00:15:28Z", "2026-08-15T00:26:00Z"),
+          ride("Line 1 Yonge - University", "2026-08-15T00:34:11Z", "2026-08-15T00:59:36Z"),
+          ride("506 Carlton", "2026-08-15T01:07:50Z", "2026-08-15T01:27:25Z"),
+        ],
+      });
+      assert.ok(rows, "every provider instant here is real, published and in order");
+      assert.deepStrictEqual(rows!.map((r) => r.kind), [
+        "leave",
+        "board",
+        "alight",
+        "board",
+        "alight",
+        "board",
+        "alight",
+      ]);
+      // and THAT is what makes the card tappable — the rule in front of the
+      // OR is "has a timeline", so no tap could reach it while this was null
+      assert.strictEqual(
+        shouldShowTimeline({
+          isTransit: true,
+          hasTimeline: rows !== null,
+          isActiveNow: false,
+          isSelected: true,
+        }),
+        true
+      );
+    },
+  ],
+  [
+    "COHERENCE: a ride span longer than the whole leg is refused",
+    () => {
+      // the tail guard that replaced the instant comparison: elapsed
+      // against elapsed, which the two clocks make comparable where their
+      // instants are not. 17 minutes of riding cannot fit a 10-minute leg.
+      assert.strictEqual(
+        timeline({ arriveISO: "2026-07-03T19:10:00-04:00" }),
+        null,
+        "riding 19:07→19:24 inside a leg that lasts 19:00→19:10 is not a journey"
+      );
+    },
+  ],
+  [
+    "COHERENCE: an inverted window (arrive before leave) is refused",
+    () => {
+      assert.strictEqual(timeline({ arriveISO: "2026-07-03T18:50:00-04:00" }), null);
     },
   ],
   [

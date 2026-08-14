@@ -87,13 +87,38 @@ const trimmed = (value: unknown): string | null => {
  *  - ANY ride is missing a board or an alight. A partial timeline would
  *    silently drop a ride from the middle of a journey and still read as
  *    a complete sequence;
- *  - the instants are not in order. This is the STALENESS guard: provider
- *    times are anchored to the departure this leg was priced at, so a plan
- *    that moved underneath an untouched leg leaves times that no longer
- *    belong to it — and a board time before you leave, or an alight after
- *    you have arrived, is exactly the shape that mismatch takes. Rather
+ *  - a board time falls BEFORE you leave, or a ride alights after the next
+ *    one boards. This is the STALENESS guard: provider times are anchored
+ *    to the departure this leg was priced at, so a plan that moved later
+ *    underneath an untouched leg leaves times that no longer belong to it,
+ *    and boarding before you leave is exactly the shape that takes. Rather
  *    than show a stale instant as though it were current, the leg falls
- *    back to the two instants the scheduler owns.
+ *    back to the two instants the scheduler owns;
+ *  - the rides' own span does not fit inside the leg's budget
+ *    (alight_last − board₁ > arrive − leave). A journey longer than the
+ *    whole leg is incoherent whatever anchored it.
+ *
+ * THE SCHEDULER'S ARRIVE DOES NOT BOUND A PUBLISHED INSTANT, and that
+ * asymmetry is deliberate (2026-08-14). `arrive` is `leave + totalMinutes`,
+ * and `totalMinutes` is the provider's route DURATION plus our margin —
+ * measured from the moment the traveller starts moving, NOT from the
+ * departure instant we asked about. The wait on the platform is outside it:
+ * verified live against the Routes API, a leg priced for a 00:00 departure
+ * boarded at 00:15 and reported a 77-minute duration, so the last alight
+ * landed five minutes PAST the scheduler's arrival on perfectly fresh data.
+ * Bracketing published instants with that forecast suppressed the whole
+ * breakdown on roughly a third of real transit legs — the long cross-town
+ * ones with a transfer, which is the shape the breakdown exists for.
+ *
+ * So three of the four instants are FACTS (leave is the instant this leg
+ * was priced at; board and alight are what the agency published) and ARRIVE
+ * alone is a forecast. When the forecast contradicts a published fact, the
+ * FORECAST is what yields: the arrive row is dropped and the timeline ends
+ * at the last alight, rather than printing an arrival earlier than the ride
+ * that delivers you. Nothing is invented and no row is ever out of order.
+ * (What the plan is really saying there is that it under-budgeted the leg
+ * by the wait — a SCHEDULING question, and out of this file's reach: the
+ * schedule runs on `totalMinutes` and nothing here may re-derive it.)
  */
 export function buildTransitTimeline(input: {
   leaveISO?: string | null;
@@ -109,11 +134,13 @@ export function buildTransitTimeline(input: {
 
   const rows: TimelineRow[] = [{ kind: "leave", instantISO: input.leaveISO as string }];
   let previousMs = leaveMs;
+  let firstBoardMs: number | null = null;
   for (const [rideIndex, ride] of rides.entries()) {
     const boardMs = instantMs(ride.boardISO);
     const alightMs = instantMs(ride.alightISO);
     if (boardMs === null || alightMs === null) return null;
     if (boardMs < previousMs || alightMs < boardMs) return null;
+    if (firstBoardMs === null) firstBoardMs = boardMs;
     rows.push({
       kind: "board",
       instantISO: ride.boardISO as string,
@@ -130,8 +157,19 @@ export function buildTransitTimeline(input: {
     });
     previousMs = alightMs;
   }
-  if (arriveMs < previousMs) return null;
-  rows.push({ kind: "arrive", instantISO: input.arriveISO as string });
+  // Coherence, provider-span against leg-budget — two ELAPSED times, which
+  // are comparable where the two clocks' instants are not. Fresh data always
+  // clears it (the rides' span excludes both end walks and the wait, all of
+  // which sit inside the duration `totalMinutes` is built from), and an
+  // inverted window (arrive before leave) fails it, since no span is
+  // negative.
+  if (firstBoardMs !== null && previousMs - firstBoardMs > arriveMs - leaveMs) {
+    return null;
+  }
+  // The forecast yields to the published instant — see the header.
+  if (arriveMs >= previousMs) {
+    rows.push({ kind: "arrive", instantISO: input.arriveISO as string });
+  }
   return rows;
 }
 
