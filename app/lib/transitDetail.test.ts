@@ -43,6 +43,13 @@ const RIDE_TWO: RideDetail = {
 const timeline = (over: Partial<Parameters<typeof buildTransitTimeline>[0]> = {}) =>
   buildTransitTimeline({ leaveISO: LEAVE, arriveISO: ARRIVE, rides: [RIDE_ONE], ...over });
 
+/** just the two provider instants of a ride — for building a second ride
+ *  that runs LATER on the same line the first one did */
+const timesOf = (ride: RideDetail) => ({
+  boardISO: ride.boardISO,
+  alightISO: ride.alightISO,
+});
+
 const cases: Array<[string, () => void]> = [
   [
     "single ride: leave → board → alight → arrive, in that order",
@@ -105,6 +112,29 @@ const cases: Array<[string, () => void]> = [
       // the transfer gap is now visible: alight 19:24 → board 19:29
       const instants = rows.map((r) => Date.parse(r.instantISO));
       assert.ok(instants.every((ms, i) => i === 0 || ms >= instants[i - 1]));
+    },
+  ],
+  [
+    "every board/alight row names the RIDE it belongs to — the row's own route badge",
+    () => {
+      const rows = timeline({ rides: [RIDE_ONE, RIDE_TWO] })!;
+      assert.deepStrictEqual(
+        rows
+          .filter((r) => r.kind === "board" || r.kind === "alight")
+          .map((r) => (r.kind === "board" || r.kind === "alight" ? r.rideIndex : -1)),
+        [0, 0, 1, 1]
+      );
+      // by INDEX, not by name: a leg can ride the same line twice, and
+      // matching on the name would hand the second ride the first's badge
+      const twice = timeline({ rides: [RIDE_ONE, { ...RIDE_ONE, ...timesOf(RIDE_TWO) }] })!;
+      const boards = twice.filter((r) => r.kind === "board");
+      assert.deepStrictEqual(
+        boards.map((r) => (r.kind === "board" ? [r.line, r.rideIndex] : null)),
+        [
+          ["63 Ossington", 0],
+          ["63 Ossington", 1],
+        ]
+      );
     },
   ],
   [

@@ -14,8 +14,18 @@ test("mock pipeline is active and deterministic @mock", async ({ page }) => {
   // highest-rated fixture per category, every run
   expect(names).toEqual(["Velvet Fig", "Ten O'Clock Curfew"]);
 
-  // the cross-town home leg is the deterministic fixture transit line
-  await expect(page.locator(".lstrip__legline").first()).toContainText("505 Fixture");
+  // The cross-town home leg is the deterministic fixture transit line, and
+  // its identity is now a BADGE where the route is referenced plus the
+  // place beside it: the circle says 505, the text says Fixture, and the
+  // number is not spelled out a second time. The published name still
+  // travels for a screen reader, which is why the line's own text (which
+  // includes the sr-only span) still reads "505 Fixture".
+  const homeLegLine = page.locator(".lstrip__legline").first();
+  await expect(homeLegLine).toContainText("505 Fixture");
+  await expect(homeLegLine.locator(".lstrip__bubble")).toHaveText("505");
+  await expect(homeLegLine.locator(".lstrip__lineplace")).toHaveText("Fixture");
+  // ...and the stack the badges came from is gone from every card
+  await expect(page.locator(".lstrip__bubbles")).toHaveCount(0);
 
   // Park the clock well before the plan so the leg's visibility is decided
   // by the TAP alone: a leg whose window contains "now" shows its times
@@ -44,6 +54,10 @@ test("mock pipeline is active and deterministic @mock", async ({ page }) => {
   await legSelect.click();
   await expect(rows).toHaveCount(4); // leave → board → alight → arrive
   await expect(rows.nth(1)).toContainText("505 Fixture");
+  // the route's badge rides with the instant you get ON it, and only that
+  // one: leave, alight and arrive are not places you board a route
+  await expect(transitLeg.locator(".lstrip__tlrow .lstrip__bubble")).toHaveCount(1);
+  await expect(transitLeg.locator(".lstrip__tlrow--board .lstrip__bubble")).toHaveText("505");
   await expect(transitLeg.locator(".lstrip__tlnote")).toContainText("scheduled");
   await legSelect.click();
   await expect(rows).toHaveCount(0);
@@ -66,6 +80,9 @@ test("mock pipeline is active and deterministic @mock", async ({ page }) => {
   const walkingCount = await walkingLegs.count();
   expect(walkingCount).toBeGreaterThan(0);
   await expect(walkingLegs.locator(".lstrip__walkwarning")).toHaveCount(walkingCount);
+  // a walk has no route, so it gets no badge — it keeps its mode glyph
+  await expect(walkingLegs.locator(".lstrip__bubble")).toHaveCount(0);
+  await expect(walkingLegs.first().locator(".lstrip__legicon")).toBeVisible();
   for (let i = 0; i < walkingCount; i++) {
     const warning = walkingLegs
       .nth(i)

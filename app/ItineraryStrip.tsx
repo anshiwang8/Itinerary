@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useId, useRef, useState } from "react";
 import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 import { resolveCategory } from "./api/schedule/durations";
-import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
+import { LineBadge, lineBadges } from "./lib/transitBubbles";
 import {
   RideDetail,
   buildTransitTimeline,
@@ -111,32 +111,83 @@ function TransitIcon({ mode }: { mode: StripLeg["mode"] }) {
   );
 }
 
-/** The stacked-mini-circle treatment: pairs of small circles, an odd
- *  leftover as one full-size circle — grouping shared with the map via
- *  transitBubbles. Line colour comes from the agency when published. */
-function BubbleStack({ segments }: { segments: BubbleSegment[] }) {
-  // spans, not divs: on an expandable leg this whole block sits INSIDE the
-  // card's selection button, whose content model is phrasing content. Both
-  // classes already carry their own `display: flex`, so nothing moves.
+/** The route badge: the agency's own designation in the line's own colour.
+ *  The SAME circle it has always been — colour, shape, border, shadow — and
+ *  what changed is only WHERE it sits. It used to stack above the card with
+ *  the route number ALSO spelled out in the text below it; it now sits
+ *  inline at each place its route is referenced, and the text beside it is
+ *  the place rather than the number a second time.
+ *
+ *  Decorative by construction: an unpublished colour falls back to ink and
+ *  an unpublished short name to initials, so there is never a blank circle,
+ *  and the published line name travels beside it in text for a screen
+ *  reader (spans, not divs — this sits inside the card's selection button,
+ *  whose content model is phrasing content). */
+function RouteBadge({ line }: { line: LineBadge }) {
   return (
-    <span className="lstrip__bubbles" aria-hidden="true">
-      {groupBubbleUnits(segments).map((unit, i) => (
-        <span key={i} className={unit.length === 2 ? "lstrip__bunit" : "lstrip__bunit lstrip__bunit--single"}>
-          {unit.map((seg, j) => (
-            <span
-              key={j}
-              className={unit.length === 2 ? "lstrip__bubble lstrip__bubble--sm" : "lstrip__bubble"}
-              style={{
-                background: seg.color || "var(--ink)",
-                color: seg.textColor || "#FFFFFF",
-              }}
-              title={seg.lineName}
-            >
-              {bubbleLabel(seg)}
-            </span>
-          ))}
+    <span
+      className="lstrip__bubble lstrip__bubble--inline"
+      style={{
+        background: line.segment.color || "var(--ink)",
+        color: line.segment.textColor || "#FFFFFF",
+      }}
+      title={line.segment.lineName}
+      aria-hidden="true"
+    >
+      {line.badge}
+    </span>
+  );
+}
+
+/** What the leg IS: a route badge where each route is referenced, the place
+ *  that route serves beside it, and an arrow BETWEEN the rides of a
+ *  transfer. One ride is one badge and no arrow; a leg with no known rides
+ *  never reaches here and keeps its mode glyph and its plain line text. */
+function LegLines({
+  lines,
+  stopCount,
+}: {
+  lines: LineBadge[];
+  stopCount?: number | null;
+}) {
+  return (
+    <span className="lstrip__lineid">
+      {/* ORDINARY TEXT FLOW, not a row of boxes: the badge is an inline
+          element sitting on the text's own line, so a long place name wraps
+          across the FULL width of the card the way the spelled-out line
+          always did. Laid out as flex rows instead, each name is squeezed
+          into whatever is left beside its circle and breaks mid-word. */}
+      {lines.map((line, i) => (
+        <span className="lstrip__lineseg" key={i}>
+          {i > 0 && (
+            <>
+              <span className="lstrip__linearrow" aria-hidden="true">
+                →
+              </span>{" "}
+              <span className="sr-only">, then </span>
+            </>
+          )}
+          <RouteBadge line={line} />
+          {/* the badge is a colour and a designation; the line's PUBLISHED
+              name is what a screen reader should hear, so the visible place
+              text beside it is the duplicate that hides */}
+          <span className="sr-only">{line.segment.lineName}</span>
+          {line.place && (
+            <>
+              {" "}
+              <span className="lstrip__lineplace" aria-hidden="true">
+                {line.place}
+              </span>
+            </>
+          )}
+          {i < lines.length - 1 ? " " : null}
         </span>
       ))}
+      {/* stopCount is the FIRST ride's, so it still prints only when one
+          ride owns the whole leg — unchanged from the spelled-out line */}
+      {lines.length === 1 && stopCount ? (
+        <span className="lstrip__linestops"> · {stopCount} stops</span>
+      ) : null}
     </span>
   );
 }
@@ -198,17 +249,18 @@ function LegCard({
         : "travel estimate";
   const at = (iso: string) => formatStopTime(iso, new Date(), timeZone);
 
-  // line bubbles when the rides are known, the mode glyph otherwise —
-  // decoration either way, and phrasing content so it can sit inside the
-  // selection button below
-  const glyph =
-    segments.length > 0 ? (
-      <BubbleStack segments={segments} />
-    ) : (
-      <span className="lstrip__legicon">
-        <TransitIcon mode={leg.mode} />
-      </span>
-    );
+  // The leg's rides as badge + place, in riding order. Empty on a walk, on
+  // an `unknown` estimate, and on a plan stored before segments existed —
+  // all three keep the mode glyph and the plain line text below.
+  const lines = lineBadges(segments);
+
+  // the mode glyph, for a leg with no rides to badge. Phrasing content so
+  // it can sit inside the selection button below.
+  const glyph = (
+    <span className="lstrip__legicon">
+      <TransitIcon mode={leg.mode} />
+    </span>
+  );
 
   // What the leg IS, and how long it takes. The identity survives every
   // state of the card; only the TIMES move. The minutes are the leg's
@@ -216,13 +268,14 @@ function LegCard({
   // the traveller acts on.
   const transitSummary = (
     <>
-      {glyph}
+      {lines.length === 0 && glyph}
       <span className="lstrip__legline">
-        {segments.length > 1
-          ? // the lines you actually ride, in order. stopCount is the FIRST
-            // ride's, so it is printed only when there is one ride to own it
-            segments.map((seg) => seg.lineName).join(" → ")
-          : `${leg.lineName ?? "transit"}${leg.stopCount ? ` · ${leg.stopCount} stops` : ""}`}
+        {lines.length > 0 ? (
+          // the routes you actually ride, in order, each as its own badge
+          <LegLines lines={lines} stopCount={leg.stopCount} />
+        ) : (
+          `${leg.lineName ?? "transit"}${leg.stopCount ? ` · ${leg.stopCount} stops` : ""}`
+        )}
       </span>
       <span className="lstrip__legmeta">{leg.totalMinutes} min</span>
       {/* the two instants the SCHEDULER owns, named for what they are */}
@@ -267,6 +320,15 @@ function LegCard({
                     key={i}
                     className={`lstrip__tlrow lstrip__tlrow--${row.kind}`}
                   >
+                    {/* the badge rides with the BOARD instant, because that
+                        is where you get on that route. The cell is always
+                        present so every row's word starts at the same
+                        column — an empty rail, not a shifted line. */}
+                    <span className="lstrip__tlbadge">
+                      {row.kind === "board" && lines[row.rideIndex] ? (
+                        <RouteBadge line={lines[row.rideIndex]} />
+                      ) : null}
+                    </span>
                     <span className="lstrip__tlwhat">{row.kind}</span>
                     <span className="lstrip__tltime">{at(row.instantISO)}</span>
                     {row.kind === "board" && (

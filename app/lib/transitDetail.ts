@@ -38,6 +38,11 @@ export type TimelineRow =
       instantISO: string;
       line: string;
       stop: string | null;
+      /** which ride of the leg this instant belongs to, 0-based in riding
+       *  order. It is how the row finds its OWN route badge without
+       *  matching on the line's name — a leg can ride the same line twice.
+       *  Display only, like everything else in this file. */
+      rideIndex: number;
     };
 
 function instantMs(value: unknown): number | null {
@@ -104,7 +109,7 @@ export function buildTransitTimeline(input: {
 
   const rows: TimelineRow[] = [{ kind: "leave", instantISO: input.leaveISO as string }];
   let previousMs = leaveMs;
-  for (const ride of rides) {
+  for (const [rideIndex, ride] of rides.entries()) {
     const boardMs = instantMs(ride.boardISO);
     const alightMs = instantMs(ride.alightISO);
     if (boardMs === null || alightMs === null) return null;
@@ -114,12 +119,14 @@ export function buildTransitTimeline(input: {
       instantISO: ride.boardISO as string,
       line: ride.lineName,
       stop: trimmed(ride.departStop),
+      rideIndex,
     });
     rows.push({
       kind: "alight",
       instantISO: ride.alightISO as string,
       line: ride.lineName,
       stop: trimmed(ride.arriveStop),
+      rideIndex,
     });
     previousMs = alightMs;
   }

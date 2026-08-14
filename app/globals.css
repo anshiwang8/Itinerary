@@ -582,16 +582,28 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__leg { width: 118px; display: flex; flex-direction: column; justify-content: center; }
 .lstrip__legicon { display: block; width: 22px; height: 22px; margin-bottom: 5px; }
 .lstrip__legicon svg { width: 22px; height: 22px; fill: var(--accent); }
-/* ─── transfer bubbles: one circle per ride, pairs stacked ─── */
-.lstrip__bubbles { display: flex; align-items: center; gap: 4px; margin-bottom: 5px; min-height: 26px; }
-.lstrip__bunit { display: flex; flex-direction: column; gap: 2px; justify-content: center; }
+/* ─── route badges: one circle per ride, INLINE where its route is
+   referenced. The circle is unchanged — the agency's colour, its own
+   designation — and it used to sit stacked above the card with the route
+   number spelled out again in the text below. It now sits in the text, and
+   the words beside it are the PLACE the route serves. */
 .lstrip__bubble {
   display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; border-radius: 50%;
   font-family: var(--grot); font-size: 11px; font-weight: 700; letter-spacing: -0.02em;
   border: 1.5px solid rgba(255,255,255,0.85); box-shadow: 0 1px 2px rgba(30,58,76,0.25);
 }
-.lstrip__bubble--sm { width: 15px; height: 15px; font-size: 7.5px; border-width: 1px; }
+/* sized to sit ON a text line rather than above one, and centred on it —
+   the identity is ordinary wrapping text with circles in it, so a long
+   place name gets the card's full width instead of the sliver left beside
+   its own badge. `flex: 0 0 auto` is for the timeline's badge cell, where
+   the same circle IS a flex item. */
+.lstrip__bubble--inline {
+  width: 22px; height: 22px; font-size: 9.5px;
+  flex: 0 0 auto; vertical-align: middle;
+}
+.lstrip__lineid { display: block; }
+.lstrip__linearrow, .lstrip__linestops { color: var(--ink-soft); }
 .lstrip__legline { display: block; font-family: var(--grot); font-size: 12px; font-weight: 500; color: var(--ink); line-height: 1.25; }
 .lstrip__legmeta { display: block; font-family: var(--grot); font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
 .lstrip__legtimes { display: block; font-family: var(--grot); font-size: 10.5px; color: var(--ink-faint); margin-top: 3px; }
@@ -614,11 +626,16 @@ button { font-family: var(--grot); cursor: pointer; }
   list-style: none; margin: 6px 0 0; padding: 6px 0 0;
   border-top: 1px solid var(--rule);
 }
+/* three columns: the badge rail, the instant's name, the time. The rail is
+   empty on the rows the SCHEDULER owns (leave/arrive) and on an alight —
+   you get ON a route at its board — so every word still starts at the same
+   column instead of the ride rows shifting right. */
 .lstrip__tlrow {
-  display: grid; grid-template-columns: 1fr auto; gap: 0 8px;
-  align-items: baseline; padding: 2px 0;
+  display: grid; grid-template-columns: 22px 1fr auto; gap: 0 8px;
+  align-items: center; padding: 2px 0;
   font-family: var(--grot); font-size: 11px; color: var(--ink);
 }
+.lstrip__tlbadge { display: flex; align-items: center; justify-content: flex-start; }
 /* the two instants the SCHEDULER owns read quieter than the ones the
    transit agency published — the plan's own bookends, not the ride */
 .lstrip__tlrow--leave, .lstrip__tlrow--arrive { color: var(--ink-soft); }
