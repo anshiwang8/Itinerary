@@ -580,7 +580,7 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__swaperr { font-family: var(--grot); font-size: 11.5px; color: var(--ink); margin-top: 6px; }
 
 .lstrip__leg { width: 118px; display: flex; flex-direction: column; justify-content: center; }
-.lstrip__legicon { width: 22px; height: 22px; margin-bottom: 5px; }
+.lstrip__legicon { display: block; width: 22px; height: 22px; margin-bottom: 5px; }
 .lstrip__legicon svg { width: 22px; height: 22px; fill: var(--accent); }
 /* ─── transfer bubbles: one circle per ride, pairs stacked ─── */
 .lstrip__bubbles { display: flex; align-items: center; gap: 4px; margin-bottom: 5px; min-height: 26px; }
@@ -592,25 +592,24 @@ button { font-family: var(--grot); cursor: pointer; }
   border: 1.5px solid rgba(255,255,255,0.85); box-shadow: 0 1px 2px rgba(30,58,76,0.25);
 }
 .lstrip__bubble--sm { width: 15px; height: 15px; font-size: 7.5px; border-width: 1px; }
-.lstrip__legline { font-family: var(--grot); font-size: 12px; font-weight: 500; color: var(--ink); line-height: 1.25; }
-.lstrip__legmeta { font-family: var(--grot); font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
-.lstrip__legtimes { font-family: var(--grot); font-size: 10.5px; color: var(--ink-faint); margin-top: 3px; }
+.lstrip__legline { display: block; font-family: var(--grot); font-size: 12px; font-weight: 500; color: var(--ink); line-height: 1.25; }
+.lstrip__legmeta { display: block; font-family: var(--grot); font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
+.lstrip__legtimes { display: block; font-family: var(--grot); font-size: 10.5px; color: var(--ink-faint); margin-top: 3px; }
 /* ─── the four real instants: leave → board → alight → arrive ───
    Only a transit leg whose rides carry the provider's own board/alight
    times can open, and it widens while it is open — four instants and a
    stop name per ride do not fit the resting column. */
 .lstrip__leg--open { width: 208px; }
-/* a real control, so a real target at every width the layout spec sweeps
-   — the strip's other buttons (select, swap) hold the same 44px floor */
-.lstrip__legtoggle {
-  align-self: flex-start; margin-top: 3px; border: 0; padding: 0;
-  min-height: 44px; min-width: 44px;
-  display: inline-flex; align-items: center;
-  background: transparent; font-family: var(--grot); font-size: 10.5px;
-  font-weight: 600; letter-spacing: 0.04em; color: var(--accent);
-  text-decoration: underline; text-underline-offset: 2px;
+/* The leg's own summary is the control now — tapping the card shows its
+   times, the way tapping a stop opens it. Same shape as .lstrip__select:
+   a native button carrying the whole summary, with the timeline as its
+   SIBLING rather than nested inside it, and the same 44px floor the
+   strip's other buttons hold at every width the layout spec sweeps. */
+.lstrip__legselect {
+  display: block; width: 100%; min-height: 44px; border: 0; padding: 0;
+  background: transparent; color: inherit; text-align: left;
 }
-.lstrip__legtoggle:hover { color: var(--accent-deep); }
+.lstrip__legselect:hover .lstrip__legline { color: var(--accent-deep); }
 .lstrip__timeline {
   list-style: none; margin: 6px 0 0; padding: 6px 0 0;
   border-top: 1px solid var(--rule);

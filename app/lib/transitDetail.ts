@@ -128,6 +128,62 @@ export function buildTransitTimeline(input: {
   return rows;
 }
 
+/**
+ * Is the traveller ON this leg at `nowMs`? The leg's window is the two
+ * instants the SCHEDULER owns — you leave the previous stop, you arrive at
+ * the next — and the comparison is the one `deriveStopStatus` makes about a
+ * stop: half-open [leave, arrive), so the instant you arrive already belongs
+ * to the venue rather than to the ride.
+ *
+ * DISPLAY ONLY, like everything else in this file. It decides whether a card
+ * shows its own detail; it never writes a status, and the store's derivation
+ * of what is "active" is untouched by it.
+ *
+ * A missing or unreadable instant is NOT underway. A window that cannot be
+ * read cannot be shown to contain anything — the same posture the timeline
+ * takes when the provider's instants don't hold up.
+ */
+export function legUnderway(
+  leg: { leaveISO?: string | null; arriveISO?: string | null },
+  nowMs: number
+): boolean {
+  if (!Number.isFinite(nowMs)) return false;
+  const leaveMs = instantMs(leg.leaveISO);
+  const arriveMs = instantMs(leg.arriveISO);
+  if (leaveMs === null || arriveMs === null) return false;
+  return nowMs >= leaveMs && nowMs < arriveMs;
+}
+
+/**
+ * The whole four-instant breakdown, or the compact line?
+ *
+ * TWO reasons to show it, ORed, and neither is a control the user has to
+ * find: they are ON this leg right now (standing on the platform, the next
+ * instant is the only thing that matters), or they TAPPED it (they asked).
+ * Anything else is the compact form — the line and how long it takes.
+ *
+ * This replaced a manual "board times / hide times" disclosure, which made
+ * the traveller operate a switch for information they had either just asked
+ * for or were standing in the middle of.
+ *
+ * The two gates in front of the OR are the same ones the card has always
+ * had: only a TRANSIT leg has rides, and only a leg whose provider instants
+ * survived `buildTransitTimeline` (published, complete, still in order) has
+ * anything honest to open into. Neither an active leg nor a tapped one can
+ * conjure times that were never published or that no longer belong to it.
+ */
+export function shouldShowTimeline(input: {
+  isTransit: boolean;
+  /** `buildTransitTimeline` returned rows for this leg */
+  hasTimeline: boolean;
+  isActiveNow: boolean;
+  isSelected: boolean;
+}): boolean {
+  if (!input.isTransit) return false;
+  if (!input.hasTimeline) return false;
+  return input.isActiveNow || input.isSelected;
+}
+
 export interface TransferPoint {
   /** stable within one leg — the map prefixes it with the leg's own key */
   key: string;

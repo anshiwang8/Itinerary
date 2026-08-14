@@ -6,19 +6,10 @@
 // expectStripMatchesPin runs after every mutation — the strip/map/store
 // desync check.
 import { test, expect } from "./test";
-import { planEvening, stripCard, swapOn, expectStripMatchesPin } from "./helpers";
-
-// datetime-local value on the PLAN's day (dinner anchors 19:00 and rolls
-// forward past 19:00, same rule as resolveStartTime) at the given hour —
-// the dev time-sim input drives stop statuses deterministically.
-function simAt(hour: number): string {
-  const d = new Date();
-  d.setHours(19, 0, 0, 0);
-  if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
-  d.setHours(hour, 0, 0, 0);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(hour)}:00`;
-}
+// simAt: a datetime-local value on the PLAN's day — shared with the other
+// specs that drive the dev time-sim input (it moved to helpers.ts when the
+// fixture spec needed the same clock).
+import { planEvening, simAt, stripCard, swapOn, expectStripMatchesPin } from "./helpers";
 
 test("price refresh: a 'cheaper' swap moves the dollar signs $$$ → $$ @mock", async ({ page }) => {
   await planEvening(page, "dinner and drinks");

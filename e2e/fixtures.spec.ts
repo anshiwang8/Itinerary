@@ -3,7 +3,7 @@
 // advance. If this fails, either E2E_MOCK isn't reaching the server or a
 // fixture drifted — fix that before trusting any scenario test.
 import { test, expect } from "./test";
-import { planEvening } from "./helpers";
+import { planEvening, simAt } from "./helpers";
 
 test("mock pipeline is active and deterministic @mock", async ({ page }) => {
   await planEvening(page, "dinner and drinks");
@@ -17,24 +17,47 @@ test("mock pipeline is active and deterministic @mock", async ({ page }) => {
   // the cross-town home leg is the deterministic fixture transit line
   await expect(page.locator(".lstrip__legline").first()).toContainText("505 Fixture");
 
+  // Park the clock well before the plan so the leg's visibility is decided
+  // by the TAP alone: a leg whose window contains "now" shows its times
+  // unasked, and the home leg's window is the half hour before the first
+  // stop — which a real-clock run could sit inside.
+  const clock = page.locator('.dev input[type="datetime-local"]');
+  await clock.fill(simAt(12));
+
   // The leg's two SCHEDULER instants are named for what they are: you
   // LEAVE at the dwell end, you ARRIVE at the next stop's start. "board"
   // used to label the first of those, which is the wrong moment entirely.
   const transitLeg = page.locator('.lstrip__leg[aria-label="transit leg"]').first();
   await expect(transitLeg.locator(".lstrip__legtimes")).toContainText(/^leave .* · arrive /);
+  // the time summary is the TOTAL and nothing else — no transfer count, no
+  // buffer arithmetic the traveller cannot act on
+  await expect(transitLeg.locator(".lstrip__legmeta")).toHaveText(/^\d+ min$/);
 
   // The fixture ride carries the provider's own board/alight times (it
-  // publishes them through the REAL parser), so the leg can expand into
-  // the four real instants. This proves the plumbing end to end — the
-  // visual itself, and any leg with a TRANSFER, stays live-verify-only.
-  const toggle = transitLeg.getByRole("button", { name: "board times" });
-  await expect(toggle).toHaveAttribute("aria-expanded", "false");
-  await toggle.click();
+  // publishes them through the REAL parser), so the leg can open into the
+  // four real instants. This proves the plumbing end to end — the visual
+  // itself, and any leg with a TRANSFER, stays live-verify-only.
+  const legSelect = transitLeg.locator(".lstrip__legselect");
   const rows = transitLeg.locator(".lstrip__tlrow");
+  await expect(legSelect).toHaveAttribute("aria-expanded", "false");
+  await expect(rows).toHaveCount(0);
+  await legSelect.click();
   await expect(rows).toHaveCount(4); // leave → board → alight → arrive
   await expect(rows.nth(1)).toContainText("505 Fixture");
   await expect(transitLeg.locator(".lstrip__tlnote")).toContainText("scheduled");
-  await transitLeg.getByRole("button", { name: "hide times" }).click();
+  await legSelect.click();
+  await expect(rows).toHaveCount(0);
+
+  // ...and the OTHER half of the rule: the leg you are ON shows its times
+  // with no tap at all. The home leg departs AT the plan's 19:00 anchor
+  // (that is what "leave by" means) and any transit leg runs at least the
+  // 8-minute floor plus its 5-minute margin, so five past is inside this
+  // leg's window by construction — and the first stop is still upcoming.
+  await clock.fill(simAt(19, 5));
+  await expect(rows).toHaveCount(4);
+  await expect(legSelect).toHaveAttribute("aria-expanded", "true");
+  // back to a quiet hour and it closes again — nothing latched
+  await clock.fill(simAt(12));
   await expect(rows).toHaveCount(0);
 
   // Google requires a caution for every displayed WALK route. It is

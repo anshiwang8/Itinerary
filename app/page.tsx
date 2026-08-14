@@ -2228,6 +2228,12 @@ export default function Home() {
   const homeOrigin = itinerary?.home ?? homePoint ?? HOME;
   // the zone every label on this plan renders in (persisted zone wins)
   const displayZone = itinerary?.timeZone ?? planZone;
+  // The instant this plan is being READ at, and the app's existing one: the
+  // dev sim clock when it is set (it is what the store was asked for when it
+  // derived which stop is "active"), the real clock otherwise. Computed at
+  // render on purpose — nothing here ticks, so anything keyed on it
+  // re-evaluates on the render cadence the app already has.
+  const displayNow = simNow ? new Date(simNow) : new Date();
 
   const mapHome = useMemo<MapHome | null>(() => {
     if (!homeLeg) return null;
@@ -2769,6 +2775,7 @@ export default function Home() {
         stops={stripStops}
         selected={selected}
         timeZone={displayZone}
+        now={displayNow}
         onSelect={(c) => setSelected(c)}
         focusRequest={stripFocusRequest}
         onFocusHandled={(nonce) =>

@@ -92,6 +92,24 @@ export async function swapOn(page: Page, venueName: string, refinement: string):
   ]);
 }
 
+/**
+ * A `datetime-local` value on the PLAN's own day, at the given wall-clock
+ * time — what the dev time-sim input takes, and the deterministic way to
+ * drive stop statuses (and which leg is underway) instead of waiting for a
+ * real clock. Dinner anchors 19:00 and rolls forward past 19:00, the same
+ * rule `resolveStartTime` uses, so the plan's day is decided the same way
+ * here. Assumes the browser's zone is the plan's, which is true of every
+ * mock run (fixed Chestnut/Toronto coordinates).
+ */
+export function simAt(hour: number, minute = 0): string {
+  const d = new Date();
+  d.setHours(19, 0, 0, 0);
+  if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+  d.setHours(hour, minute, 0, 0);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(hour)}:${p(minute)}`;
+}
+
 /** The strip card whose venue name contains `venueName`. */
 export function stripCard(page: Page, venueName: string): Locator {
   return page.locator(".lstrip__stop", {

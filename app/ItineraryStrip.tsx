@@ -4,7 +4,12 @@ import { Fragment, useEffect, useId, useRef, useState } from "react";
 import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 import { resolveCategory } from "./api/schedule/durations";
 import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
-import { RideDetail, buildTransitTimeline } from "./lib/transitDetail";
+import {
+  RideDetail,
+  buildTransitTimeline,
+  legUnderway,
+  shouldShowTimeline,
+} from "./lib/transitDetail";
 import { originDisplayLabel } from "./lib/locationLabels";
 
 // Horizontal itinerary strip — the primary surface, sitting just under
@@ -110,10 +115,13 @@ function TransitIcon({ mode }: { mode: StripLeg["mode"] }) {
  *  leftover as one full-size circle — grouping shared with the map via
  *  transitBubbles. Line colour comes from the agency when published. */
 function BubbleStack({ segments }: { segments: BubbleSegment[] }) {
+  // spans, not divs: on an expandable leg this whole block sits INSIDE the
+  // card's selection button, whose content model is phrasing content. Both
+  // classes already carry their own `display: flex`, so nothing moves.
   return (
-    <div className="lstrip__bubbles" aria-hidden="true">
+    <span className="lstrip__bubbles" aria-hidden="true">
       {groupBubbleUnits(segments).map((unit, i) => (
-        <div key={i} className={unit.length === 2 ? "lstrip__bunit" : "lstrip__bunit lstrip__bunit--single"}>
+        <span key={i} className={unit.length === 2 ? "lstrip__bunit" : "lstrip__bunit lstrip__bunit--single"}>
           {unit.map((seg, j) => (
             <span
               key={j}
@@ -127,25 +135,45 @@ function BubbleStack({ segments }: { segments: BubbleSegment[] }) {
               {bubbleLabel(seg)}
             </span>
           ))}
-        </div>
+        </span>
       ))}
-    </div>
+    </span>
   );
 }
 
 /**
  * One travel leg. On a transit leg with the provider's own board/alight
- * instants it can expand into the FOUR REAL INSTANTS — leave → board →
- * alight → arrive, a board/alight pair per ride — so the walk to the stop,
- * the wait, and each transfer are visible rather than folded invisibly
- * into one span. Collapsed, it shows the two instants the scheduler owns,
- * correctly named. Without usable provider times (a walk leg, an older
- * stored plan, a ride the agency publishes no times for, or times that no
- * longer match this leg's window) it keeps the single line — never a blank
- * and never an invented time.
+ * instants it shows the FOUR REAL INSTANTS — leave → board → alight →
+ * arrive, a board/alight pair per ride — so the walk to the stop, the
+ * wait, and each transfer are visible rather than folded invisibly into
+ * one span. Compact, it shows the line and how long the leg takes.
+ *
+ * WHEN it shows them is `shouldShowTimeline`: the traveller is ON this leg
+ * right now, or they tapped it. There is no show/hide control — the one
+ * that used to sit here asked the user to operate a switch for information
+ * they had either just asked for or were standing in the middle of.
+ *
+ * Without usable provider times (a walk leg, an older stored plan, a ride
+ * the agency publishes no times for, or times that no longer match this
+ * leg's window) the card keeps the single `leave · arrive` line and is not
+ * tappable at all — never a blank, never an invented time, and never a
+ * control that does nothing.
  */
-function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
-  const [open, setOpen] = useState(false);
+function LegCard({
+  leg,
+  timeZone,
+  now,
+}: {
+  leg: StripLeg;
+  timeZone: string;
+  /** the instant the plan is being READ at — the app's one "now", so the
+   *  leg that is underway agrees with the stop wearing the "now" pill */
+  now: Date;
+}) {
+  // This leg's SELECTION: the user tapped this card. One of the two inputs
+  // to the visibility rule — the other is the clock, and neither is a
+  // disclosure the user has to find.
+  const [selected, setSelected] = useState(false);
   const timelineId = useId();
   const isTransit = leg.mode === "transit";
   const segments = isTransit ? leg.segments ?? [] : [];
@@ -156,6 +184,12 @@ function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
         rides: segments,
       })
     : null;
+  const showTimeline = shouldShowTimeline({
+    isTransit,
+    hasTimeline: timeline !== null,
+    isActiveNow: legUnderway(leg, now.getTime()),
+    isSelected: selected,
+  });
   const legLabel =
     leg.mode === "transit"
       ? "transit leg"
@@ -163,82 +197,99 @@ function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
         ? "walking leg"
         : "travel estimate";
   const at = (iso: string) => formatStopTime(iso, new Date(), timeZone);
+
+  // line bubbles when the rides are known, the mode glyph otherwise —
+  // decoration either way, and phrasing content so it can sit inside the
+  // selection button below
+  const glyph =
+    segments.length > 0 ? (
+      <BubbleStack segments={segments} />
+    ) : (
+      <span className="lstrip__legicon">
+        <TransitIcon mode={leg.mode} />
+      </span>
+    );
+
+  // What the leg IS, and how long it takes. The identity survives every
+  // state of the card; only the TIMES move. The minutes are the leg's
+  // total — the buffer inside them is a scheduling margin, not something
+  // the traveller acts on.
+  const transitSummary = (
+    <>
+      {glyph}
+      <span className="lstrip__legline">
+        {segments.length > 1
+          ? // the lines you actually ride, in order. stopCount is the FIRST
+            // ride's, so it is printed only when there is one ride to own it
+            segments.map((seg) => seg.lineName).join(" → ")
+          : `${leg.lineName ?? "transit"}${leg.stopCount ? ` · ${leg.stopCount} stops` : ""}`}
+      </span>
+      <span className="lstrip__legmeta">{leg.totalMinutes} min</span>
+      {/* the two instants the SCHEDULER owns, named for what they are */}
+      {!showTimeline && (leg.leaveISO || leg.arriveISO) && (
+        <span className="lstrip__legtimes">
+          {leg.leaveISO ? `leave ${at(leg.leaveISO)}` : null}
+          {leg.leaveISO && leg.arriveISO ? " · " : null}
+          {leg.arriveISO ? `arrive ${at(leg.arriveISO)}` : null}
+        </span>
+      )}
+    </>
+  );
+
   return (
     <div
-      className={"lstrip__leg" + (timeline && open ? " lstrip__leg--open" : "")}
+      className={"lstrip__leg" + (showTimeline ? " lstrip__leg--open" : "")}
       role="listitem"
       aria-label={legLabel}
     >
-      {segments.length > 0 ? (
-        <BubbleStack segments={segments} />
-      ) : (
-        <div className="lstrip__legicon">
-          <TransitIcon mode={leg.mode} />
-        </div>
-      )}
       {isTransit ? (
         <>
-          <div className="lstrip__legline">
-            {segments.length > 1
-              ? // stopCount is the FIRST ride's — printing it next to a
-                // transfer count would misread as the whole journey's
-                `${segments.length - 1} transfer${segments.length > 2 ? "s" : ""}`
-              : `${leg.lineName ?? "transit"}${leg.stopCount ? ` · ${leg.stopCount} stops` : ""}`}
-          </div>
-          <div className="lstrip__legmeta">
-            {leg.totalMinutes} min{leg.marginMinutes ? ` · incl ${leg.marginMinutes} buffer` : ""}
-          </div>
-          {/* the two instants the SCHEDULER owns, named for what they are */}
-          {!(timeline && open) && (leg.leaveISO || leg.arriveISO) && (
-            <div className="lstrip__legtimes">
-              {leg.leaveISO ? `leave ${at(leg.leaveISO)}` : null}
-              {leg.leaveISO && leg.arriveISO ? " · " : null}
-              {leg.arriveISO ? `arrive ${at(leg.arriveISO)}` : null}
-            </div>
+          {timeline ? (
+            // A native button, like the stop card's summary — the timeline
+            // is its SIBLING, never nested inside it.
+            <button
+              type="button"
+              className="lstrip__legselect"
+              aria-expanded={showTimeline}
+              aria-controls={timelineId}
+              onClick={() => setSelected((v) => !v)}
+            >
+              {transitSummary}
+            </button>
+          ) : (
+            transitSummary
           )}
-          {timeline && (
+          {timeline && showTimeline && (
             <>
-              <button
-                type="button"
-                className="lstrip__legtoggle"
-                aria-expanded={open}
-                aria-controls={timelineId}
-                onClick={() => setOpen((v) => !v)}
-              >
-                {open ? "hide times" : "board times"}
-              </button>
-              {open && (
-                <ol className="lstrip__timeline" id={timelineId}>
-                  {timeline.map((row, i) => (
-                    <li
-                      key={i}
-                      className={`lstrip__tlrow lstrip__tlrow--${row.kind}`}
-                    >
-                      <span className="lstrip__tlwhat">{row.kind}</span>
-                      <span className="lstrip__tltime">{at(row.instantISO)}</span>
-                      {row.kind === "board" && (
-                        <span className="lstrip__tlwhere">
-                          {row.stop ? `${row.line} · ${row.stop}` : row.line}
-                        </span>
-                      )}
-                      {row.kind === "alight" && row.stop && (
-                        <span className="lstrip__tlwhere">{row.stop}</span>
-                      )}
-                    </li>
-                  ))}
-                </ol>
-              )}
-              {open && (
-                // The board/alight instants are the timetable for the
-                // departure this leg was priced at — a schedule, not a
-                // promise about the vehicle you will be standing on.
-                <p className="lstrip__tlnote">scheduled times</p>
-              )}
+              <ol className="lstrip__timeline" id={timelineId}>
+                {timeline.map((row, i) => (
+                  <li
+                    key={i}
+                    className={`lstrip__tlrow lstrip__tlrow--${row.kind}`}
+                  >
+                    <span className="lstrip__tlwhat">{row.kind}</span>
+                    <span className="lstrip__tltime">{at(row.instantISO)}</span>
+                    {row.kind === "board" && (
+                      <span className="lstrip__tlwhere">
+                        {row.stop ? `${row.line} · ${row.stop}` : row.line}
+                      </span>
+                    )}
+                    {row.kind === "alight" && row.stop && (
+                      <span className="lstrip__tlwhere">{row.stop}</span>
+                    )}
+                  </li>
+                ))}
+              </ol>
+              {/* The board/alight instants are the timetable for the
+                  departure this leg was priced at — a schedule, not a
+                  promise about the vehicle you will be standing on. */}
+              <p className="lstrip__tlnote">scheduled times</p>
             </>
           )}
         </>
       ) : leg.mode === "unknown" ? (
         <>
+          {glyph}
           {/* neither routing mode came back — the number is a straight-line
               estimate, and must never read as a promise (§6.2) */}
           <div className="lstrip__legline">travel time unavailable</div>
@@ -246,6 +297,7 @@ function LegCard({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
         </>
       ) : (
         <>
+          {glyph}
           <div className="lstrip__legline">walk</div>
           <div className="lstrip__legmeta">{leg.totalMinutes} min</div>
           <div
@@ -449,6 +501,12 @@ export interface ItineraryStripProps {
   onSelect: (stopId: string) => void;
   swap?: SwapInline | null;
   timeZone?: string;
+  /** The instant this plan is being read at — the SAME one the store was
+   *  asked for when it derived which stop is "active" (the dev time control
+   *  moves both, or neither). It decides which leg is underway, and it is
+   *  read at RENDER: nothing here ticks, so an auto-shown leg re-evaluates
+   *  on the app's existing render cadence, never on a timer of its own. */
+  now?: Date;
   focusRequest?: StripFocusRequest | null;
   onFocusHandled?: (nonce: number) => void;
 }
@@ -460,6 +518,7 @@ export default function ItineraryStrip({
   onSelect,
   swap,
   timeZone = "America/Toronto",
+  now = new Date(),
   focusRequest,
   onFocusHandled,
 }: ItineraryStripProps) {
@@ -480,7 +539,7 @@ export default function ItineraryStrip({
           {home.leaveBy && <div className="lstrip__be">leave by {home.leaveBy}</div>}
         </div>
       )}
-      {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} />}
+      {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} now={now} />}
       {stops.map((s, i) => (
         <Fragment key={s.id}>
           <StopCard
@@ -493,7 +552,9 @@ export default function ItineraryStrip({
             focusRequest={focusRequest}
             onFocusHandled={onFocusHandled}
           />
-          {s.legToNext && <LegCard leg={s.legToNext} timeZone={timeZone} />}
+          {s.legToNext && (
+            <LegCard leg={s.legToNext} timeZone={timeZone} now={now} />
+          )}
         </Fragment>
       ))}
     </div>

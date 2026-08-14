@@ -5,7 +5,13 @@
 // not, and never place a marker at a coordinate nobody published.
 // Run with: npx tsx app/lib/transitDetail.test.ts
 import assert from "node:assert";
-import { RideDetail, buildTransitTimeline, transferPoints } from "./transitDetail";
+import {
+  RideDetail,
+  buildTransitTimeline,
+  legUnderway,
+  shouldShowTimeline,
+  transferPoints,
+} from "./transitDetail";
 
 // A real leg's shape: leave 19:00, board 19:07, alight 19:24, transfer,
 // board 19:29, alight 19:41, arrive 19:47. The walk and the wait live in
@@ -262,6 +268,156 @@ const cases: Array<[string, () => void]> = [
           { ...RIDE_TWO, boardLocation: undefined },
         ]),
         []
+      );
+    },
+  ],
+  // ── WHEN the breakdown shows: active on this leg, or tapped ──
+  [
+    "underway: now inside the leg's window is ON this leg",
+    () => {
+      const at = (hhmm: string) => Date.parse(`2026-07-03T${hhmm}:00-04:00`);
+      const leg = { leaveISO: LEAVE, arriveISO: ARRIVE }; // 19:00 → 19:47
+      assert.strictEqual(legUnderway(leg, at("19:30")), true);
+      assert.strictEqual(legUnderway(leg, at("18:59")), false, "not yet left");
+      assert.strictEqual(legUnderway(leg, at("19:50")), false, "already arrived");
+    },
+  ],
+  [
+    "underway: the window is half-open [leave, arrive) — the same shape a stop's status has",
+    () => {
+      const leg = { leaveISO: LEAVE, arriveISO: ARRIVE };
+      assert.strictEqual(legUnderway(leg, Date.parse(LEAVE)), true, "you are on it the moment you leave");
+      assert.strictEqual(
+        legUnderway(leg, Date.parse(ARRIVE)),
+        false,
+        "the instant you arrive belongs to the venue, not the ride"
+      );
+    },
+  ],
+  [
+    "underway: a window that cannot be READ contains nothing",
+    () => {
+      assert.strictEqual(legUnderway({ leaveISO: null, arriveISO: ARRIVE }, Date.parse(LEAVE)), false);
+      assert.strictEqual(legUnderway({ leaveISO: LEAVE }, Date.parse(LEAVE)), false);
+      assert.strictEqual(legUnderway({ leaveISO: "whenever", arriveISO: ARRIVE }, Date.parse(LEAVE)), false);
+      assert.strictEqual(legUnderway({ leaveISO: LEAVE, arriveISO: ARRIVE }, NaN), false);
+    },
+  ],
+  [
+    "show rule: ACTIVE shows the full breakdown with no tap",
+    () => {
+      assert.strictEqual(
+        shouldShowTimeline({
+          isTransit: true,
+          hasTimeline: true,
+          isActiveNow: true,
+          isSelected: false,
+        }),
+        true
+      );
+    },
+  ],
+  [
+    "show rule: SELECTED shows it on a leg nobody is riding yet",
+    () => {
+      assert.strictEqual(
+        shouldShowTimeline({
+          isTransit: true,
+          hasTimeline: true,
+          isActiveNow: false,
+          isSelected: true,
+        }),
+        true
+      );
+    },
+  ],
+  [
+    "show rule: BOTH is not a conflict — it is just shown",
+    () => {
+      assert.strictEqual(
+        shouldShowTimeline({
+          isTransit: true,
+          hasTimeline: true,
+          isActiveNow: true,
+          isSelected: true,
+        }),
+        true
+      );
+    },
+  ],
+  [
+    "show rule: NEITHER is the compact card",
+    () => {
+      assert.strictEqual(
+        shouldShowTimeline({
+          isTransit: true,
+          hasTimeline: true,
+          isActiveNow: false,
+          isSelected: false,
+        }),
+        false
+      );
+    },
+  ],
+  [
+    "show rule: a NON-TRANSIT leg never opens, whatever the clock or the tap say",
+    () => {
+      for (const isActiveNow of [true, false]) {
+        for (const isSelected of [true, false]) {
+          assert.strictEqual(
+            shouldShowTimeline({
+              isTransit: false,
+              hasTimeline: true,
+              isActiveNow,
+              isSelected,
+            }),
+            false,
+            "a walk has no rides to break down"
+          );
+        }
+      }
+    },
+  ],
+  [
+    "show rule: NO USABLE TIMES stays on the single line — being on it cannot conjure a timetable",
+    () => {
+      for (const isActiveNow of [true, false]) {
+        for (const isSelected of [true, false]) {
+          assert.strictEqual(
+            shouldShowTimeline({
+              isTransit: true,
+              hasTimeline: false,
+              isActiveNow,
+              isSelected,
+            }),
+            false
+          );
+        }
+      }
+    },
+  ],
+  [
+    "show rule end to end: a stale leg falls back even while it is being ridden",
+    () => {
+      // the staleness shape above (a board time before you leave), on a leg
+      // whose window contains now: the guard still wins
+      const stale = buildTransitTimeline({
+        leaveISO: "2026-07-03T19:20:00-04:00",
+        arriveISO: ARRIVE,
+        rides: [RIDE_ONE],
+      });
+      assert.strictEqual(stale, null);
+      assert.strictEqual(
+        shouldShowTimeline({
+          isTransit: true,
+          hasTimeline: stale !== null,
+          isActiveNow: legUnderway(
+            { leaveISO: "2026-07-03T19:20:00-04:00", arriveISO: ARRIVE },
+            Date.parse("2026-07-03T19:30:00-04:00")
+          ),
+          isSelected: true,
+        }),
+        false
       );
     },
   ],
