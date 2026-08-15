@@ -121,12 +121,12 @@ const cases: Array<[string, () => Promise<void>]> = [
       await assert.rejects(
         () =>
           readProviderJson(
-            "groq",
+            "openrouter",
             new Response("{}", { status: 429, headers: { "retry-after": "12" } })
           ),
         (error: unknown) => {
           assert.ok(error instanceof ProviderError);
-          assert.strictEqual(error.code, "groq_rate_limited");
+          assert.strictEqual(error.code, "openrouter_rate_limited");
           assert.strictEqual(error.failure?.upstreamStatus, 429);
           assert.strictEqual(error.failure?.retryAfterSeconds, 12);
           assert.strictEqual(error.isModelRetryable, true);
@@ -141,10 +141,10 @@ const cases: Array<[string, () => Promise<void>]> = [
     "a 401 keeps the generic code and is NOT model-retryable",
     async () => {
       await assert.rejects(
-        () => readProviderJson("groq", new Response("{}", { status: 401 })),
+        () => readProviderJson("openrouter", new Response("{}", { status: 401 })),
         (error: unknown) => {
           assert.ok(error instanceof ProviderError);
-          assert.strictEqual(error.code, "groq_rejected_request");
+          assert.strictEqual(error.code, "openrouter_rejected_request");
           assert.strictEqual(error.failure?.upstreamStatus, 401);
           assert.strictEqual(
             error.isModelRetryable,
@@ -156,16 +156,118 @@ const cases: Array<[string, () => Promise<void>]> = [
       );
     },
   ],
+  // ── the 200-with-an-error-body handler (OpenRouter migration) ──
+  // OpenRouter can answer a rate limit with HTTP 200 and the failure in the
+  // BODY. Checking response.ok alone let that through as a normal answer:
+  // `choices` came back undefined, the call site threw its own
+  // *_invalid_response, and that error carries no upstreamStatus — so
+  // isModelRetryable was false and the chain never advanced. These pin the
+  // fix, because it is the only thing keeping the fallback chain useful
+  // under a provider that wraps errors this way.
+  [
+    "a 200 whose BODY is a rate limit is a rate limit, and advances the chain",
+    async () => {
+      await assert.rejects(
+        () =>
+          readProviderJson(
+            "openrouter",
+            new Response(
+              JSON.stringify({ error: { code: 429, message: "rate limited" } }),
+              { status: 200, headers: { "retry-after": "12" } }
+            )
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof ProviderError);
+          assert.strictEqual(error.code, "openrouter_rate_limited");
+          assert.strictEqual(error.failure?.upstreamStatus, 429);
+          assert.strictEqual(error.failure?.retryAfterSeconds, 12);
+          assert.strictEqual(
+            error.isModelRetryable,
+            true,
+            "a body-wrapped 429 must reach the next model, exactly like a real 429"
+          );
+          return true;
+        }
+      );
+    },
+  ],
+  [
+    "a 200-wrapped 401 is NOT model-retryable — same key, same failure, every model",
+    async () => {
+      await assert.rejects(
+        () =>
+          readProviderJson(
+            "openrouter",
+            new Response(JSON.stringify({ error: { code: 401, message: "no key" } }), {
+              status: 200,
+            })
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof ProviderError);
+          assert.strictEqual(error.code, "openrouter_rejected_request");
+          assert.strictEqual(error.failure?.upstreamStatus, 401);
+          assert.strictEqual(error.isModelRetryable, false);
+          return true;
+        }
+      );
+    },
+  ],
+  [
+    "a 200-wrapped error with no readable code degrades to a retryable 502",
+    async () => {
+      // A wrapped error with nothing to read is the provider malfunctioning;
+      // asking a different model is the cheap correct response to that.
+      await assert.rejects(
+        () =>
+          readProviderJson(
+            "openrouter",
+            new Response(JSON.stringify({ error: { message: "something broke" } }), {
+              status: 200,
+            })
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof ProviderError);
+          assert.strictEqual(error.failure?.upstreamStatus, 502);
+          assert.strictEqual(error.isModelRetryable, true);
+          return true;
+        }
+      );
+    },
+  ],
+  [
+    "a REAL completion is never mistaken for a wrapped error",
+    async () => {
+      const body = JSON.stringify({ choices: [{ message: { content: "{}" } }] });
+      const parsed = await readProviderJson(
+        "openrouter",
+        new Response(body, { status: 200 })
+      );
+      assert.deepStrictEqual(parsed, JSON.parse(body));
+    },
+  ],
+  [
+    "the guard leaves the OTHER providers alone (Upstash's string error)",
+    async () => {
+      // Upstash answers a failed command with `{ error: "<string>" }`. The
+      // guard requires an error OBJECT precisely so Redis behaviour is
+      // untouched by a fix aimed at one LLM provider.
+      const parsed = await readProviderJson(
+        "redis",
+        new Response(JSON.stringify({ error: "ERR unknown command" }), { status: 200 })
+      );
+      assert.deepStrictEqual(parsed, { error: "ERR unknown command" });
+    },
+  ],
   [
     "a rejection with a non-JSON body is still a rejection, not 'malformed'",
     async () => {
       // An HTML error page from a gateway is a rejected request; calling it
       // invalid_response sends the reader hunting a parser bug that isn't there.
       await assert.rejects(
-        () => readProviderJson("groq", new Response("<html>429</html>", { status: 429 })),
+        () => readProviderJson("openrouter", new Response("<html>429</html>", { status: 429 })),
         (error: unknown) =>
           error instanceof ProviderError &&
-          error.code === "groq_rate_limited" &&
+          error.code === "openrouter_rate_limited" &&
           error.failure?.upstreamStatus === 429
       );
     },
@@ -195,11 +297,11 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "oversized parse request never reaches the mocked Groq provider",
+    "oversized parse request never reaches the mocked model provider",
     async () => {
       resetRateLimitsForTests();
       delete process.env.E2E_MOCK;
-      process.env.GROQ_API_KEY = "test-key";
+      process.env.OPENROUTER_API_KEY = "test-key";
       const realFetch = globalThis.fetch;
       let providerCalls = 0;
       globalThis.fetch = (async () => {
@@ -220,11 +322,11 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "rate-limited parse request never reaches the mocked Groq provider",
+    "rate-limited parse request never reaches the mocked model provider",
     async () => {
       resetRateLimitsForTests();
       delete process.env.E2E_MOCK;
-      process.env.GROQ_API_KEY = "test-key";
+      process.env.OPENROUTER_API_KEY = "test-key";
       const request = post(JSON.stringify({ prompt: "dinner" }), {
         "x-forwarded-for": "198.51.100.25",
       });

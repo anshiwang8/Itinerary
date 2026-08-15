@@ -492,7 +492,7 @@ function StopCard({
       <div id={detailsId} hidden={!selected}>
         {/* the reason is PICK JUSTIFICATION, never a description — labeled so
             that on venues with no Places editorial (desc line absent) the
-            Groq-written reason can't read as a factual description */}
+            LLM-written reason can't read as a factual description */}
         {stop.reason && (
           <div className="lstrip__reason">
             <span className="lstrip__why">why here</span>

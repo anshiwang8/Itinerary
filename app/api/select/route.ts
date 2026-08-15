@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
     // absent for callers that never saw a planner
     const estimates = parseSlotEstimates(body.plannedMinutes, slots?.length);
 
-    // Fixture seam replaces the Groq completion only. Slot validation,
+    // Fixture seam replaces the model completion only. Slot validation,
     // constraint enforcement, correction, and global assignment below are
     // the same production core used outside mock mode.
     if (isMockMode()) {
@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
       );
       return apiJson(ctx, { selections });
     }
-    const apiKey = requireServiceKey(process.env.GROQ_API_KEY);
+    const apiKey = requireServiceKey(process.env.OPENROUTER_API_KEY);
     // one logical call = the whole selectVenues ladder (invalid ids → one
     // correction → deterministic fallback) on ONE model; the chain advances
     // only when a model is rate limited

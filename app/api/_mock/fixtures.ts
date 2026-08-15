@@ -1,7 +1,7 @@
 // E2E fixture layer — deterministic stand-ins for the live APIs, active
 // only when the server runs with E2E_MOCK=1. A SEAM, not a rewrite: the
 // objective filter, scheduling, floor guards, and resettle ladder all run
-// for real; only the DATA SOURCES (Groq parse/select/interpret, Places
+// for real; only the DATA SOURCES (the LLM parse/select/interpret, Places
 // search, Geocoding results, Routes legs, Weather) are swapped — same discipline as
 // isUsableAt. Real routes stay the default.
 //
@@ -349,7 +349,7 @@ export function mockPools(categories: string[], parsed?: ParsedPrompt): Record<s
 // ── planner: keyword scan → the PLANNER contract, deterministic. The
 // fixture stands in for the MODEL only; the response it returns still goes
 // through the production validator (findPlanProblems → coerce → floors) in
-// the parse route, exactly like a live Groq answer would. Nothing
+// the parse route, exactly like a live model answer would. Nothing
 // recognized → one general activity plus the broad questions, which is what
 // the real planner returns for a vague prompt.
 //
@@ -820,7 +820,7 @@ function mockSelectionPayload(messages: unknown[]): Record<string, unknown> {
   return {};
 }
 
-/** Deterministic stand-in for the Groq completion only. The production
+/** Deterministic stand-in for the model completion only. The production
  * selectVenues core still owns slot validation, correction, constraint
  * enforcement, global uniqueness, and fallback assignment in mock E2E. */
 export const mockSelectModelResponse: SelectModelCall = async (messages) => {

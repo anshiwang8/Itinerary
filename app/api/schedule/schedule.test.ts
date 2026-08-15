@@ -277,7 +277,7 @@ const cases: Array<[string, () => void]> = [
   [
     "CONTRACT (mentor repro): 'plan a lunch' at 11:20 AM → SAME-DAY noon",
     () => {
-      // real Groq for "plan a lunch" returns time_window "unspecified" (or
+      // the real planner for "plan a lunch" returns time_window "unspecified" (or
       // "today, lunchtime"), categories ["lunch"] — both must land noon today
       const at1120 = new Date(2026, 6, 11, 11, 20, 0);
       for (const tw of ["unspecified", "today, lunchtime", "lunch"]) {

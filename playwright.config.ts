@@ -29,7 +29,7 @@ const webServer =
 
 // DEFAULT = MOCK MODE. The npm test harness starts its own dev server on
 // :3100 with E2E_MOCK=1; direct Playwright invocations retain this config's
-// equivalent fallback. The fixture pipeline uses no Groq/Places/Routes/
+// equivalent fallback. The fixture pipeline uses no OpenRouter/Places/Routes/
 // Weather quota. Port 3100 is reserved for mock e2e, so a manually-run live
 // server on :3000 is never touched. For occasional real-world checks use
 // playwright.live.config.ts (npm run test:e2e:live).

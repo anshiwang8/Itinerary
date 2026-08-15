@@ -4,7 +4,7 @@
 
 **Mock (default).** The npm harness starts one hidden dev server on **:3100**
 with `E2E_MOCK=1`, runs Playwright against it, and tears down only the process
-trees it created — the pipeline data sources (Groq parse/select/interpret,
+trees it created — the pipeline data sources (the LLM parse/select/interpret,
 Geocoding results, Places search, Routes legs, Weather) return deterministic fixtures from
 `app/api/_mock/fixtures.ts`. No quota burned; a live server on :3000 is
 never touched. Geocoding's real type/component/ambiguity validator, the

@@ -7,7 +7,7 @@
 // legacy parse the rest of the pipeline consumes.
 //
 // REWRITTEN 2026-07-27 (planner). The previous suite pinned the extraction
-// contract: `groq_invalid_schema` 502s for wrong-shaped output, and
+// contract: a `*_invalid_schema` 502 for wrong-shaped output, and
 // stop_count expansion. Both are gone by design — a malformed answer is now
 // CORRECTED and then FALLEN BACK from rather than 502'd (a raw model error
 // must never reach the user), and stop_count no longer exists on the wire
@@ -18,29 +18,29 @@ import { POST } from "./route";
 import { MAX_ACTIVITY_MINUTES } from "./planner";
 import { modelChain } from "../_shared/models";
 
-process.env.GROQ_API_KEY = "test-key";
+process.env.OPENROUTER_API_KEY = "test-key";
 
 /** Queued model replies; the last one repeats if the route asks again. */
-let groqReplies: string[] = [];
-let groqCalls: string[] = [];
+let llmReplies: string[] = [];
+let llmCalls: string[] = [];
 /** which model id each call actually asked for, in order */
-let groqModels: string[] = [];
+let llmModels: string[] = [];
 /** model ids the fake provider should rate-limit, for the fallback tests */
 let rateLimited = new Set<string>();
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-  if (String(url).includes("api.groq.com")) {
+  if (String(url).includes("openrouter.ai")) {
     const body = String(init?.body ?? "");
-    groqCalls.push(body);
+    llmCalls.push(body);
     const model = String(JSON.parse(body || "{}").model ?? "");
-    groqModels.push(model);
+    llmModels.push(model);
     if (rateLimited.has(model)) {
       return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
         status: 429,
         headers: { "Content-Type": "application/json", "retry-after": "9" },
       });
     }
-    const content = groqReplies.length > 1 ? groqReplies.shift()! : groqReplies[0] ?? "";
+    const content = llmReplies.length > 1 ? llmReplies.shift()! : llmReplies[0] ?? "";
     return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -93,9 +93,9 @@ const plan = (overrides: Record<string, unknown> = {}) =>
   });
 
 function reset(...replies: string[]) {
-  groqReplies = replies;
-  groqCalls = [];
-  groqModels = [];
+  llmReplies = replies;
+  llmCalls = [];
+  llmModels = [];
   rateLimited = new Set();
 }
 
@@ -107,7 +107,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       const res = await POST(req("dinner at 7pm"));
       const data = await res.json();
       assert.strictEqual(res.status, 200);
-      assert.strictEqual(groqCalls.length, 1);
+      assert.strictEqual(llmCalls.length, 1);
       assert.strictEqual(data.plan.activities[0].searchQuery, "restaurant");
       // the legacy currency the rest of the pipeline speaks
       assert.deepStrictEqual(data.parsed.category_signals, ["restaurant"]);
@@ -120,10 +120,30 @@ const cases: Array<[string, () => Promise<void>]> = [
     async () => {
       reset(plan());
       await POST(req("dinner tonight"));
-      const sent = groqCalls[0];
+      const sent = llmCalls[0];
       assert.ok(/Monday/.test(sent), "weekday must be sent");
       assert.ok(/2026-07-27/.test(sent), "local date must be sent");
       assert.ok(/America\/Toronto/.test(sent), "the plan zone must be sent");
+    },
+  ],
+  [
+    "the SHIPPED request carries JSON mode AND require_parameters, on every call",
+    async () => {
+      // openrouter.test.ts pins the builder; this pins that the route
+      // actually uses it — including on the CORRECTION retry, which is a
+      // second request and would be just as broken without the pair.
+      reset(JSON.stringify({ activities: [] }), plan());
+      await POST(req("dinner at 7pm"));
+      assert.strictEqual(llmCalls.length, 2, "answer + correction");
+      for (const raw of llmCalls) {
+        const sent = JSON.parse(raw);
+        assert.deepStrictEqual(sent.response_format, { type: "json_object" });
+        assert.deepStrictEqual(
+          sent.provider,
+          { require_parameters: true },
+          "without this, routing can silently drop response_format and the model answers in prose"
+        );
+      }
     },
   ],
   [
@@ -133,9 +153,9 @@ const cases: Array<[string, () => Promise<void>]> = [
       const res = await POST(req("dinner at 7pm"));
       const data = await res.json();
       assert.strictEqual(res.status, 200);
-      assert.strictEqual(groqCalls.length, 2, "exactly one correction retry");
-      assert.ok(/was invalid/.test(groqCalls[1]), "the retry must carry a correction");
-      assert.ok(/non-empty array/.test(groqCalls[1]), "the retry must name the problem");
+      assert.strictEqual(llmCalls.length, 2, "exactly one correction retry");
+      assert.ok(/was invalid/.test(llmCalls[1]), "the retry must carry a correction");
+      assert.ok(/non-empty array/.test(llmCalls[1]), "the retry must name the problem");
       assert.deepStrictEqual(data.parsed.category_signals, ["restaurant"]);
     },
   ],
@@ -146,7 +166,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       const res = await POST(req("something to do"));
       const data = await res.json();
       assert.strictEqual(res.status, 200, "a raw model error must never reach the user");
-      assert.strictEqual(groqCalls.length, 2, "one retry, then the fallback");
+      assert.strictEqual(llmCalls.length, 2, "one retry, then the fallback");
       // the deterministic fallback: one general activity + the broad questions
       assert.deepStrictEqual(data.parsed.category_signals, ["things to do"]);
       assert.deepStrictEqual(
@@ -279,7 +299,7 @@ const cases: Array<[string, () => Promise<void>]> = [
           answers: [{ question: "What kind of thing?", answer: "bowling" }],
         })
       );
-      const sent = groqCalls[0];
+      const sent = llmCalls[0];
       assert.ok(/bowling/.test(sent), "the answer must reach the model");
       assert.ok(/EMPTY/.test(sent), "the second pass must forbid re-asking");
     },
@@ -293,7 +313,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       const data = await res.json();
       assert.strictEqual(res.status, 200, "a rate limit must not fail the request");
       assert.deepStrictEqual(
-        groqModels,
+        llmModels,
         [modelChain("planner")[0], modelChain("planner")[1]],
         "asked the primary, then the SECOND model — not the primary twice"
       );
@@ -314,12 +334,12 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(res.status, 200, "a raw model error never reaches the user");
       // primary rate-limited once, then the fallback model twice: its answer
       // and its correction retry — the ladder intact on the new model
-      assert.deepStrictEqual(groqModels, [
+      assert.deepStrictEqual(llmModels, [
         modelChain("planner")[0],
         modelChain("planner")[1],
         modelChain("planner")[1],
       ]);
-      assert.ok(/was invalid/.test(groqCalls[2]), "the correction retry still happens");
+      assert.ok(/was invalid/.test(llmCalls[2]), "the correction retry still happens");
       assert.strictEqual(data.plan.activities.length, 1, "deterministic fallback served");
     },
   ],
@@ -333,8 +353,8 @@ const cases: Array<[string, () => Promise<void>]> = [
       reset("{malformed", plan());
       const res = await POST(req("dinner at 7pm"));
       assert.strictEqual(res.status, 200);
-      assert.strictEqual(groqModels.length, 2, "answer + correction");
-      assert.strictEqual(groqModels[0], groqModels[1], "same model for both halves");
+      assert.strictEqual(llmModels.length, 2, "answer + correction");
+      assert.strictEqual(llmModels[0], llmModels[1], "same model for both halves");
     },
   ],
   [
@@ -349,7 +369,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.match(data.error, /try again/i);
       assert.ok(!/could not complete/i.test(data.error), "not the generic provider text");
       assert.strictEqual(res.headers.get("retry-after"), "9");
-      assert.strictEqual(groqModels.length, modelChain("planner").length);
+      assert.strictEqual(llmModels.length, modelChain("planner").length);
     },
   ],
   [
@@ -363,7 +383,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       reset(plan());
       const res = await POST(bad);
       assert.strictEqual(res.status, 400);
-      assert.strictEqual(groqCalls.length, 0, "no provider call for an invalid request");
+      assert.strictEqual(llmCalls.length, 0, "no provider call for an invalid request");
     },
   ],
 ];

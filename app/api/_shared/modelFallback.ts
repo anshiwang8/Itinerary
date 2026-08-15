@@ -3,9 +3,15 @@ import { ProviderError } from "./provider";
 import { CallType, modelChain } from "./models";
 
 // Survive a rate limit by asking a DIFFERENT model, rather than failing the
-// request. Groq limits per model, so the next chain entry has its own budget —
-// which is what makes this different from a retry, and why a plain retry
-// cannot fix this failure: it hits the same wall by definition.
+// request. The next chain entry is served by a different upstream with its own
+// budget — which is what makes this different from a retry, and why a plain
+// retry cannot fix this failure: it hits the same wall by definition.
+//
+// Under OpenRouter this ALSO catches a failure that has nothing to do with
+// capacity: `require_parameters: true` (see openrouter.ts) turns "no serving
+// endpoint for this model supports JSON mode" into a 5xx, and a 5xx advances
+// the chain. A model that cannot hold the contract is stepped over instead of
+// quietly answering in prose.
 
 /**
  * Thrown when every model in a chain is rate limited. Deliberately NOT the

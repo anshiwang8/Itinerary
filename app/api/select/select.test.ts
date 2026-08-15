@@ -1,29 +1,29 @@
 // Tests for /api/select validation: invalid id → correction retry →
-// highest-rated fallback. Groq is stubbed via globalThis.fetch so the
+// highest-rated fallback. The provider is stubbed via globalThis.fetch so the
 // invalid-id path is deterministic.
 // Run with: npx tsx app/api/select/select.test.ts
 import assert from "node:assert";
 import { POST } from "./route";
 import { Place } from "../places/search/filter";
 
-process.env.GROQ_API_KEY = "test-key";
+process.env.OPENROUTER_API_KEY = "test-key";
 
-// ── Groq stub ──
-interface GroqCall {
+// ── model-provider stub ──
+interface LlmCall {
   messages: { role: string; content: string }[];
 }
-let groqCalls: GroqCall[] = [];
-// decides what content the fake Groq returns on the Nth call (1-based)
+let llmCalls: LlmCall[] = [];
+// decides what content the fake provider returns on the Nth call (1-based)
 let responder: (callNumber: number) => string = () => "";
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-  if (String(url).includes("api.groq.com")) {
+  if (String(url).includes("openrouter.ai")) {
     const body = JSON.parse(String(init?.body));
-    groqCalls.push({ messages: body.messages });
+    llmCalls.push({ messages: body.messages });
     return new Response(
       JSON.stringify({
-        choices: [{ message: { content: responder(groqCalls.length) } }],
+        choices: [{ message: { content: responder(llmCalls.length) } }],
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
@@ -78,15 +78,15 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "invalid id twice → retry fires, then fallback:true with highest-rated venue",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () => ghost(); // invalid on attempt 1 AND attempt 2
       const res = await POST(req({ parsed, pools }));
       const data = await res.json();
 
-      // retry fired: exactly 2 Groq calls
-      assert.strictEqual(groqCalls.length, 2, "expected exactly 2 Groq calls");
+      // retry fired: exactly 2 model calls
+      assert.strictEqual(llmCalls.length, 2, "expected exactly 2 model calls");
       // 2nd call got the appended correction conversation
-      const retryMsgs = groqCalls[1].messages;
+      const retryMsgs = llmCalls[1].messages;
       assert.strictEqual(retryMsgs.length, 4, "retry should carry 4 messages");
       assert.strictEqual(retryMsgs[2].role, "assistant");
       assert.strictEqual(retryMsgs[3].role, "user");
@@ -106,11 +106,11 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "invalid id then valid on retry → corrected pick, NO fallback flag",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = (n) => (n === 1 ? ghost() : valid("a"));
       const res = await POST(req({ parsed, pools }));
       const data = await res.json();
-      assert.strictEqual(groqCalls.length, 2);
+      assert.strictEqual(llmCalls.length, 2);
       const sel = data.selections[0];
       assert.strictEqual(sel.id, "a");
       assert.strictEqual(sel.fallback, undefined);
@@ -119,13 +119,13 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "valid id first try → single Groq call, no retry, no fallback",
+    "valid id first try → single model call, no retry, no fallback",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () => valid("a");
       const res = await POST(req({ parsed, pools }));
       const data = await res.json();
-      assert.strictEqual(groqCalls.length, 1);
+      assert.strictEqual(llmCalls.length, 1);
       assert.strictEqual(data.selections[0].id, "a");
       assert.strictEqual(data.selections[0].fallback, undefined);
     },
@@ -133,7 +133,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "unmet hard constraint → id:null + unmetConstraint, NO retry, NO fallback",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [
@@ -146,7 +146,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       const data = await res.json();
       // an honest null is a VALID answer — no correction retry, no
       // highest-rated fallback papering over the constraint
-      assert.strictEqual(groqCalls.length, 1, "honest null must not trigger a retry");
+      assert.strictEqual(llmCalls.length, 1, "honest null must not trigger a retry");
       const sel = data.selections[0];
       assert.strictEqual(sel.id, null);
       assert.strictEqual(sel.unmetConstraint, "vegan");
@@ -157,7 +157,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "hedged pick under constraints ('worth confirming') → converted to unmet constraint",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [
@@ -182,7 +182,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "hedge guard is OFF without constraints — cautious phrasing keeps the pick",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [
@@ -199,7 +199,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "DUPLICATE CATEGORY: two bar slots get two DIFFERENT venues, one entry each",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [
@@ -225,7 +225,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.deepStrictEqual(ids, ["a", "b"]);
       assert.strictEqual(new Set(ids).size, 2, "the two stops must be different venues");
       // the model was told there are two slots to fill
-      const sent = JSON.parse(groqCalls[0].messages[1].content);
+      const sent = JSON.parse(llmCalls[0].messages[1].content);
       assert.deepStrictEqual(sent.slots, [
         { slot: 0, category: "bar" },
         { slot: 1, category: "bar" },
@@ -235,7 +235,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "DUPLICATE CATEGORY: a repeated venue is rejected, retried, then filled distinctly",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       // the model picks the SAME venue for both slots on attempt 1
       responder = (n) =>
         n === 1
@@ -259,8 +259,8 @@ const cases: Array<[string, () => Promise<void>]> = [
         })
       );
       const data = await res.json();
-      assert.strictEqual(groqCalls.length, 2, "a repeated venue must trigger the retry");
-      assert.match(groqCalls[1].messages[3].content, /already used by an earlier slot/);
+      assert.strictEqual(llmCalls.length, 2, "a repeated venue must trigger the retry");
+      assert.match(llmCalls[1].messages[3].content, /already used by an earlier slot/);
       assert.deepStrictEqual(
         data.selections.map((s: { id: string }) => s.id),
         ["b", "a"]
@@ -270,7 +270,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "DUPLICATE CATEGORY: deterministic fallback keeps the best venue in the earliest slot",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       // Both model attempts repeat the same venue, forcing the production
       // maximum-cardinality fallback rather than accepting a corrected pick.
       responder = () =>
@@ -288,7 +288,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         })
       );
       const data = await res.json();
-      assert.strictEqual(groqCalls.length, 2);
+      assert.strictEqual(llmCalls.length, 2);
       assert.deepStrictEqual(
         data.selections.map((s: { id: string }) => s.id),
         ["b", "a"]
@@ -299,7 +299,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "DUPLICATE CATEGORY: fewer distinct venues than stops → narrowed, never silently dropped",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       // only ONE venue in the pool, but two stops asked for
       responder = () =>
         JSON.stringify({
@@ -327,7 +327,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "stop_count-expanded parsed categories become repeated slots even when slots is omitted",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [
@@ -358,7 +358,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         ["a", "b", "c"]
       );
       assert.deepStrictEqual(
-        JSON.parse(groqCalls[0].messages[1].content).slots,
+        JSON.parse(llmCalls[0].messages[1].content).slots,
         [
           { slot: 0, category: "cafe" },
           { slot: 1, category: "cafe" },
@@ -370,7 +370,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "global fallback matching preserves dinner [A,B] + drinks [A] as dinner B, drinks A",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () => ghost("dinner");
       const response = await POST(
         req({
@@ -386,7 +386,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         })
       );
       const data = await response.json();
-      assert.strictEqual(groqCalls.length, 2);
+      assert.strictEqual(llmCalls.length, 2);
       assert.deepStrictEqual(
         data.selections.map((selection: { id: string }) => selection.id),
         ["b", "a"]
@@ -396,7 +396,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "global fallback matching fills three overlapping categories without duplicate ids",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () => ghost("first");
       const response = await POST(
         req({
@@ -421,7 +421,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "unrelated unmet_constraint is rejected and cannot replace the requested constraint",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [
@@ -438,9 +438,9 @@ const cases: Array<[string, () => Promise<void>]> = [
         req({ parsed: { ...parsed, constraints: ["vegan"] }, pools })
       );
       const data = await response.json();
-      assert.strictEqual(groqCalls.length, 2);
+      assert.strictEqual(llmCalls.length, 2);
       assert.match(
-        groqCalls[1].messages[3].content,
+        llmCalls[1].messages[3].content,
         /one of the requested constraints/
       );
       assert.strictEqual(data.selections[0].id, null);
@@ -450,7 +450,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "negated or instruction-like editorial prose cannot prove a hard constraint",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       const proseOnly: Place = {
         ...mkPlace("prose-only", 4.9),
         editorialSummary: {
@@ -475,9 +475,9 @@ const cases: Array<[string, () => Promise<void>]> = [
         })
       );
       const data = await response.json();
-      assert.strictEqual(groqCalls.length, 2);
+      assert.strictEqual(llmCalls.length, 2);
       assert.deepStrictEqual(
-        JSON.parse(groqCalls[0].messages[1].content).candidates.cafe[0]
+        JSON.parse(llmCalls[0].messages[1].content).candidates.cafe[0]
           .constraintEvidence,
         []
       );
@@ -499,7 +499,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         constraints: ["vegetarian", "outdoor-seating"],
       };
 
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [
@@ -516,7 +516,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         req({ parsed: parsedWithSplitConstraints, pools: splitEvidence })
       );
       let data = await response.json();
-      assert.strictEqual(groqCalls.length, 1);
+      assert.strictEqual(llmCalls.length, 1);
       assert.strictEqual(data.selections[0].unmetConstraint, "vegetarian");
       assert.match(
         data.selections[0].reason,
@@ -527,13 +527,13 @@ const cases: Array<[string, () => Promise<void>]> = [
         /no cafe candidate verifiably meets "vegetarian"/
       );
 
-      groqCalls = [];
+      llmCalls = [];
       responder = () => ghost();
       response = await POST(
         req({ parsed: parsedWithSplitConstraints, pools: splitEvidence })
       );
       data = await response.json();
-      assert.strictEqual(groqCalls.length, 2);
+      assert.strictEqual(llmCalls.length, 2);
       assert.strictEqual(data.selections[0].unmetConstraint, "vegetarian");
       assert.match(
         data.selections[0].reason,
@@ -544,7 +544,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "unknown accessibility is unknown even when the venue name implies it",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       const namedOnly = {
         ...mkPlace("accessible-name", 4.9),
         displayName: { text: "Wheelchair Accessible Cafe" },
@@ -570,7 +570,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         })
       );
       const data = await response.json();
-      assert.strictEqual(groqCalls.length, 2);
+      assert.strictEqual(llmCalls.length, 2);
       assert.strictEqual(data.selections[0].id, null);
       assert.strictEqual(
         data.selections[0].unmetConstraint,
@@ -581,7 +581,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "valid structured accessibility evidence permits the selected id",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       const evidenced: Place = {
         ...mkPlace("accessible", 4.6),
         accessibilityOptions: { wheelchairAccessibleEntrance: true },
@@ -607,9 +607,9 @@ const cases: Array<[string, () => Promise<void>]> = [
         })
       );
       const data = await response.json();
-      assert.strictEqual(groqCalls.length, 1);
+      assert.strictEqual(llmCalls.length, 1);
       assert.strictEqual(data.selections[0].id, "accessible");
-      const payload = JSON.parse(groqCalls[0].messages[1].content);
+      const payload = JSON.parse(llmCalls[0].messages[1].content);
       assert.deepStrictEqual(payload.candidates.cafe[0].constraintEvidence, [
         "accessible",
         "wheelchair accessible",
@@ -620,7 +620,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "malformed retry under a vegan constraint never falls back to an unverified venue",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = (call) =>
         call === 1
           ? ghost()
@@ -638,7 +638,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         req({ parsed: { ...parsed, constraints: ["vegan"] }, pools })
       );
       const data = await response.json();
-      assert.strictEqual(groqCalls.length, 2);
+      assert.strictEqual(llmCalls.length, 2);
       assert.strictEqual(data.selections[0].id, null);
       assert.strictEqual(data.selections[0].unmetConstraint, "vegan");
       assert.strictEqual(data.selections[0].fallback, undefined);
@@ -647,7 +647,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "instruction-like constraint text is inert and cannot authorize an invented id",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [
@@ -669,7 +669,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         })
       );
       const data = await response.json();
-      assert.strictEqual(groqCalls.length, 2);
+      assert.strictEqual(llmCalls.length, 2);
       assert.strictEqual(data.selections[0].id, null);
       assert.strictEqual(
         data.selections[0].unmetConstraint,
@@ -713,7 +713,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         },
       ];
       for (const scenario of scenarios) {
-        groqCalls = [];
+        llmCalls = [];
         responder = () => JSON.stringify({ selections: scenario.selections });
         const response = await POST(
           req({
@@ -726,7 +726,7 @@ const cases: Array<[string, () => Promise<void>]> = [
           })
         );
         assert.strictEqual(response.status, 200);
-        assert.strictEqual(groqCalls.length, 1, scenario.slots.join(","));
+        assert.strictEqual(llmCalls.length, 1, scenario.slots.join(","));
         const data = await response.json();
         assert.deepStrictEqual(
           data.selections
@@ -742,7 +742,7 @@ const cases: Array<[string, () => Promise<void>]> = [
     async () => {
       const previousMockMode = process.env.E2E_MOCK;
       process.env.E2E_MOCK = "1";
-      groqCalls = [];
+      llmCalls = [];
       try {
         const shared = mkPlace("a", 5);
         const response = await POST(
@@ -760,7 +760,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         );
         const data = await response.json();
         assert.strictEqual(response.status, 200);
-        assert.strictEqual(groqCalls.length, 0, "mock mode must not call Groq");
+        assert.strictEqual(llmCalls.length, 0, "mock mode must not call the provider");
         assert.deepStrictEqual(
           data.selections.map((selection: { id: string }) => selection.id),
           ["b", "a"]
@@ -775,23 +775,23 @@ const cases: Array<[string, () => Promise<void>]> = [
     "parsed.home → each candidate carries a CODE-computed kmFromHome; absent without it",
     async () => {
       // with the anchor: the payload the model judges must carry distances
-      groqCalls = [];
+      llmCalls = [];
       responder = () => valid("a");
       const home = { latitude: 43.6547, longitude: -79.3862 };
       await POST(req({ parsed: { ...parsed, home }, pools }));
-      const payload = JSON.parse(groqCalls[0].messages[1].content);
+      const payload = JSON.parse(llmCalls[0].messages[1].content);
       const cands = payload.candidates.cafe as Array<{ id: string; kmFromHome?: number }>;
       for (const c of cands) {
         assert.strictEqual(typeof c.kmFromHome, "number", `candidate ${c.id} missing kmFromHome`);
         assert.ok(c.kmFromHome! > 0 && c.kmFromHome! < 10, `implausible kmFromHome ${c.kmFromHome}`);
       }
       // and the system prompt actually states the distance rule
-      assert.match(groqCalls[0].messages[0].content, /kmFromHome/);
+      assert.match(llmCalls[0].messages[0].content, /kmFromHome/);
 
       // without the anchor (legacy plans): no invented distances
-      groqCalls = [];
+      llmCalls = [];
       await POST(req({ parsed, pools }));
-      const payload2 = JSON.parse(groqCalls[0].messages[1].content);
+      const payload2 = JSON.parse(llmCalls[0].messages[1].content);
       for (const c of payload2.candidates.cafe as Array<{ kmFromHome?: number }>) {
         assert.strictEqual(c.kmFromHome, undefined);
       }
@@ -802,7 +802,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "the planner's estimate is SENT with each slot, and the refined answer rides on the pick",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [
@@ -814,7 +814,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       );
       const data = await res.json();
       // the pre-venue estimate reached the model
-      const payload = JSON.parse(groqCalls[0].messages[1].content);
+      const payload = JSON.parse(llmCalls[0].messages[1].content);
       assert.strictEqual(payload.slots[0].estimatedMinutes, 45);
       // and its refinement rides ON the selection, like priceLevel/description
       assert.strictEqual(data.selections[0].plannedMinutes, 150);
@@ -828,7 +828,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         [1, 15],
         [88.6, 89],
       ] as Array<[number, number]>) {
-        groqCalls = [];
+        llmCalls = [];
         responder = () =>
           JSON.stringify({
             selections: [
@@ -842,7 +842,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         // the PICK survives — only the number was corrected
         assert.strictEqual(data.selections[0].id, "b", String(minutes));
         assert.strictEqual(data.selections[0].plannedMinutes, expected, String(minutes));
-        assert.strictEqual(groqCalls.length, 1, "clamping must not burn the retry");
+        assert.strictEqual(llmCalls.length, 1, "clamping must not burn the retry");
       }
     },
   ],
@@ -850,7 +850,7 @@ const cases: Array<[string, () => Promise<void>]> = [
     "a MISSING refinement falls back to the planner's estimate, then to the table",
     async () => {
       // model omitted `minutes` → the planner's estimate stands
-      groqCalls = [];
+      llmCalls = [];
       responder = () =>
         JSON.stringify({
           selections: [{ slot: 0, category: "cafe", id: "b", reason: "Cozy." }],
@@ -862,7 +862,7 @@ const cases: Array<[string, () => Promise<void>]> = [
 
       // no planner estimate at all (swap/reroute shape) → no plannedMinutes,
       // so the scheduler uses DURATION_TABLE exactly as it always did
-      groqCalls = [];
+      llmCalls = [];
       const noEstimate = await POST(req({ parsed, pools }));
       assert.strictEqual(
         (await noEstimate.json()).selections[0].plannedMinutes,
@@ -873,7 +873,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "the DETERMINISTIC fallback keeps the planner's estimate, not the rejected model's",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       // invalid twice → the fallback assignment takes over
       responder = () =>
         JSON.stringify({
@@ -894,13 +894,13 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "a mismatched estimates array is rejected at the boundary, before any model work",
     async () => {
-      groqCalls = [];
+      llmCalls = [];
       responder = () => valid("a");
       const res = await POST(
         req({ parsed, pools, slots: ["cafe"], plannedMinutes: [45, 60] })
       );
       assert.strictEqual(res.status, 400);
-      assert.strictEqual(groqCalls.length, 0);
+      assert.strictEqual(llmCalls.length, 0);
     },
   ],
 ];

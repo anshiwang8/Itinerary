@@ -673,7 +673,7 @@ export function validatePlan(raw: unknown, now: Date): PlanValidation {
 // ── the ladder ────────────────────────────────────────────────────────────
 
 /** Provider seam for the model completion, so the ladder is testable without
- *  Groq (and swappable for the e2e fixture). */
+ *  the model provider (and swappable for the e2e fixture). */
 export type PlannerModelCall = (messages: unknown[]) => Promise<string>;
 
 export interface PlannerOutcome {

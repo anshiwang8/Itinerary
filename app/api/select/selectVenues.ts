@@ -1,5 +1,5 @@
 // LLM candidate selection core, shared by the /api/select route and the
-// reroute engine. One Groq call over all pools, validation ladder:
+// reroute engine. One model call over all pools, validation ladder:
 // invalid ids → one correction retry → highest-rated fallback.
 import { ParsedPrompt, Place } from "../places/search/filter";
 // CurrentOpeningHours lives in hours.ts (filter.ts imports it there too and
@@ -21,8 +21,7 @@ import {
   readProviderJson,
   requireProviderRecord,
 } from "../_shared/provider";
-
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+import { OPENROUTER_URL, chatCompletionBody } from "../_shared/openrouter";
 
 const SYSTEM_PROMPT = `You are the venue selector for a day-plan generator. You receive the user's parsed request, the SLOTS to fill (the stops of the outing, in order), and candidate venue pools grouped by category. Pick exactly ONE venue for EACH SLOT.
 
@@ -82,7 +81,7 @@ export interface Selection {
   plannedMinutes?: number;
 }
 
-/** Groq output was not JSON. Raw model text is deliberately not retained. */
+/** Model output was not JSON. Raw model text is deliberately not retained. */
 export class SelectParseError extends Error {
   constructor(message: string) {
     super(message);
@@ -109,28 +108,23 @@ function candidateView(p: Place, home?: { latitude: number; longitude: number })
   };
 }
 
-async function callGroq(apiKey: string, messages: unknown[], model: string) {
-  const res = await fetchProvider("groq", GROQ_URL, {
+async function callModel(apiKey: string, messages: unknown[], model: string) {
+  const res = await fetchProvider("openrouter", OPENROUTER_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      response_format: { type: "json_object" },
-      temperature: 0,
-    }),
+    body: chatCompletionBody(model, messages),
     cache: "no-store",
   });
-  const data = requireProviderRecord("groq", await readProviderJson("groq", res));
+  const data = requireProviderRecord("openrouter", await readProviderJson("openrouter", res));
   const choices = data.choices;
   const first = Array.isArray(choices) ? choices[0] : undefined;
   const message = isRecord(first) ? first.message : undefined;
   const content = isRecord(message) ? message.content : undefined;
   if (typeof content !== "string" || content.length > 50_000) {
-    throw new ProviderError("groq", 502, "groq_invalid_response");
+    throw new ProviderError("openrouter", 502, "openrouter_invalid_response");
   }
   return content;
 }
@@ -146,7 +140,7 @@ export type SelectModelCall = (messages: unknown[]) => Promise<string>;
  * bad answer, so the pair has to stay on the same model to make sense.
  */
 export function selectModelCall(apiKey: string, model: string): SelectModelCall {
-  return (messages: unknown[]) => callGroq(apiKey, messages, model);
+  return (messages: unknown[]) => callModel(apiKey, messages, model);
 }
 
 // Raw selection shape as the model returns it (unmet_constraint is the
@@ -381,7 +375,7 @@ function fallbackAssignment(
  * Select one venue per category. Empty pools resolve to null-id
  * selections without touching the LLM; invalid model answers get one
  * correction retry, then a highest-rated fallback flagged on the
- * selection. Throws SelectParseError when Groq output isn't JSON.
+ * selection. Throws SelectParseError when model output isn't JSON.
  */
 export async function selectVenues(
   apiKey: string,
@@ -391,7 +385,7 @@ export async function selectVenues(
   // callers that do not wrap in withModelFallback (tests, direct use) get
   // the chain's primary and no fallback — unchanged behaviour
   modelCall: SelectModelCall = (messages) =>
-    callGroq(apiKey, messages, primaryModel("select")),
+    callModel(apiKey, messages, primaryModel("select")),
   /** the planner's per-slot duration estimates, index-aligned with slotsIn.
    *  Callers that never saw a planner (swap, reroute) omit it and keep the
    *  DURATION_TABLE behaviour unchanged — the same way home.ts's HOME
@@ -481,7 +475,7 @@ export async function selectVenues(
   try {
     parsedOut = JSON.parse(raw);
   } catch {
-    throw new SelectParseError("Failed to parse Groq selection response as JSON.");
+    throw new SelectParseError("Failed to parse the model's selection response as JSON.");
   }
 
   let problems = findProblems(parsedOut.selections, pools, liveSlots, constraints);
@@ -496,7 +490,7 @@ export async function selectVenues(
     try {
       parsedOut = JSON.parse(raw);
     } catch {
-      throw new SelectParseError("Failed to parse Groq retry response as JSON.");
+      throw new SelectParseError("Failed to parse the model's retry response as JSON.");
     }
     problems = findProblems(parsedOut.selections, pools, liveSlots, constraints);
   }

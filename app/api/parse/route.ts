@@ -12,6 +12,7 @@ import {
   requireServiceKey,
 } from "../_shared/http";
 import { fetchProvider, readProviderJson, requireProviderRecord } from "../_shared/provider";
+import { OPENROUTER_URL, chatCompletionBody } from "../_shared/openrouter";
 import { withModelFallback } from "../_shared/modelFallback";
 import { parsePlannerBody } from "../_shared/schemas";
 import { verifyCaller } from "../_shared/caller";
@@ -30,11 +31,10 @@ import {
 // activities, how long, what to search for, what to ask about) plus the
 // legacy ParsedPrompt the rest of the pipeline speaks.
 //
-// Same architecture as before — one Groq call, JSON out, validated in code —
+// Same architecture as before — one model call, JSON out, validated in code —
 // with a new system prompt, a new output schema, and one genuinely new input:
 // the current instant in the plan's timezone. Every rule the planner proposes
 // is checked in planner.ts before it can reach a user.
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 /**
  * Stage 3B — the caller's stored taste, or nothing.
@@ -72,28 +72,21 @@ async function callerPreferences(
 // the model is a PARAMETER now — withModelFallback picks it from the
 // planner's chain and re-runs this whole call on the next entry if the
 // current model is rate limited (models.ts explains why per call type)
-async function callGroq(
+async function callModel(
   apiKey: string,
   messages: unknown[],
   model: string
 ): Promise<string> {
-  const res = await fetchProvider("groq", GROQ_URL, {
+  const res = await fetchProvider("openrouter", OPENROUTER_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      // Belt and braces: the system prompt demands bare JSON, and
-      // response_format guarantees the model can't wrap it in prose.
-      response_format: { type: "json_object" },
-      temperature: 0,
-    }),
+    body: chatCompletionBody(model, messages),
     cache: "no-store",
   });
-  const data = requireProviderRecord("groq", await readProviderJson("groq", res));
+  const data = requireProviderRecord("openrouter", await readProviderJson("openrouter", res));
   const choices = data.choices;
   const first = Array.isArray(choices) ? choices[0] : undefined;
   const message = isRecord(first) ? first.message : undefined;
@@ -101,7 +94,7 @@ async function callGroq(
   if (typeof raw !== "string" || raw.length > 50_000) {
     throw new ApiError(
       502,
-      "groq_invalid_response",
+      "openrouter_invalid_response",
       "The planner returned an invalid response. Please try again."
     );
   }
@@ -130,11 +123,11 @@ export async function POST(request: NextRequest) {
       preferences,
     });
 
-    // e2e fixture seam — deterministic planner, no Groq call, no key needed.
+    // e2e fixture seam — deterministic planner, no model call, no key needed.
     // The seam replaces the DATA SOURCE only: the fixture's raw object still
     // goes through the production validator, and the deterministic time
     // floors still apply, because both are LOGIC.
-    const apiKey = isMockMode() ? "" : requireServiceKey(process.env.GROQ_API_KEY);
+    const apiKey = isMockMode() ? "" : requireServiceKey(process.env.OPENROUTER_API_KEY);
 
     // The fallback wraps the ENTIRE planWithModel ladder, not the single
     // completion inside it: that ladder is a conversation (answer → "this was
@@ -149,13 +142,13 @@ export async function POST(request: NextRequest) {
           now,
           prompt,
           timeZone,
-          // e2e fixture seam — deterministic planner, no Groq call, no key
+          // e2e fixture seam — deterministic planner, no model call, no key
           // needed. The seam replaces the DATA SOURCE only: the fixture's raw
           // object still goes through the production validator, and the
           // deterministic time floors still apply, because both are LOGIC.
           isMockMode()
             ? async () => JSON.stringify(mockPlan(prompt, now, timeZone, body.answers ?? []))
-            : (msgs: unknown[]) => callGroq(apiKey, msgs, model)
+            : (msgs: unknown[]) => callModel(apiKey, msgs, model)
         )
     );
     // Two floors over the model's answer, both correcting facts it does not

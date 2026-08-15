@@ -1,7 +1,7 @@
 import { ApiError, isRecord } from "./http";
 
 export type ProviderName =
-  | "groq"
+  | "openrouter"
   | "places"
   | "routes"
   | "weather"
@@ -9,7 +9,20 @@ export type ProviderName =
   | "redis";
 
 export const PROVIDER_TIMEOUT_MS: Record<ProviderName, number> = {
-  groq: 20_000,
+  // 45s, up from the 20s this was while the LLM was Groq. That number was
+  // tuned to an LPU that answered in seconds; OpenRouter routes to whichever
+  // upstream is serving the model, and two of the three chain entries
+  // (`openai/gpt-oss-*`) emit reasoning tokens BEFORE the answer, so a fat
+  // select call has a genuinely different latency floor. A timeout here is
+  // also the worst possible failure: `fetchProvider` throws without a
+  // `failure`, so `isModelRetryable` is false and the chain does NOT advance
+  // — a slow model fails the request outright rather than falling back.
+  //
+  // Not higher than 45s on purpose: two ceilings sit above this one. The
+  // BROWSER gives up first (`DEFAULT_CLIENT_FETCH_TIMEOUT_MS`, 15s — no
+  // caller overrides it), and Vercel's function `maxDuration` sits above
+  // that. Waiting past either buys the user nothing.
+  openrouter: 45_000,
   places: 10_000,
   routes: 10_000,
   weather: 8_000,
@@ -78,8 +91,8 @@ export function parseRetryAfter(
   const text = header.trim();
   if (text === "") return undefined;
 
-  // Groq sends fractional seconds ("7.5"); floor to whole seconds but never
-  // to zero, since 0 reads as "no wait needed" downstream.
+  // Providers send fractional seconds ("7.5"); floor to whole seconds but
+  // never to zero, since 0 reads as "no wait needed" downstream.
   if (/^\d+(\.\d+)?$/.test(text)) {
     const seconds = Math.floor(Number(text));
     return Number.isFinite(seconds) ? Math.max(1, seconds) : undefined;
@@ -155,11 +168,65 @@ export async function readProviderJson(
     );
   }
 
+  let parsed: unknown;
   try {
-    return JSON.parse(text) as unknown;
+    parsed = JSON.parse(text) as unknown;
   } catch {
     throw new ProviderError(provider, 502, `${provider}_invalid_response`);
   }
+
+  // A 200 that is actually a failure. OpenRouter can answer a rate limit (and
+  // other upstream rejections) with HTTP 200 and an `{ error: { code, ... } }`
+  // body instead of a status. Checking `response.ok` alone let that through:
+  // `choices` came back undefined, the call site threw its own
+  // `*_invalid_response`, and because that error carries no upstreamStatus,
+  // `isModelRetryable` was false and the CHAIN NEVER ADVANCED — the exact
+  // failure withModelFallback exists to survive burned the request instead.
+  // Reading the wrapped code back into upstreamStatus restores it.
+  const wrapped = wrappedErrorStatus(parsed);
+  if (wrapped !== undefined) {
+    const retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
+    throw new ProviderError(
+      provider,
+      502,
+      wrapped === 429 ? `${provider}_rate_limited` : `${provider}_rejected_request`,
+      {
+        upstreamStatus: wrapped,
+        ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+      }
+    );
+  }
+
+  return parsed;
+}
+
+/**
+ * The upstream status hiding inside a 200 body, or undefined when the body is
+ * a normal answer.
+ *
+ * Deliberately conservative on both sides:
+ *  - a body that carries `choices` is a real completion and is never treated
+ *    as an error, whatever else rides alongside it;
+ *  - `error` must be an OBJECT. Upstash answers a failed command with
+ *    `{ error: "<string>" }`, and this must not change how Redis behaves.
+ *
+ * An unreadable code falls to 502 rather than to nothing: a body-wrapped error
+ * with no usable code is the provider malfunctioning, and asking a different
+ * model is the cheap correct response to that.
+ */
+function wrappedErrorStatus(body: unknown): number | undefined {
+  if (!isRecord(body) || Array.isArray(body.choices)) return undefined;
+  const error = body.error;
+  if (!isRecord(error)) return undefined;
+
+  const raw = error.code;
+  const code =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && /^\d+$/.test(raw.trim())
+      ? Number(raw.trim())
+      : undefined;
+  return code !== undefined && code >= 100 && code <= 599 ? code : 502;
 }
 
 export function requireProviderRecord(

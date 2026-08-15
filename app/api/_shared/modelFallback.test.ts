@@ -1,19 +1,19 @@
-// The model FALLBACK CHAIN — what stands between a Groq rate limit and a
+// The model FALLBACK CHAIN — what stands between a provider rate limit and a
 // failed request. Everything here is pure: the chain is driven through an
 // injected runner, so no network and no key.
 // Run with: npx tsx app/api/_shared/modelFallback.test.ts
 import assert from "node:assert";
 import { AllModelsRateLimitedError, withModelFallback } from "./modelFallback";
 import { BUILT_IN_CHAINS, modelChain, primaryModel } from "./models";
-import { ProviderError, parseRetryAfter } from "./provider";
+import { ProviderError, parseRetryAfter, readProviderJson } from "./provider";
 
 /** A provider rejection with a given upstream status, as readProviderJson
  *  would build it. */
 function rejected(status: number, retryAfterSeconds?: number): ProviderError {
   return new ProviderError(
-    "groq",
+    "openrouter",
     502,
-    status === 429 ? "groq_rate_limited" : "groq_rejected_request",
+    status === 429 ? "openrouter_rate_limited" : "openrouter_rejected_request",
     { upstreamStatus: status, ...(retryAfterSeconds ? { retryAfterSeconds } : {}) }
   );
 }
@@ -36,7 +36,7 @@ async function capturingLogs<T>(fn: () => Promise<T>): Promise<{ result?: T; err
   }
 }
 
-const ENV_KEYS = ["GROQ_MODELS_PLANNER", "GROQ_MODELS_SELECT", "GROQ_MODELS_SWAP"];
+const ENV_KEYS = ["OPENROUTER_MODELS_PLANNER", "OPENROUTER_MODELS_SELECT", "OPENROUTER_MODELS_SWAP"];
 function withEnv(overrides: Record<string, string | undefined>, fn: () => void): void {
   const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   try {
@@ -72,6 +72,30 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "a 200 whose BODY is a rate limit advances the chain, end to end",
+    async () => {
+      // The OpenRouter-migration gotcha, exercised through the REAL
+      // readProviderJson rather than a hand-built ProviderError: this is the
+      // only case where the two halves have to agree, and before the fix the
+      // chain silently did not advance because the wrapped status never
+      // reached isModelRetryable.
+      const tried: string[] = [];
+      const { result } = await capturingLogs(() =>
+        withModelFallback("planner", async (model) => {
+          tried.push(model);
+          const wrapped = new Response(
+            JSON.stringify({ error: { code: 429, message: "rate limited" } }),
+            { status: 200 }
+          );
+          if (tried.length === 1) await readProviderJson("openrouter", wrapped);
+          return `answered by ${model}`;
+        })
+      );
+      assert.strictEqual(tried.length, 2, "a body-wrapped 429 must reach the next model");
+      assert.strictEqual(result, `answered by ${tried[1]}`);
+    },
+  ],
+  [
     "a 401 fails IMMEDIATELY — the same key fails on every model",
     async () => {
       // The distinction that matters most here. Advancing on an auth failure
@@ -86,7 +110,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       );
       assert.strictEqual(tried.length, 1, "must not advance past an auth failure");
       assert.ok(error instanceof ProviderError);
-      assert.strictEqual((error as ProviderError).code, "groq_rejected_request");
+      assert.strictEqual((error as ProviderError).code, "openrouter_rejected_request");
     },
   ],
   [
@@ -228,7 +252,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       const now = Date.parse("2026-07-27T12:00:00Z");
       assert.strictEqual(parseRetryAfter("30", now), 30);
       assert.strictEqual(parseRetryAfter("  30  ", now), 30);
-      // Groq sends fractional seconds; never round DOWN to a zero wait
+      // providers send fractional seconds; never round DOWN to a zero wait
       assert.strictEqual(parseRetryAfter("7.5", now), 7);
       assert.strictEqual(parseRetryAfter("0.4", now), 1);
       // HTTP-date form
@@ -248,7 +272,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "chains are per call type, and swap deliberately differs from the planner",
     async () => {
-      withEnv({ GROQ_MODELS_PLANNER: undefined, GROQ_MODELS_SWAP: undefined }, () => {
+      withEnv({ OPENROUTER_MODELS_PLANNER: undefined, OPENROUTER_MODELS_SWAP: undefined }, () => {
         assert.ok(modelChain("planner").length >= 2, "a chain of one cannot fall back");
         assert.ok(modelChain("select").length >= 2);
         assert.ok(modelChain("swap").length >= 2);
@@ -263,7 +287,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "an env override BEATS the default, and blanks fall back to it",
     async () => {
-      withEnv({ GROQ_MODELS_PLANNER: "model-a, model-b ,, model-c" }, () => {
+      withEnv({ OPENROUTER_MODELS_PLANNER: "model-a, model-b ,, model-c" }, () => {
         assert.deepStrictEqual(modelChain("planner"), ["model-a", "model-b", "model-c"]);
         assert.strictEqual(primaryModel("planner"), "model-a");
         assert.notDeepStrictEqual(
@@ -273,10 +297,10 @@ const cases: Array<[string, () => Promise<void>]> = [
         );
       });
       // an all-blank override must not leave a call type with NO model
-      withEnv({ GROQ_MODELS_PLANNER: " , , " }, () => {
+      withEnv({ OPENROUTER_MODELS_PLANNER: " , , " }, () => {
         assert.deepStrictEqual(modelChain("planner"), [...BUILT_IN_CHAINS.planner]);
       });
-      withEnv({ GROQ_MODELS_PLANNER: undefined }, () => {
+      withEnv({ OPENROUTER_MODELS_PLANNER: undefined }, () => {
         assert.deepStrictEqual(modelChain("planner"), [...BUILT_IN_CHAINS.planner]);
       });
     },
@@ -284,7 +308,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "the override drives the ACTUAL chain, not just the config read",
     async () => {
-      await withEnv2({ GROQ_MODELS_SELECT: "first-model,second-model" }, async () => {
+      await withEnv2({ OPENROUTER_MODELS_SELECT: "first-model,second-model" }, async () => {
         const tried: string[] = [];
         await capturingLogs(() =>
           withModelFallback("select", async (model) => {
@@ -308,7 +332,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "the first model answering costs exactly one call, on the chain's head",
     async () => {
-      await withEnv2({ GROQ_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
+      await withEnv2({ OPENROUTER_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
         const tried: string[] = [];
         const { result } = await capturingLogs(() =>
           withModelFallback("planner", async (model) => {
@@ -324,7 +348,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "a 429 walks the chain IN ORDER, and stops as soon as one answers",
     async () => {
-      await withEnv2({ GROQ_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
+      await withEnv2({ OPENROUTER_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
         const tried: string[] = [];
         const { result } = await capturingLogs(() =>
           withModelFallback("planner", async (model) => {
@@ -345,7 +369,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       // exhaustion and a swap exhaustion need different responses, and the
       // error is the only place that distinction survives.
       for (const call of ["planner", "swap"] as const) {
-        await withEnv2({ [`GROQ_MODELS_${call.toUpperCase()}`]: "one,two" }, async () => {
+        await withEnv2({ [`OPENROUTER_MODELS_${call.toUpperCase()}`]: "one,two" }, async () => {
           const { error } = await capturingLogs(() =>
             withModelFallback(call, async () => {
               throw rejected(429, 7);
@@ -362,7 +386,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "a non-retryable rejection propagates the SAME error object, not a lookalike",
     async () => {
-      await withEnv2({ GROQ_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
+      await withEnv2({ OPENROUTER_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
         const thrown = rejected(401);
         const tried: string[] = [];
         const { error } = await capturingLogs(() =>
@@ -379,7 +403,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "exhaustion with no retry-after carries undefined — never a fabricated wait",
     async () => {
-      await withEnv2({ GROQ_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
+      await withEnv2({ OPENROUTER_MODELS_PLANNER: "alpha,beta,gamma" }, async () => {
         const { error } = await capturingLogs(() =>
           withModelFallback("planner", async () => {
             throw rejected(429);

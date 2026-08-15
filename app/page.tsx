@@ -1007,7 +1007,7 @@ export default function Home() {
           slots: (parseData.category_signals ?? []).length > 0 ? parseData.category_signals : undefined,
           // the planner's pre-venue duration estimates. The selector refines
           // each one now that it knows the actual place — folded into the
-          // SAME Groq round-trip rather than a second call, because an extra
+          // SAME model round-trip rather than a second call, because an extra
           // model round-trip per plan is real latency for a judgment the
           // selector is already making with the venue in front of it.
           plannedMinutes:

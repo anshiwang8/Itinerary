@@ -95,11 +95,11 @@ function realDeps(): RerouteDeps {
     selectVenues: (parsed, pools, slots) =>
       withModelFallback("select", (model) =>
         realSelectVenues(
-          process.env.GROQ_API_KEY ?? "",
+          process.env.OPENROUTER_API_KEY ?? "",
           parsed,
           pools,
           slots,
-          selectModelCall(process.env.GROQ_API_KEY ?? "", model)
+          selectModelCall(process.env.OPENROUTER_API_KEY ?? "", model)
         )
       ),
     getSingleLeg: (origin, destination, fromIndex, departureTime, excludeTransit) =>

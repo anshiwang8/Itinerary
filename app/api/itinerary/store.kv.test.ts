@@ -1,7 +1,7 @@
 // Tests for the persistence seam: loadItinerary/saveItinerary go through
 // the Redis REST API when KV env vars are set, collapse to the in-memory
 // Map when they aren't, and refuse loudly on serverless without KV.
-// Redis is stubbed via globalThis.fetch (same pattern as the Groq stubs).
+// Redis is stubbed via globalThis.fetch (same pattern as the LLM stubs).
 // Run with: npx tsx app/api/itinerary/store.kv.test.ts
 import assert from "node:assert";
 import {

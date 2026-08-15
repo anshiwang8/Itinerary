@@ -109,7 +109,7 @@ proposes the activity shape, questions, rough durations, and resolved intent. Co
 weather and Places data, applies objective filters, validates the model's venue IDs and hard
 constraint evidence, computes Routes legs, and builds/checks the schedule against any stated
 window. Model output is always validated; a correction is validated again before a
-deterministic fallback. Planner, selection, and swap use separate ordered Groq model chains;
+deterministic fallback. Planner, selection, and swap use separate ordered OpenRouter model chains;
 only 429 and provider-side 5xx failures advance a chain.
 
 **Places request/cost boundary.** A normal named category uses one complete Text Search because
@@ -145,7 +145,7 @@ cp .env.example .env
 
 ```bash
 # .env
-GROQ_API_KEY=...                    # LLM: parse prompt, pick venues, interpret swaps
+OPENROUTER_API_KEY=...              # LLM: parse prompt, pick venues, interpret swaps
 GOOGLE_PLACES_API_KEY=...           # venue search (Places API — New)
 GOOGLE_GEOCODING_API_KEY=...        # city/address resolution (Geocoding API)
 GOOGLE_ROUTES_API_KEY=...           # transit / walk legs (Routes API)
@@ -155,8 +155,8 @@ NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=... # browser map tiles (Maps JavaScript API)
 
 Where to get them:
 
-- **Groq** — free key at <https://console.groq.com>. Planner and selection default to
-  `llama-3.3-70b-versatile`; separate ordered fallback chains are defined in
+- **OpenRouter** — key at <https://openrouter.ai/keys>. Planner and selection default to
+  `meta-llama/llama-3.3-70b-instruct`; separate ordered fallback chains are defined in
   `app/api/_shared/models.ts` and can be overridden per call type in deployment.
 - **The five Google keys** — [Google Cloud Console](https://console.cloud.google.com) →
   enable **Places API (New)**, **Geocoding API**, **Routes API**, **Weather API**, and
@@ -202,9 +202,9 @@ Not needed for local dev — listed so the full set is in one place.
 | `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | `app/api/itinerary/store.ts` | Accepted as aliases for the pair above. |
 | `VERCEL` | `app/api/itinerary/store.ts` | Set by the platform. On Vercel **without** KV configured, the store refuses loudly instead of serving silent 404s. |
 | `NEXT_PUBLIC_ENABLE_DEV_CONTROLS` | `app/page.tsx` | Optional build-time flag. Production hides the time/disruption simulator unless this is exactly `true`; local development keeps it available. Rebuild after changing it. |
-| `GROQ_MODELS_PLANNER` / `GROQ_MODELS_SELECT` / `GROQ_MODELS_SWAP` | `app/api/_shared/models.ts` | Optional comma-separated per-call model-chain overrides. Blank/unset uses the validated in-code defaults. |
+| `OPENROUTER_MODELS_PLANNER` / `OPENROUTER_MODELS_SELECT` / `OPENROUTER_MODELS_SWAP` | `app/api/_shared/models.ts` | Optional comma-separated per-call model-chain overrides. Blank/unset uses the validated in-code defaults. |
 | `NEXT_PUBLIC_FIREBASE_*` (six values above) | `app/lib/firebase.ts` | Optional Firebase Web configuration for client-only Google sign-in. All six are required to enable it; they do not add server authorization. |
-| `E2E_MOCK` | `app/api/_mock/fixtures.ts` | `=1` swaps the pipeline's **data sources** (Groq, Places, Routes, Weather, geocode) for deterministic fixtures. Playwright sets it on its own server; never set it for real use. |
+| `E2E_MOCK` | `app/api/_mock/fixtures.ts` | `=1` swaps the pipeline's **data sources** (OpenRouter, Places, Routes, Weather, geocode) for deterministic fixtures. Playwright sets it on its own server; never set it for real use. |
 | `TZ` | Runtime compatibility / logs | Optional. Scheduling, hours checks, status math, and display are per-plan zone-aware and do not depend on the server wall clock. |
 
 Full deployment instructions (Vercel + Upstash, the env table, the Maps referrer
@@ -227,7 +227,7 @@ npm run test:e2e:live     # run against a live dev server on :3000 (start `npm r
 Mock mode burns no API quota and never touches a server on :3000. The objective filter,
 scheduling, floor guards, and both the swap and reroute engines run **for real** over fixture
 data — only the data sources are swapped. Non-local browser traffic is aborted, and the
-fixture seams prevent Groq/Google provider calls. `e2e/README.md` documents every fixture, including
+fixture seams prevent OpenRouter/Google provider calls. `e2e/README.md` documents every fixture, including
 which venue names and prompts trigger which scenario.
 
 **Project checks:**
@@ -275,7 +275,7 @@ this is the short version.
   deterministically cross-check malformed raw date/clock syntax or a stated count against an
   otherwise-valid model response. The audit tracker records these as `H8/M3-F1` and `M1-F1`.
 - **The source limiter is per process.** A public serverless deployment still needs a shared
-  edge/Redis/platform limiter plus Groq/Google quota caps and billing alerts; see `DEPLOY.md`.
+  edge/Redis/platform limiter plus OpenRouter/Google quota caps and billing alerts; see `DEPLOY.md`.
 - **Stops can't be reordered** by hand, and pick reasons are written before the schedule is
   computed, so a reason never refers to a stop's final time.
 - **The dev `?now=` time picker reads your browser's zone**, so simulating time on a

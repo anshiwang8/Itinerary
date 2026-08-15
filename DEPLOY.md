@@ -31,10 +31,10 @@ Next.js 16.2.11). The current runtime is React / React DOM 19.2.8.
 
 | Variable | Value / purpose |
 | --- | --- |
-| `GROQ_API_KEY` | Groq (parse / select / swap interpret) — server-side only |
-| `GROQ_MODELS_PLANNER` | OPTIONAL. Comma-separated planner chain, tried in order on 429/provider 5xx. Unset = the in-code default. |
-| `GROQ_MODELS_SELECT` | OPTIONAL. Same, for venue selection (used by /api/select, reroute and swap's replacement search). |
-| `GROQ_MODELS_SWAP` | OPTIONAL. Same, for swap-intent classification — deliberately a smaller primary so swap traffic doesn't spend the planner's per-model budget. |
+| `OPENROUTER_API_KEY` | OpenRouter (parse / select / swap interpret) — server-side only. The endpoint itself is hardcoded in `app/api/_shared/openrouter.ts`; there is deliberately no base-URL env var. |
+| `OPENROUTER_MODELS_PLANNER` | OPTIONAL. Comma-separated planner chain, tried in order on 429/provider 5xx. Unset = the in-code default. |
+| `OPENROUTER_MODELS_SELECT` | OPTIONAL. Same, for venue selection (used by /api/select, reroute and swap's replacement search). |
+| `OPENROUTER_MODELS_SWAP` | OPTIONAL. Same, for swap-intent classification — deliberately a smaller primary, since swap is a label job with deterministic parsers under it. |
 | `GOOGLE_PLACES_API_KEY` | Places Text Search (venue search) — server-side only |
 | `GOOGLE_GEOCODING_API_KEY` | Geocoding API (typed city and starting-address resolution) — server-side only |
 | `GOOGLE_ROUTES_API_KEY` | Routes computeRoutes — server-side only |
@@ -50,17 +50,21 @@ Next.js 16.2.11). The current runtime is React / React DOM 19.2.8.
 | `TZ` | Optional compatibility/logging default; scheduling correctness does not depend on it |
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | injected automatically when you connect Upstash Redis / Vercel KV storage (the `UPSTASH_REDIS_REST_URL`/`_TOKEN` names work too) |
 
-The three `GROQ_MODELS_*` vars allow a chain to change without a build. Blank
-or unset falls back to the in-code defaults. Only upstream 429 and provider
-5xx failures advance the chain; auth/config/client errors fail immediately.
-Planner/select exhaustion returns a stable capacity response; swap falls back
-to its deterministic local parsers. Verify every override against Groq's live
-model list and the real JSON contract before deployment.
+The three `OPENROUTER_MODELS_*` vars allow a chain to change without a build.
+Blank or unset falls back to the in-code defaults. Only upstream 429 and
+provider 5xx failures advance the chain; auth/config/client errors fail
+immediately. Planner/select exhaustion returns a stable capacity response;
+swap falls back to its deterministic local parsers. Verify every override
+against `GET https://openrouter.ai/api/v1/models` and the real JSON contract
+before deployment — and confirm the model has a serving endpoint supporting
+`response_format`, because every request is sent with
+`provider.require_parameters: true` and a model whose endpoints cannot hold
+the contract is skipped rather than left to answer in prose.
 
 Browser-visible configuration consists of the Maps JS key, the six optional
 Firebase Web values, and the optional development-control flag. Firebase Web
 values are client configuration by design; protect sign-in through Firebase
-authorized domains and Auth rules, not key secrecy. All Groq and Google
+authorized domains and Auth rules, not key secrecy. All OpenRouter and Google
 server-service credentials remain server-only. Never put `NEXT_PUBLIC_` on a
 server credential.
 
@@ -158,7 +162,7 @@ does not implement it.
 
 Notes: production omits the dev strip by default. Enabling it is a public
 build-time choice and requires a rebuild/redeploy; leave it off for ordinary
-deployments. Usage still spends Groq / Google quota, so keep provider quota
+deployments. Usage still spends OpenRouter / Google quota, so keep provider quota
 caps and alerts configured.
 
 ## Security and quota go-live checklist
@@ -178,7 +182,7 @@ deployment as abuse-resistant:
 - [ ] Use separate server-side keys for Places, Routes, Weather, and
   Geocoding when that endpoint is enabled; API-restrict each key to its one
   service and never expose it through `NEXT_PUBLIC_`.
-- [ ] Set Groq request/token quotas and alerts appropriate to the public
+- [ ] Set OpenRouter credit/spend limits and alerts appropriate to the public
   plan/selection/refinement endpoints.
 - [ ] Set Google per-API quotas, daily budget alerts, and hard caps where
   supported.
@@ -203,4 +207,4 @@ deployment as abuse-resistant:
   traffic. Exempt ordinary short bursts from shared networks and verify the
   `429`/`Retry-After` path remains reachable.
 - [ ] After deployment, send controlled oversized and over-limit requests
-  and confirm provider dashboards show zero corresponding Groq/Google calls.
+  and confirm provider dashboards show zero corresponding OpenRouter/Google calls.

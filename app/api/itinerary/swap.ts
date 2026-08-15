@@ -42,6 +42,7 @@ import {
   readProviderJson,
   requireProviderRecord,
 } from "../_shared/provider";
+import { OPENROUTER_URL, chatCompletionBody } from "../_shared/openrouter";
 import { isOpenAtInstant } from "../places/search/hours";
 import {
   getSingleLeg as realGetSingleLeg,
@@ -52,8 +53,6 @@ import {
 import { HOME, HOME_LEG_INDEX } from "../schedule/home";
 import { isMockMode, mockSwapDeps } from "../_mock/fixtures";
 import { fallbackParsedFor, UNKNOWN_LOCATION_MESSAGE } from "./fallbackParsed";
-
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 export type SwapIntent = "venue" | "time" | "constraint" | "duration";
 
@@ -478,7 +477,7 @@ export async function interpretRefinement(
     // from six provider booleans (`constraintEvidence`), so a "fancier" in
     // there makes `placeMeetsAllConstraints` false for EVERY venue and turns
     // the swap into a permanent unmet_constraint refusal. This fallback is
-    // the path a Groq failure takes, so without the guard a busy model would
+    // the path a model failure takes, so without the guard a busy model would
     // make every price swap fail loud for the wrong reason.
     constraints: localPrice
       ? [...(parsed.constraints ?? [])]
@@ -507,33 +506,28 @@ export async function interpretRefinement(
     // deterministic parsers beneath it runs on a smaller primary, leaving the
     // 70B budget to the calls that need judgment (models.ts explains why).
     const content = await withModelFallback("swap", async (model) => {
-      const res = await fetchProvider("groq", GROQ_URL, {
+      const res = await fetchProvider("openrouter", OPENROUTER_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: REFINE_SYSTEM },
-            {
-              role: "user",
-              content: JSON.stringify({
-                current: {
-                  category,
-                  aesthetic: parsed.aesthetic,
-                  budget: parsed.budget,
-                  constraints: parsed.constraints ?? [],
-                  startsAt: clockLabel(new Date(currentStartISO)),
-                },
-                complaint: refinement,
-              }),
-            },
-          ],
-          response_format: { type: "json_object" },
-          temperature: 0,
-        }),
+        body: chatCompletionBody(model, [
+          { role: "system", content: REFINE_SYSTEM },
+          {
+            role: "user",
+            content: JSON.stringify({
+              current: {
+                category,
+                aesthetic: parsed.aesthetic,
+                budget: parsed.budget,
+                constraints: parsed.constraints ?? [],
+                startsAt: clockLabel(new Date(currentStartISO)),
+              },
+              complaint: refinement,
+            }),
+          },
+        ]),
         cache: "no-store",
       });
-      const data = requireProviderRecord("groq", await readProviderJson("groq", res));
+      const data = requireProviderRecord("openrouter", await readProviderJson("openrouter", res));
       const choices = data.choices;
       const first = Array.isArray(choices) ? choices[0] : undefined;
       const message = isRecord(first) ? first.message : undefined;
@@ -542,7 +536,7 @@ export async function interpretRefinement(
       // which passes it straight through (not retryable) to the catch below,
       // preserving the previous behaviour exactly
       if (typeof raw !== "string" || raw.length > 50_000) {
-        throw new ProviderError("groq", 502, "groq_invalid_response");
+        throw new ProviderError("openrouter", 502, "openrouter_invalid_response");
       }
       return raw;
     });
@@ -632,17 +626,17 @@ function realDeps(): SwapDeps {
   if (isMockMode()) return mockSwapDeps(parseTimeExpr, parseDurationExpr, usableByHours);
   return {
     interpret: (parsed, category, currentStartISO, refinement) =>
-      interpretRefinement(process.env.GROQ_API_KEY ?? "", parsed, category, currentStartISO, refinement),
+      interpretRefinement(process.env.OPENROUTER_API_KEY ?? "", parsed, category, currentStartISO, refinement),
     searchPools: (parsed, categories) =>
       realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories),
     selectVenues: (parsed, pools) =>
       withModelFallback("select", (model) =>
         realSelectVenues(
-          process.env.GROQ_API_KEY ?? "",
+          process.env.OPENROUTER_API_KEY ?? "",
           parsed,
           pools,
           undefined,
-          selectModelCall(process.env.GROQ_API_KEY ?? "", model)
+          selectModelCall(process.env.OPENROUTER_API_KEY ?? "", model)
         )
       ),
     getSingleLeg: (origin, destination, fromIndex, departureTime, excludeTransit) =>

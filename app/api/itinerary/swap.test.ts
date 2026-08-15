@@ -815,11 +815,11 @@ const cases: Array<[string, () => Promise<void>]> = [
   [
     "interpret floor holds against a lying model (classification, meridiem, garbage deltas)",
     async () => {
-      // stub Groq to return deliberately wrong output per call
+      // stub the model provider to return deliberately wrong output per call
       const realFetch = globalThis.fetch;
       let modelOut = "{}";
       globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-        if (String(url).includes("api.groq.com")) {
+        if (String(url).includes("openrouter.ai")) {
           return new Response(
             JSON.stringify({ choices: [{ message: { content: modelOut } }] }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -1018,7 +1018,7 @@ const cases: Array<[string, () => Promise<void>]> = [
     "swap-produced stops carry the pick's REAL description, distinct from the reason",
     async () => {
       // venue swap (finalize path): the new stop's description is the
-      // candidate's Places editorialSummary — never the Groq reason
+      // candidate's Places editorialSummary — never the LLM reason
       const it = mkItinerary();
       const res = await swapStop(it, 1, "somewhere else", new Date(T(18, 0)), mkDeps({ legMin: 10 }));
       assert.ok(res.swapped);
@@ -1752,7 +1752,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         budget: null, constraints: [], location: "Ossington",
       };
       try {
-        // (a) Groq unavailable → localFallback. A price refinement must NOT
+        // (a) provider unavailable → localFallback. A price refinement must NOT
         // be appended to constraints there, or a busy model turns every
         // price swap into an unmet_constraint refusal.
         globalThis.fetch = (async () =>
@@ -1768,7 +1768,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         // deterministic floor forces it back to a venue swap, so a price
         // word can never move the stop's clock
         globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-          if (String(url).includes("api.groq.com")) {
+          if (String(url).includes("openrouter.ai")) {
             return new Response(
               JSON.stringify({
                 choices: [{ message: { content: JSON.stringify({

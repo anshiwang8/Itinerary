@@ -1,6 +1,6 @@
 // The PLANNER VALIDATOR — the layer standing between a hallucinated plan
 // and the user, so it gets the heaviest coverage in this change. Everything
-// here is pure: no Groq, no network. The ladder is exercised through an
+// here is pure: no model call, no network. The ladder is exercised through an
 // injected completion, the same seam the e2e fixture uses.
 // Run with: npx tsx app/api/parse/planner.test.ts
 import assert from "node:assert";
