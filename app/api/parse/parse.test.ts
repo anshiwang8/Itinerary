@@ -127,21 +127,33 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    "the SHIPPED request carries JSON mode AND require_parameters, on every call",
+    "the SHIPPED request carries JSON mode AND the routing policy, on every call",
     async () => {
-      // openrouter.test.ts pins the builder; this pins that the route
-      // actually uses it — including on the CORRECTION retry, which is a
-      // second request and would be just as broken without the pair.
+      // openrouter.test.ts pins the EXACT shape of the provider block; this
+      // pins that the route actually uses the shared builder — including on
+      // the CORRECTION retry, which is a second request and would be just as
+      // broken without it. Asserted by property rather than by a literal
+      // copy: a third copy of that object is the drift this module exists to
+      // prevent, and what matters HERE is that neither request goes out bare.
       reset(JSON.stringify({ activities: [] }), plan());
       await POST(req("dinner at 7pm"));
       assert.strictEqual(llmCalls.length, 2, "answer + correction");
       for (const raw of llmCalls) {
         const sent = JSON.parse(raw);
         assert.deepStrictEqual(sent.response_format, { type: "json_object" });
-        assert.deepStrictEqual(
-          sent.provider,
-          { require_parameters: true },
+        assert.strictEqual(
+          sent.provider?.require_parameters,
+          true,
           "without this, routing can silently drop response_format and the model answers in prose"
+        );
+        assert.strictEqual(
+          sent.provider?.sort,
+          "throughput",
+          "without this, routing optimises for price and the plan can miss the client deadline"
+        );
+        assert.ok(
+          sent.provider?.max_price,
+          "throughput-sorting takes price out of the ordering; the ceiling puts a bound back"
         );
       }
     },

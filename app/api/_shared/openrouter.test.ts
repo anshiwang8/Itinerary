@@ -1,13 +1,16 @@
 // The OpenRouter request body. Everything here is pure — no network, no key.
 //
-// This suite exists because two of these fields fail SILENTLY when they are
-// missing. Dropping `provider.require_parameters` does not error: OpenRouter
-// drops `response_format` on an endpoint that lacks it and the model answers
-// in prose, which every parser downstream reads as a malformed model rather
-// than a malformed request. Sending `reasoning` to a model that is not a
-// reasoning model does not error either — it over-filters routing, and an
-// over-filtered request has no endpoints at all. Neither is visible in mock
-// e2e, which never reaches a provider.
+// This suite exists because these fields fail SILENTLY when they are wrong.
+// Dropping `provider.require_parameters` does not error: OpenRouter drops
+// `response_format` on an endpoint that lacks it and the model answers in
+// prose, which every parser downstream reads as a malformed model rather than
+// a malformed request. Dropping `provider.sort` does not error either — it
+// routes by price, which is how a plan came back at 8.9 tokens/sec and timed
+// out in the browser. Nor does a `max_price` set too low, which is a FILTER:
+// it deletes endpoints rather than complaining. And sending `reasoning` to a
+// model that is not a reasoning model over-filters routing until the request
+// has no endpoints at all. None of it is visible in mock e2e, which never
+// reaches a provider.
 // Run with: npx tsx app/api/_shared/openrouter.test.ts
 import assert from "node:assert";
 import { OPENROUTER_URL, chatCompletionBody } from "./openrouter";
@@ -43,9 +46,82 @@ const cases: Array<[string, () => void]> = [
         );
         assert.deepStrictEqual(
           sent.provider,
-          { require_parameters: true },
+          {
+            require_parameters: true,
+            sort: "throughput",
+            max_price: { prompt: 5, completion: 10 },
+          },
           `${model} must pin routing to endpoints that actually support it`
         );
+      }
+    },
+  ],
+  [
+    "routing asks for the FASTEST endpoint, and only among the compliant ones",
+    () => {
+      // The composition is the whole fix. `require_parameters` narrows the
+      // candidates to endpoints that genuinely honour response_format;
+      // `sort` picks the fastest of what survives. Either one alone is a
+      // different product: fastest-outright would reintroduce the prose
+      // replies of gotcha 1, and compliant-only is what shipped at 8.9
+      // tokens/sec and blew the client deadline.
+      for (const model of Object.values(BUILT_IN_CHAINS).flat()) {
+        const provider = body(model).provider as Record<string, unknown>;
+        assert.strictEqual(provider.sort, "throughput", `${model} must sort by speed`);
+        assert.strictEqual(
+          provider.require_parameters,
+          true,
+          `${model} must still filter to compliant endpoints FIRST`
+        );
+      }
+    },
+  ],
+  [
+    "the price ceiling clears every real endpoint — the round number does NOT",
+    () => {
+      // Throughput-sorting takes price out of the ordering, so max_price is
+      // what puts a bound back. It is a filter, so a ceiling set too low
+      // silently DELETES a legitimate endpoint rather than erroring.
+      // Probed per endpoint on 2026-08-15 (`/api/v1/models/{id}/endpoints`,
+      // not the blended per-model figure, because per-endpoint is what this
+      // filters on): the priciest across all four chain models was $1.04/M
+      // prompt (Together on llama-3.3-70b) and $2.253/M completion
+      // (Cloudflare, same model). An obvious `completion: 2` would have
+      // dropped that endpoint — this case exists so that edit turns red.
+      const price = (body("meta-llama/llama-3.3-70b-instruct").provider as {
+        max_price: { prompt: number; completion: number };
+      }).max_price;
+      assert.ok(price.prompt >= 1.04, "the prompt ceiling must clear a real endpoint");
+      assert.ok(
+        price.completion >= 2.253,
+        "the completion ceiling must clear a real endpoint"
+      );
+    },
+  ],
+  [
+    "the routing policy names no provider and no model — it survives a chain change",
+    () => {
+      // Model-agnostic on purpose. `order`/`only` would pin a provider, and
+      // providers serve different subsets of models, so a pin here breaks
+      // silently the day models.ts changes — the exact drift models.ts was
+      // created to end. "Fastest compliant endpoint under a ceiling" is true
+      // of whatever chain is in force, including an env-overridden one.
+      const everyModelId = Object.values(BUILT_IN_CHAINS).flat();
+      for (const model of everyModelId) {
+        const provider = body(model).provider as Record<string, unknown>;
+        for (const pinning of ["order", "only", "ignore"]) {
+          assert.ok(
+            !(pinning in provider),
+            `${model}: provider.${pinning} pins routing to a named provider`
+          );
+        }
+        const serialized = JSON.stringify(provider);
+        for (const id of everyModelId) {
+          assert.ok(
+            !serialized.includes(id),
+            `${model}: the routing policy must not name a model`
+          );
+        }
       }
     },
   ],

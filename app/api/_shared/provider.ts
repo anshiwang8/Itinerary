@@ -19,9 +19,12 @@ export const PROVIDER_TIMEOUT_MS: Record<ProviderName, number> = {
   // — a slow model fails the request outright rather than falling back.
   //
   // Not higher than 45s on purpose: two ceilings sit above this one. The
-  // BROWSER gives up first (`DEFAULT_CLIENT_FETCH_TIMEOUT_MS`, 15s — no
+  // BROWSER gives up first (`DEFAULT_CLIENT_FETCH_TIMEOUT_MS`, 25s — no
   // caller overrides it), and Vercel's function `maxDuration` sits above
-  // that. Waiting past either buys the user nothing.
+  // that. Waiting past either buys the user nothing. The browser is still the
+  // binding ceiling of the two, deliberately: routing by throughput
+  // (`openrouter.ts`) put the fast path in seconds, so a call that reaches
+  // even 25s has already stopped being worth waiting for.
   openrouter: 45_000,
   places: 10_000,
   routes: 10_000,

@@ -61,6 +61,18 @@ before deployment — and confirm the model has a serving endpoint supporting
 `provider.require_parameters: true` and a model whose endpoints cannot hold
 the contract is skipped rather than left to answer in prose.
 
+Routing is also sorted by THROUGHPUT under a price ceiling
+(`provider.sort: "throughput"` + `max_price`, both in `openrouter.ts`), because
+OpenRouter's default is price-weighted and was observed serving the planner at
+single-digit tokens/sec — slow enough to miss the browser's own deadline. Two
+consequences for an operator. First, a chain override needs at least one
+serving endpoint that is both `response_format`-capable AND under the ceiling
+(5 USD/M prompt, 10 USD/M completion); check
+`GET https://openrouter.ai/api/v1/models/{id}/endpoints`, which reports price
+PER ENDPOINT — the per-model figure is a blend and will understate it. Second,
+fastest is not cheapest: expect a modest per-call cost increase versus the
+price-sorted default, which is the trade being made deliberately.
+
 Browser-visible configuration consists of the Maps JS key, the six optional
 Firebase Web values, and the optional development-control flag. Firebase Web
 values are client configuration by design; protect sign-in through Firebase

@@ -1,4 +1,23 @@
-export const DEFAULT_CLIENT_FETCH_TIMEOUT_MS = 15_000;
+/**
+ * The browser's deadline for every JSON call in the app — no caller overrides
+ * it, by design: one deadline is easier to reason about than nineteen.
+ *
+ * 25s, up from 15s (2026-08-15). 15s was BELOW the server's own 45s budget for
+ * a model call (`PROVIDER_TIMEOUT_MS.openrouter`), which made the browser the
+ * real ceiling: a slow model surfaced as "the request took too long" no matter
+ * what the server was willing to wait for. Routing by throughput
+ * (`_shared/openrouter.ts`) is what actually fixed the latency — the fast path
+ * is seconds, not tens of seconds — so this is not load-bearing; it is headroom
+ * for the tail, where one LLM-backed request can legitimately cost several
+ * sequential model calls (a correction retry, then the next model in the chain).
+ *
+ * Not raised to meet the server's 45s: past ~25s the honest answer to a user
+ * staring at a spinner is that something is wrong, and every non-LLM route here
+ * (geocode, store reads, weather) answers in well under a second or is broken.
+ * The cost of the change is paid only on failure — a hung request now reports
+ * ten seconds later than it did.
+ */
+export const DEFAULT_CLIENT_FETCH_TIMEOUT_MS = 25_000;
 
 export type JsonGuard<T> = (value: unknown) => value is T;
 export type JsonParser<T> = (value: unknown) => T;
