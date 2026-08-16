@@ -69,6 +69,21 @@ export type SwapPayload =
       downstreamShifted: number[];
     };
 
+/** What POST /api/itinerary/[id]/remove answers with. Mirrors `RemoveResult`
+ *  in the engine; `removed: false` is always a plain refusal — a removal has
+ *  no question to ask, so there is no `confirm` arm here as there is on a
+ *  swap. */
+export type RemovePayload =
+  | { removed: false; reason: string }
+  | {
+      removed: true;
+      reason: string;
+      stopIndex: number;
+      before: { name: string | null; category: string };
+      /** indices AFTER the splice, of stops whose times moved */
+      downstreamShifted: number[];
+    };
+
 type JsonRecord = Record<string, unknown>;
 
 function record(value: unknown): JsonRecord {
@@ -672,4 +687,28 @@ export function parseSwapPayload(value: unknown): SwapPayload {
   const before = record(data.before);
   if (typeof before.category !== "string") throw new Error("invalid swap before");
   return data as unknown as SwapPayload;
+}
+
+export function parseRemovePayload(value: unknown): RemovePayload {
+  const data = record(value);
+  if (data.removed === false && typeof data.reason === "string") {
+    return { removed: false, reason: data.reason };
+  }
+  if (
+    data.removed !== true ||
+    typeof data.reason !== "string" ||
+    typeof data.stopIndex !== "number" ||
+    !Number.isInteger(data.stopIndex) ||
+    !Array.isArray(data.downstreamShifted) ||
+    !data.downstreamShifted.every(
+      (index) => typeof index === "number" && Number.isInteger(index)
+    )
+  ) {
+    throw new Error("invalid remove");
+  }
+  const before = record(data.before);
+  if (typeof before.category !== "string" || !nullableString(before.name)) {
+    throw new Error("invalid remove before");
+  }
+  return data as unknown as RemovePayload;
 }

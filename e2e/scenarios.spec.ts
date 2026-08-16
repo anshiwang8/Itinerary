@@ -391,8 +391,12 @@ test.describe("@mock duplicate categories", () => {
 
     const cards = page.locator(".lstrip__stop");
     // open the second card's swap prompt — identity is the venue id, so
-    // this must target The Standing Room, not the first bar (§7.2)
-    await cards.nth(1).click();
+    // this must target The Standing Room, not the first bar (§7.2).
+    // The card's own SELECT BUTTON, not the card box: the strip is a flex row
+    // and every card stretches to the tallest, so a click at a stretched
+    // card's centre can land below its button and select nothing at all.
+    await cards.nth(1).locator(".lstrip__select").click();
+    await expect(cards.nth(1)).toHaveClass(/lstrip__stop--sel/);
     const swapBox = cards.nth(1).locator(".lstrip__swap");
     await expect(swapBox).toBeVisible();
     await expect(cards.nth(0).locator(".lstrip__swap")).toHaveCount(0);

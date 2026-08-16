@@ -4,6 +4,7 @@ import {
   parseGeocodePayload,
   parseItineraryPayload,
   parsePlacesPayload,
+  parseRemovePayload,
   parseReroutePayload,
   parseSelectionsPayload,
   parseSwapPayload,
@@ -448,6 +449,55 @@ const cases: Array<[string, () => void]> = [
           downstreamShifted: [],
         })
       );
+    },
+  ],
+  [
+    "remove payload: a refusal carries its reason and nothing else",
+    () => {
+      assert.deepStrictEqual(
+        parseRemovePayload({
+          removed: false,
+          reason: "That's the only stop left.",
+        }),
+        { removed: false, reason: "That's the only stop left." }
+      );
+    },
+  ],
+  [
+    "remove payload: a removal keeps its index, its before-snapshot and its shifts",
+    () => {
+      const payload = {
+        removed: true,
+        reason: "Removed Bar Spot and moved the later stops earlier.",
+        stopIndex: 1,
+        before: { name: "Bar Spot", category: "bar" },
+        downstreamShifted: [1],
+      };
+      assert.deepStrictEqual(parseRemovePayload(payload), payload);
+      // a venue-less slot has no name, and null is the honest value for it
+      assert.ok(
+        parseRemovePayload({ ...payload, before: { name: null, category: "park" } })
+      );
+    },
+  ],
+  [
+    "remove payload: a malformed success is rejected, never read as a refusal",
+    () => {
+      // Silently degrading to "removed: false" would tell the user their stop
+      // is still there while the server has already deleted it.
+      const base = {
+        removed: true,
+        reason: "Removed.",
+        stopIndex: 1,
+        before: { name: "Bar Spot", category: "bar" },
+        downstreamShifted: [1],
+      };
+      assert.throws(() => parseRemovePayload({ ...base, stopIndex: 1.5 }));
+      assert.throws(() => parseRemovePayload({ ...base, downstreamShifted: ["1"] }));
+      assert.throws(() => parseRemovePayload({ ...base, before: { category: 7 } }));
+      assert.throws(() => parseRemovePayload({ ...base, before: { name: 7, category: "bar" } }));
+      assert.throws(() => parseRemovePayload({ removed: false, reason: 7 }));
+      assert.throws(() => parseRemovePayload(null));
     },
   ],
 ];

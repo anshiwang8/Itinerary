@@ -621,7 +621,7 @@ export async function interpretRefinement(
   }
 }
 
-function realDeps(): SwapDeps {
+export function realDeps(): SwapDeps {
   // e2e fixture seam — deterministic interpret/search/select/legs/hours
   if (isMockMode()) return mockSwapDeps(parseTimeExpr, parseDurationExpr, usableByHours);
   return {
@@ -676,7 +676,7 @@ export function usableByHours(
 // work on code-audit 2026-07-18 §1.1; NOT in the original audit.
 // A venue Places genuinely has no hours for still arrives undefined here,
 // and still reads as usable. That is the intentional rule, not the bug.
-function placeOf(stop: ItineraryStop): Place {
+export function placeOf(stop: ItineraryStop): Place {
   return {
     id: stop.id ?? "",
     displayName: stop.name ? { text: stop.name } : undefined,
@@ -697,16 +697,16 @@ function placeOf(stop: ItineraryStop): Place {
  *  and the venues this forecast gates are all in the city. Plans made
  *  before `cityCenter` existed fall back to home, which is what they always
  *  used and — for those plans — was in the city by rule anyway. */
-async function weatherFor(itinerary: Itinerary, deps: SwapDeps): Promise<WeatherHour[] | null> {
+export async function weatherFor(itinerary: Itinerary, deps: SwapDeps): Promise<WeatherHour[] | null> {
   const origin = itinerary.parsed?.cityCenter ?? itinerary.home?.location;
   return origin ? deps.getWeather(origin.latitude, origin.longitude) : null;
 }
 
-function cloneProposal(itinerary: Itinerary): Itinerary {
+export function cloneProposal(itinerary: Itinerary): Itinerary {
   return JSON.parse(JSON.stringify(itinerary)) as Itinerary;
 }
 
-function validLocation(location: LatLng | null | undefined): location is LatLng {
+export function validLocation(location: LatLng | null | undefined): location is LatLng {
   return (
     !!location &&
     Number.isFinite(location.latitude) &&
@@ -722,7 +722,7 @@ function validLeg(leg: TravelLeg | null | undefined): leg is TravelLeg {
   return !!leg && Number.isFinite(leg.totalMinutes) && leg.totalMinutes >= 0;
 }
 
-async function proposalLeg(
+export async function proposalLeg(
   deps: SwapDeps,
   origin: LatLng,
   destination: LatLng,
@@ -831,7 +831,7 @@ const ARRIVAL_ONLY = 0;
 // optional one would let a future call site silently keep the old
 // start-instant-only behaviour. Every caller has to say how long the stop it
 // is proposing actually lasts — or ARRIVAL_ONLY, deliberately and visibly.
-function usableForProposal(
+export function usableForProposal(
   place: Place,
   category: string,
   base: ParsedPrompt,
@@ -857,6 +857,84 @@ function usableForProposal(
     deps.isUsableAt(place, when, category, timeZone) &&
     usableThroughSlot(place, category, when, slotMinutes, timeZone, deps)
   );
+}
+
+export /**
+ * A ceiling on the clamp scan below. The window it walks is bounded by the
+ * stop's own committed start, so in practice this is never the binding limit
+ * — it exists so a corrupt instant can't turn a scan into a hang.
+ */
+const CLAMP_MAX_STEPS = 24 * 60;
+
+/**
+ * The earliest instant from `proposedMs` onward — never past `ceilingMs` — at
+ * which this venue is usable for its whole slot.
+ *
+ * WHY A SCAN AND NOT AN "OPENING TIME" LOOKUP. "When does this open?" is a
+ * question about `currentOpeningHours`, but "is this usable then?" is
+ * `deps.isUsableAt` — the ONE availability seam, which a real reservation API
+ * is meant to replace wholesale. Reading hours directly here would create a
+ * second answer to the same question and quietly desynchronise from that seam
+ * the day it stops being about hours. So the scan asks the seam, through the
+ * very predicate whose failure would otherwise trigger a substitution
+ * (`usableForProposal` — filter gate, arrival, and the far end of the slot).
+ * Whatever it returns, the caller's own check agrees with it.
+ *
+ * It always TERMINATES and is always CHEAP: the window is bounded above by the
+ * stop's committed start, and the stop was schedulable there, so the worst case
+ * is landing exactly where it already was — the stop simply doesn't move. Every
+ * step is pure (a one-place `filterPools` plus the seam); no network, no
+ * provider call.
+ *
+ * A minute is the grid because a minute is the resolution every displayed time
+ * has. Finding nothing in range returns `proposedMs` unchanged, which hands the
+ * caller back to its existing ladder — a venue that is unusable at BOTH ends of
+ * the window was not made unusable by the slide, and pretending otherwise would
+ * hide a real problem.
+ */
+export function earliestUsableStart(
+  place: Place,
+  category: string,
+  base: ParsedPrompt,
+  weather: WeatherHour[] | null,
+  now: Date,
+  proposedMs: number,
+  ceilingMs: number,
+  slotMinutes: number,
+  timeZone: string,
+  deps: SwapDeps
+): number {
+  if (
+    !Number.isFinite(proposedMs) ||
+    !Number.isFinite(ceilingMs) ||
+    ceilingMs <= proposedMs
+  ) {
+    return proposedMs;
+  }
+  const steps = Math.min(
+    Math.ceil((ceilingMs - proposedMs) / 60_000),
+    CLAMP_MAX_STEPS
+  );
+  for (let i = 0; i <= steps; i++) {
+    const at = Math.min(proposedMs + i * 60_000, ceilingMs);
+    if (
+      usableForProposal(
+        place,
+        category,
+        base,
+        weather,
+        now,
+        new Date(at),
+        slotMinutes,
+        timeZone,
+        deps
+      )
+    ) {
+      return at;
+    }
+    if (at >= ceilingMs) break;
+  }
+  return proposedMs;
 }
 
 interface AnchorInbound {
@@ -906,7 +984,7 @@ interface AnchorInbound {
  * With no home leg stored (a legacy plan) `anchorStart` is the fallback:
  * still the right evening, which is what the guard and the pricing need.
  */
-function homeDeparture(itinerary: Itinerary, anchorStart: Date): string {
+export function homeDeparture(itinerary: Itinerary, anchorStart: Date): string {
   const travel = itinerary.homeLeg?.totalMinutes;
   const departMs =
     typeof travel === "number" && Number.isFinite(travel)
@@ -915,7 +993,7 @@ function homeDeparture(itinerary: Itinerary, anchorStart: Date): string {
   return new Date(departMs).toISOString();
 }
 
-async function planAnchorInbound(
+export async function planAnchorInbound(
   itinerary: Itinerary,
   timedIdx: number[],
   stopIndex: number,
@@ -964,7 +1042,7 @@ function reachesStart(inbound: AnchorInbound, anchorStart: Date): boolean {
   return inbound.earliestStartMs <= anchorStart.getTime();
 }
 
-function commitAnchorInbound(
+export function commitAnchorInbound(
   itinerary: Itinerary,
   inbound: AnchorInbound
 ): void {
@@ -1069,7 +1147,7 @@ function endsAfterStatedEnd(
 }
 
 // "4:00 AM" in the plan's zone — swap reasons quote the venue's local time.
-function clockLabel(d: Date, timeZone: string = DEFAULT_ZONE): string {
+export function clockLabel(d: Date, timeZone: string = DEFAULT_ZONE): string {
   const { hour, minute } = wallClockParts(d, timeZone);
   const ap = hour < 12 ? "AM" : "PM";
   const h = hour % 12 || 12;
@@ -1809,7 +1887,7 @@ async function timeChange(
 // venue at the new arrival; if it's not usable then, ADAPT by re-searching
 // an equivalent; if nothing adapts, NOTIFY (ok:false with the real reason).
 // Locked/past stops are never moved. Returns a plan; the caller commits. ──
-interface TailChange {
+export interface TailChange {
   stopIndex: number;
   startISO: string;
   totalMinutes: number; // this stop's duration (preserved when kept)
@@ -1819,7 +1897,7 @@ interface TailChange {
   sel?: Selection;
 }
 
-async function resettleTail(
+export async function resettleTail(
   itinerary: Itinerary,
   anchorIndex: number,
   timedIdx: number[],
@@ -1831,7 +1909,14 @@ async function resettleTail(
   deps: SwapDeps,
   used: Set<string>,
   weather: WeatherHour[] | null,
-  preserveCommittedStarts = false
+  preserveCommittedStarts = false,
+  /**
+   * THE OPEN-TIME CLAMP — a stop sliding EARLIER stops at its own opening
+   * time rather than being replaced. Off by default, so every swap path is
+   * byte-identical to before it existed; `removeStop` is the one caller that
+   * turns it on. See `earliestUsableStart` for why it is not optional there.
+   */
+  clampEarlierToAvailability = false
 ): Promise<
   | {
       ok: true;
@@ -1943,6 +2028,33 @@ async function resettleTail(
       stopDefaults.baseMinutes + stopDefaults.bufferMinutes;
     const keptTotal = stop.durationMinutes?.total ?? stopDefaultTotal;
 
+    // ── THE OPEN-TIME CLAMP ──
+    // Closing a gap pulls this stop EARLIER, and early enough is before its
+    // venue opens. The check below would then read it as unusable and hand
+    // the slot to `findReplacement` — so removing one stop would silently
+    // change a DIFFERENT stop's venue, which is the one thing a removal must
+    // never do. Clamping first makes the venue keep its own slot and give up
+    // only the part of the gap it cannot legally take.
+    //
+    // Only in the EARLIER direction, and only up to this stop's own committed
+    // start: a stop that has to move LATER (a direct leg longer than the two
+    // it replaces) has no earlier instant to be protected at, and the ladder
+    // below is the honest answer there, exactly as it is for a swap.
+    if (clampEarlierToAvailability && startMs < committedStartMs) {
+      startMs = earliestUsableStart(
+        placeOf(stop),
+        stop.category,
+        base,
+        weather,
+        now,
+        startMs,
+        committedStartMs,
+        keptTotal,
+        tz,
+        deps
+      );
+    }
+
     // Did THIS swap actually reschedule the stop? `preserveCommittedStarts`
     // holds a downstream stop at its committed time whenever the change in
     // front of it did not overflow; that stop is untouched and is judged on
@@ -2053,7 +2165,7 @@ async function resettleTail(
   return { ok: true, changes, terminalInbound: null };
 }
 
-function commitTail(
+export function commitTail(
   itinerary: Itinerary,
   changes: TailChange[],
   terminalInbound: TravelLeg | null

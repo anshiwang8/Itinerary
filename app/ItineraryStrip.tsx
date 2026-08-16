@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useId, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useRef, useState } from "react";
 import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 import { resolveCategory } from "./api/schedule/durations";
 import { LineBadge, lineBadges } from "./lib/transitBubbles";
@@ -386,9 +386,136 @@ export interface SwapInline {
   canSwap: boolean;
 }
 
+export interface RemoveInline {
+  onConfirm: () => void;
+  submitting: boolean;
+  disabled: boolean;
+  error: string | null;
+  canRemove: boolean;
+}
+
 export interface StripFocusRequest {
   stopId: string;
   nonce: number;
+}
+
+/**
+ * Remove, in two beats: ARM, then CONFIRM.
+ *
+ * A single-press delete on a card the user may only have tapped to read is the
+ * wrong shape, and there is no undo to fall back on — `removeStop` splices the
+ * stop out and the record of it is gone. So the press that looks destructive
+ * only ASKS, and the press that acts is the second one, on a control that has
+ * turned red and says plainly that it cannot be taken back.
+ *
+ * Everything about the armed state defaults to SAFE. "Keep" takes focus the
+ * moment the question appears, so the destructive button is never what a
+ * Return keypress lands on. Escape steps back one level rather than out.
+ * A pointer press anywhere else disarms — POINTERDOWN and not click, the rule
+ * the account menu already follows: a click-based dismissal survives under a
+ * finger through a scroll, which leaves an armed delete sitting on screen
+ * after the user has visibly moved on.
+ */
+function RemoveControl({
+  stopName,
+  armed,
+  onArm,
+  onDisarm,
+  remove,
+}: {
+  stopName: string;
+  armed: boolean;
+  onArm: () => void;
+  onDisarm: () => void;
+  remove: RemoveInline;
+}) {
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const errorId = useId();
+  const wasSubmitting = useRef(false);
+
+  useEffect(() => {
+    if (armed) keepRef.current?.focus();
+  }, [armed]);
+
+  // Disarm once the request settles. A SUCCESSFUL removal takes this card off
+  // the strip entirely, so the case this actually serves is a refusal — where
+  // leaving the control armed would invite a retry of something the server has
+  // already explained it will not do.
+  useEffect(() => {
+    if (wasSubmitting.current && !remove.submitting) onDisarm();
+    wasSubmitting.current = remove.submitting;
+  }, [remove.submitting, onDisarm]);
+
+  useEffect(() => {
+    if (!armed) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onDisarm();
+    };
+    const onPointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && rootRef.current?.contains(target)) return;
+      onDisarm();
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointer);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onPointer);
+    };
+  }, [armed, onDisarm]);
+
+  if (!armed) {
+    return (
+      <div className="lstrip__remove" ref={rootRef}>
+        <button
+          type="button"
+          className="lstrip__removearm"
+          disabled={remove.disabled}
+          onClick={onArm}
+          aria-label={`Remove ${stopName}`}
+        >
+          Remove
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="lstrip__remove lstrip__remove--armed" ref={rootRef}>
+      <p className="lstrip__removeask" role="alert">
+        Remove this stop? This can&apos;t be undone.
+      </p>
+      <div className="lstrip__removerow">
+        <button
+          type="button"
+          className="lstrip__removekeep"
+          ref={keepRef}
+          onClick={onDisarm}
+        >
+          Keep
+        </button>
+        <button
+          type="button"
+          className="lstrip__removego"
+          disabled={remove.disabled}
+          onClick={remove.onConfirm}
+          aria-label={`Confirm removing ${stopName}`}
+          aria-describedby={remove.error ? errorId : undefined}
+        >
+          {remove.submitting ? "…" : "Confirm"}
+        </button>
+      </div>
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {remove.submitting ? `Removing ${stopName}…` : ""}
+      </span>
+      {remove.error && (
+        <div id={errorId} className="lstrip__removeerr" role="alert">
+          {remove.error}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function StopCard({
@@ -397,6 +524,7 @@ function StopCard({
   selected,
   onSelect,
   swap,
+  remove,
   timeZone,
   focusRequest,
   onFocusHandled,
@@ -406,6 +534,7 @@ function StopCard({
   selected: boolean;
   onSelect: () => void;
   swap?: SwapInline | null;
+  remove?: RemoveInline | null;
   timeZone: string;
   focusRequest?: StripFocusRequest | null;
   onFocusHandled?: (nonce: number) => void;
@@ -415,13 +544,21 @@ function StopCard({
   const detailsId = useId();
   const swapInputId = useId();
   const swapErrorId = useId();
+  // Armed lives HERE rather than inside the control, because the card's own
+  // border turns danger-red while the question is up — the thing being removed
+  // has to be the thing that looks at risk. It needs no reset: the control is
+  // only rendered for the selected card, so deselecting unmounts it and the
+  // state goes with it.
+  const [armed, setArmed] = useState(false);
+  const disarm = useCallback(() => setArmed(false), []);
   const price = stop.price ? PRICE_LABEL[stop.price] ?? null : null;
   const cls =
     "lstrip__stop" +
     (selected ? " lstrip__stop--sel" : "") +
     (stop.status === "active" ? " lstrip__stop--live" : "") +
     (stop.status === "completed" ? " lstrip__stop--done" : "") +
-    (stop.changed ? " lstrip__stop--changed" : "");
+    (stop.changed ? " lstrip__stop--changed" : "") +
+    (armed ? " lstrip__stop--arming" : "");
 
   useEffect(() => {
     if (
@@ -550,6 +687,18 @@ function StopCard({
             )}
           </form>
         )}
+        {/* A SIBLING of the swap form, never a child of it: a button nested
+            inside that form would submit it, and the arm press would fire a
+            swap with an empty refinement instead of asking a question. */}
+        {remove?.canRemove && (
+          <RemoveControl
+            stopName={stop.name}
+            armed={armed}
+            onArm={() => setArmed(true)}
+            onDisarm={disarm}
+            remove={remove}
+          />
+        )}
       </div>
     </div>
   );
@@ -562,6 +711,7 @@ export interface ItineraryStripProps {
   /** selects by VENUE ID — a category is not a stop identity (§7.2) */
   onSelect: (stopId: string) => void;
   swap?: SwapInline | null;
+  remove?: RemoveInline | null;
   timeZone?: string;
   /** The instant this plan is being read at — the SAME one the store was
    *  asked for when it derived which stop is "active" (the dev time control
@@ -579,6 +729,7 @@ export default function ItineraryStrip({
   selected,
   onSelect,
   swap,
+  remove,
   timeZone = "America/Toronto",
   now = new Date(),
   focusRequest,
@@ -610,6 +761,7 @@ export default function ItineraryStrip({
             selected={selected === s.id}
             onSelect={() => onSelect(s.id)}
             swap={selected === s.id ? swap : null}
+            remove={selected === s.id ? remove : null}
             timeZone={timeZone}
             focusRequest={focusRequest}
             onFocusHandled={onFocusHandled}

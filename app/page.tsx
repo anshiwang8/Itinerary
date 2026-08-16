@@ -47,6 +47,7 @@ import {
   parsePlanPayload,
   parseReroutePayload,
   parseSelectionsPayload,
+  parseRemovePayload,
   parseSwapPayload,
   parseTravelPayload,
   parseWeatherPayload,
@@ -566,6 +567,8 @@ export default function Home() {
   /** A swap whose push runs the day past the stated end and is waiting on an
    *  answer. Non-null means the dialog is up; nothing has been written. */
   const [swapConfirm, setSwapConfirm] = useState<SwapEndTimeConfirm | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const [weather, setWeather] = useState<WeatherHour[] | null>(null);
 
   // The weather chip renders ONLY the plan's own forecast, fetched with the
@@ -1301,6 +1304,18 @@ export default function Home() {
               rating: replacement.rating,
               priceLevel: replacement.priceLevel,
               description: replacement.editorialSummary?.text,
+              // The hours have to move with the venue, and they were the one
+              // field this spread forgot. `...s` carries the REPLACED venue's
+              // `currentOpeningHours`, so an adapted stop went on describing
+              // itself with the closing time of the place it just replaced —
+              // and every later availability check reads the stop's own field
+              // (`placeOf`), not the pool. Found while building remove-stop:
+              // a plan whose dessert adapted to a late-night bakery still
+              // claimed a 9 PM close, so closing the gap in front of it looked
+              // like arriving after closing and swapped the venue out again.
+              // Pre-existing and not remove-specific — the swap engine's tail
+              // reflow reads the same field for the same purpose.
+              currentOpeningHours: replacement.currentOpeningHours,
               reason: `Open when you get there — the earlier pick had closed.`,
             };
           });
@@ -2209,6 +2224,120 @@ export default function Home() {
     }
   }
 
+  // Remove the selected stop and re-read the plan the engine re-timed around
+  // the gap. Deliberately the same shape as doSwap — same operation lock, same
+  // version echo, same ambiguous-outcome refresh — because it is the same kind
+  // of mutation and the two should differ only where they really differ.
+  //
+  // What differs: there is NO undo and no confirm dialog. The card asked
+  // already, inline, and the stop's record is gone the moment the splice
+  // commits. So the only safety here is the arming step the strip owns; by the
+  // time this runs, the answer has been given.
+  async function doRemove() {
+    if (!itinerary || !selected) return;
+    // by VENUE ID, like doSwap: two stops can share a category and findIndex
+    // on one would always return the first (§7.2)
+    const stopIndex = itinerary.stops.findIndex((s) => s.id === selected);
+    if (stopIndex < 0) return;
+    const operation = beginOperation();
+    if (!operation) return;
+
+    setRemoving(true);
+    setRemoveError(null);
+    setError(null);
+    setBanner(null);
+    const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
+    let mutationApplied = false;
+    // pre-removal starts by id, so the stops that slid earlier can strike
+    // through what they used to say
+    const oldById = Object.fromEntries(
+      itinerary.stops.filter((s) => s.id).map((s) => [s.id as string, s.start_time])
+    );
+    // Where focus should land afterwards: the stop that TOOK this one's place,
+    // else the one before it. The removed card is about to stop existing, so
+    // focus cannot simply stay put — and dropping it to the document body
+    // would strand a keyboard user at the top of the page.
+    const neighbourId =
+      itinerary.stops[stopIndex + 1]?.id ?? itinerary.stops[stopIndex - 1]?.id ?? null;
+    let focusTargetId = neighbourId;
+    try {
+      const data = await fetchJson(`/api/itinerary/${itinerary.id}/remove`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stopIndex,
+          version: itinerary.version,
+          ...(nowISO ? { now: nowISO } : {}),
+        }),
+        parse: parseRemovePayload,
+      });
+      if (!data.removed) {
+        // An honest refusal — the last stop, a locked one, a venue the tail
+        // can't be re-timed around. Nothing was written.
+        setBannerFlat(true);
+        setBanner(data.reason);
+        return;
+      }
+      mutationApplied = true;
+      const updated = await readItinerary(itinerary.id, nowISO ?? "");
+
+      // The stops that MOVED get the reflow treatment — the same id-keyed
+      // strike-through/settle a swap uses. It survives the splice for free
+      // because it is keyed by venue id, and the indices the server reports
+      // are already post-removal, which is exactly what `updated` holds.
+      const ids = new Set<string>();
+      const olds: Record<string, string | null> = {};
+      for (const shifted of data.downstreamShifted) {
+        const stop = updated.stops[shifted];
+        if (stop?.id) {
+          ids.add(stop.id);
+          olds[stop.id] = oldById[stop.id] ?? null;
+        }
+      }
+      applyItinerary(updated);
+      setChangedIds(ids);
+      setOldStarts(olds);
+      // Selection cannot survive its own stop. Prefer whatever now occupies
+      // the removed position; a removed LAST stop has nothing after it.
+      const nextSelected =
+        updated.stops[stopIndex]?.id ?? updated.stops[stopIndex - 1]?.id ?? null;
+      setSelected(nextSelected);
+      focusTargetId = nextSelected ?? focusTargetId;
+      setBannerFlat(false);
+      setBanner(data.reason);
+    } catch (err) {
+      const detail = clientErrorMessage(err);
+      if (!mutationApplied && mutationOutcomeMayBeAmbiguous(err)) {
+        try {
+          const latest = await readItinerary(itinerary.id, nowISO ?? "");
+          applyItinerary(latest);
+          // The stop may or may not still be there, so say so rather than
+          // guessing: re-select whatever now sits at that position.
+          const refreshedId = latest.stops[stopIndex]?.id ?? null;
+          setSelected(refreshedId);
+          focusTargetId = refreshedId ?? focusTargetId;
+          setRemoveError(
+            `The remove response was interrupted, so the latest saved plan was refreshed. Check whether the stop is still there before retrying. (${detail})`
+          );
+        } catch (refreshErr) {
+          setRemoveError(
+            `The remove response was interrupted and the saved plan could not be refreshed; what you see may be out of date. (${clientErrorMessage(refreshErr)})`
+          );
+        }
+        return;
+      }
+      setRemoveError(
+        mutationApplied
+          ? `The stop was removed, but the follow-up refresh failed; what you see may be out of date. (${detail})`
+          : detail
+      );
+    } finally {
+      setRemoving(false);
+      endOperation(operation);
+      if (focusTargetId) requestStripFocus(focusTargetId);
+    }
+  }
+
   // merge live status + changed flags (by venue id) onto the base map stops
   const styledStops = useMemo<MapStop[]>(
     () =>
@@ -2791,6 +2920,19 @@ export default function Home() {
           disabled: busy,
           error: swapError,
           canSwap,
+        }}
+        remove={{
+          onConfirm: () => void doRemove(),
+          submitting: removing,
+          disabled: busy,
+          error: removeError,
+          // Same gate as a swap — an upcoming stop with a venue — because a
+          // past or active stop is not editable and deleting is an edit. The
+          // "you'd have nothing left" refusal is deliberately NOT mirrored
+          // here: it is the ENGINE's to make, on the plan it can actually see,
+          // and a second copy of that rule in the browser is one that would
+          // drift.
+          canRemove: canSwap,
         }}
       />
 
