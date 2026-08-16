@@ -281,6 +281,30 @@ function isSelection(value: unknown): value is Selection {
   );
 }
 
+// The leg-geometry bounds, written out again rather than imported: this file
+// runs in the BROWSER and `travel.ts` pulls in server-only modules, which is
+// the same reason every other bound here (1_440 minutes, 64-char instants) is
+// spelled twice. Keep them equal to travel.ts's own constants.
+const MAX_PATH_POLYLINE_CHARS = 4_096;
+const MAX_PATH_SEGMENTS_PER_LEG = 128;
+
+/** One drawable step of a leg. Rejected here (rather than dropped, as the
+ *  server does on ingest) for the same reason every other guard in this file
+ *  rejects: by the time a payload reaches the browser the server has already
+ *  sanitized it, so a malformed segment means the data is not what it claims
+ *  to be. `color` is optional AND nullable — a walk step publishes none. */
+function isPathSegment(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const segment = value as JsonRecord;
+  return (
+    (segment.mode === "walk" || segment.mode === "transit") &&
+    typeof segment.encodedPolyline === "string" &&
+    segment.encodedPolyline.length > 0 &&
+    segment.encodedPolyline.length <= MAX_PATH_POLYLINE_CHARS &&
+    (segment.color === undefined || nullableString(segment.color))
+  );
+}
+
 function isTravelLeg(value: unknown): value is TravelLeg {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const leg = value as JsonRecord;
@@ -298,7 +322,13 @@ function isTravelLeg(value: unknown): value is TravelLeg {
     (leg.transit === undefined || isTransitSummary(leg.transit)) &&
     (leg.transitSegments === undefined ||
       (Array.isArray(leg.transitSegments) &&
-        leg.transitSegments.every(isTransitSummary)))
+        leg.transitSegments.every(isTransitSummary))) &&
+    // absent on a walk leg with no step geometry, on the unknown estimate,
+    // and on every plan stored before per-step geometry was read
+    (leg.pathSegments === undefined ||
+      (Array.isArray(leg.pathSegments) &&
+        leg.pathSegments.length <= MAX_PATH_SEGMENTS_PER_LEG &&
+        leg.pathSegments.every(isPathSegment)))
   );
 }
 

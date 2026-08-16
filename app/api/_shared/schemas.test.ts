@@ -159,6 +159,84 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "PER-STEP GEOMETRY survives the wire in order, and a leg without it still validates",
+    () => {
+      const drawn = parseTravelLegs([
+        {
+          ...legWith(rideWithTimes)[0],
+          pathSegments: [
+            { mode: "walk", encodedPolyline: "enc_walk", color: null },
+            { mode: "transit", encodedPolyline: "enc_ride", color: "#d71920" },
+          ],
+        },
+      ])[0];
+      assert.deepStrictEqual(drawn.pathSegments, [
+        { mode: "walk", encodedPolyline: "enc_walk", color: null },
+        { mode: "transit", encodedPolyline: "enc_ride", color: "#d71920" },
+      ]);
+      // BACKWARD COMPAT: every plan stored before geometry was read, plus
+      // the walk legs and the estimate fallback, have no such key
+      assert.strictEqual(parseTravelLegs(legWith(rideWithTimes))[0].pathSegments, undefined);
+    },
+  ],
+  [
+    "a MALFORMED segment is dropped and the leg survives — geometry is a decoration, not the plan",
+    () => {
+      const leg = parseTravelLegs([
+        {
+          ...legWith(transitSummary)[0],
+          pathSegments: [
+            { mode: "drive", encodedPolyline: "enc_car" }, // not a mode we draw
+            { mode: "walk", encodedPolyline: "" }, // empty is not geometry
+            { mode: "walk", encodedPolyline: "x".repeat(5_000) }, // past the cap
+            { mode: "transit", encodedPolyline: 42 }, // not a string
+            { mode: "walk", encodedPolyline: "enc_ok" },
+          ],
+        },
+      ])[0];
+      assert.deepStrictEqual(
+        leg.pathSegments,
+        [{ mode: "walk", encodedPolyline: "enc_ok" }],
+        "only the well-formed segment is stored"
+      );
+      // and the leg itself is still here, with its ride intact
+      assert.strictEqual(leg.totalMinutes, 27);
+      assert.strictEqual(leg.transit?.lineName, "501 Queen");
+    },
+  ],
+  [
+    "when NOTHING survives the key is dropped, so a bad array can never be stored",
+    () => {
+      const leg = parseTravelLegs([
+        {
+          ...legWith(transitSummary)[0],
+          pathSegments: [{ mode: "walk" }, "enc_walk", null],
+        },
+      ])[0];
+      assert.strictEqual(leg.pathSegments, undefined);
+      assert.ok(!("pathSegments" in leg));
+    },
+  ],
+  [
+    "the FIELD's own shape is still refused: not an array, or more steps than a journey has",
+    () => {
+      assert.throws(() =>
+        parseTravelLegs([{ ...legWith(transitSummary)[0], pathSegments: "enc" }])
+      );
+      assert.throws(() =>
+        parseTravelLegs([
+          {
+            ...legWith(transitSummary)[0],
+            pathSegments: Array.from({ length: 129 }, () => ({
+              mode: "walk",
+              encodedPolyline: "enc",
+            })),
+          },
+        ])
+      );
+    },
+  ],
+  [
     "the leg contract it already enforced is untouched",
     () => {
       assert.deepStrictEqual(parseTravelLegs(undefined), []);

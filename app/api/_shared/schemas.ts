@@ -1,6 +1,10 @@
 import type { ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
 import type { LatLng } from "../schedule/travel";
-import type { TravelLeg } from "../schedule/travel";
+import type { PathSegment, TravelLeg } from "../schedule/travel";
+import {
+  MAX_PATH_POLYLINE_CHARS,
+  MAX_PATH_SEGMENTS_PER_LEG,
+} from "../schedule/travel";
 import type { ScheduledStop } from "../schedule/schedule";
 import type { HomePoint } from "../schedule/home";
 import { normalizeStopCountSlots } from "../../lib/planSlots";
@@ -389,6 +393,45 @@ function checkRideDetail(ride: unknown, where: string): void {
   }
 }
 
+/**
+ * The leg's per-step geometry, sanitized. Deliberately MORE FORGIVING than
+ * the ride check above, and the difference is what the data is FOR: a
+ * segment is a line on a map, with the whole-leg polyline still behind it as
+ * a fallback, so a malformed one is dropped and the leg survives — refusing
+ * the request would cost the caller an entire stored plan over a decoration.
+ * The two things that ARE refused are shape errors about the field itself:
+ * not an array, or more entries than any journey has.
+ *
+ * Returns undefined when nothing survives, so the key is omitted rather than
+ * left as an empty array — "no geometry" is the same fact whichever way it
+ * arrived.
+ */
+function keepPathSegments(value: unknown, where: string): PathSegment[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_PATH_SEGMENTS_PER_LEG) {
+    badRequest(`\`${where}\` must be an array of at most ${MAX_PATH_SEGMENTS_PER_LEG} segments.`);
+  }
+  const kept: PathSegment[] = [];
+  for (const segment of value) {
+    if (!isRecord(segment)) continue;
+    const { mode, encodedPolyline, color } = segment;
+    if (mode !== "walk" && mode !== "transit") continue;
+    if (
+      typeof encodedPolyline !== "string" ||
+      encodedPolyline.length === 0 ||
+      encodedPolyline.length > MAX_PATH_POLYLINE_CHARS
+    ) {
+      continue;
+    }
+    if (color !== undefined && color !== null && typeof color !== "string") continue;
+    kept.push({
+      mode,
+      encodedPolyline,
+      ...(color === undefined ? {} : { color: color as string | null }),
+    });
+  }
+  return kept.length > 0 ? kept : undefined;
+}
+
 export function parseTravelLegs(value: unknown, field = "legs"): TravelLeg[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > REQUEST_LIMITS.points - 1) {
@@ -434,7 +477,15 @@ export function parseTravelLegs(value: unknown, field = "legs"): TravelLeg[] {
         checkRideDetail(ride, `${field}[${index}].transitSegments[${rideIndex}]`)
       );
     }
-    return entry as unknown as TravelLeg;
+    const leg = entry as unknown as TravelLeg;
+    if (entry.pathSegments === undefined) return leg;
+    // Sanitizing, not just checking: the stored leg must carry only segments
+    // that passed, so a dropped one cannot come back out of the store later.
+    const kept = keepPathSegments(entry.pathSegments, `${field}[${index}].pathSegments`);
+    const sanitized: TravelLeg = { ...leg };
+    if (kept) sanitized.pathSegments = kept;
+    else delete sanitized.pathSegments;
+    return sanitized;
   });
 }
 

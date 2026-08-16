@@ -8,6 +8,7 @@ import {
   FALLBACK_WALK_MIN_UNCERTAINTY_MIN,
   FALLBACK_WALK_UNCERTAINTY_RATIO,
   getTravelLegs,
+  MAX_PATH_POLYLINE_CHARS,
   MAX_WALK_LABEL_MIN,
   SHORT_LEG_WALK_METERS,
   TRANSIT_SKIP_HAVERSINE_METERS,
@@ -125,6 +126,79 @@ const MULTI_RIDE_WITH_TIMES: ComputeRoutesResponse = {
     },
   ],
 };
+/** The same journey a map has to DRAW, in the shape the widened field mask
+ *  returns: every step with its own polyline and its own travelMode — walk
+ *  to the stop, ride, transfer walk, ride, walk to the door. The second ride
+ *  publishes no colour, which is the keep-on-missing case. */
+const STEPS_WITH_GEOMETRY: ComputeRoutesResponse = {
+  routes: [
+    {
+      duration: "1800s",
+      distanceMeters: 7400,
+      polyline: { encodedPolyline: "enc_whole_leg" },
+      legs: [
+        {
+          steps: [
+            {
+              travelMode: "WALK",
+              polyline: { encodedPolyline: "enc_walk_to_stop" },
+              // arrives with the geometry and is deliberately never stored
+              staticDuration: "240s",
+            },
+            {
+              travelMode: "TRANSIT",
+              polyline: { encodedPolyline: "enc_ride_1" },
+              transitDetails: {
+                headsign: "Eglinton Station",
+                stopCount: 8,
+                transitLine: {
+                  name: "Ossington",
+                  nameShort: "63",
+                  color: "#ed1c24",
+                  textColor: "#ffffff",
+                  vehicle: { type: "BUS" },
+                },
+              },
+            },
+            { travelMode: "WALK", polyline: { encodedPolyline: "enc_transfer_walk" } },
+            {
+              travelMode: "TRANSIT",
+              polyline: { encodedPolyline: "enc_ride_2" },
+              transitDetails: {
+                headsign: "Kennedy",
+                stopCount: 6,
+                transitLine: { name: "Line 2 Bloor–Danforth", nameShort: "2" },
+              },
+            },
+            { travelMode: "WALK", polyline: { encodedPolyline: "enc_walk_to_door" } },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+/** A WALK route's own turn-by-turn steps — a different journey's geometry
+ *  from the transit response above, so a leg drawn from the wrong one is
+ *  visible in the assertion. */
+const WALK_STEPS: ComputeRoutesResponse = {
+  routes: [
+    {
+      duration: "300s",
+      distanceMeters: 380,
+      polyline: { encodedPolyline: "enc_whole_walk" },
+      legs: [
+        {
+          steps: [
+            { travelMode: "WALK", polyline: { encodedPolyline: "enc_w_step_1" } },
+            { travelMode: "WALK", polyline: { encodedPolyline: "enc_w_step_2" } },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
 const NO_ROUTE: ComputeRoutesResponse = {};
 
 const cases: Array<[string, () => void]> = [
@@ -462,6 +536,135 @@ const cases: Array<[string, () => void]> = [
         "unreadable values become null; a marker is never drawn at a guess"
       );
       assert.strictEqual(ride.lineName, "501 Queen", "the rest of the ride survives");
+    },
+  ],
+  [
+    "PER-STEP GEOMETRY rides on the leg in travel order, each ride in its own colour",
+    () => {
+      const leg = buildLeg(0, STEPS_WITH_GEOMETRY, null);
+      assert.deepStrictEqual(leg.pathSegments, [
+        { mode: "walk", encodedPolyline: "enc_walk_to_stop", color: null },
+        { mode: "transit", encodedPolyline: "enc_ride_1", color: "#ed1c24" },
+        { mode: "walk", encodedPolyline: "enc_transfer_walk", color: null },
+        // no published colour → null, exactly like the ride's own record
+        { mode: "transit", encodedPolyline: "enc_ride_2", color: null },
+        { mode: "walk", encodedPolyline: "enc_walk_to_door", color: null },
+      ]);
+      // the whole-leg line is untouched and stays the fallback
+      assert.strictEqual(leg.encodedPolyline, "enc_whole_leg");
+    },
+  ],
+  [
+    "BUILD A REGRESSION: the same response's rides, times and minutes are unchanged by the geometry",
+    () => {
+      const leg = buildLeg(0, STEPS_WITH_GEOMETRY, null);
+      assert.deepStrictEqual(
+        leg.transitSegments!.map((s) => [s.lineName, s.shortName, s.color, s.stopCount]),
+        [
+          ["63 Ossington", "63", "#ed1c24", 8],
+          ["Line 2 Bloor–Danforth", "2", null, 6],
+        ],
+        "the rides parse exactly as they did before per-step geometry existed"
+      );
+      assert.deepStrictEqual(leg.transit, leg.transitSegments![0]);
+      // and nothing the scheduler reads moved: provider duration + margin
+      assert.strictEqual(leg.rawMinutes, 30);
+      assert.strictEqual(leg.totalMinutes, 30 + TRANSIT_MARGIN_MIN);
+    },
+  ],
+  [
+    "no geometry, no segment: a step without a polyline, an unknown mode, and an empty line are all skipped",
+    () => {
+      const res: ComputeRoutesResponse = {
+        routes: [
+          {
+            duration: "600s",
+            distanceMeters: 2000,
+            legs: [
+              {
+                steps: [
+                  { travelMode: "WALK", polyline: { encodedPolyline: "enc_kept_walk" } },
+                  { travelMode: "WALK" }, // no geometry at all
+                  {
+                    travelMode: "TRANSIT",
+                    polyline: { encodedPolyline: "enc_kept_ride" },
+                    transitDetails: {
+                      transitLine: { name: "501 Queen", nameShort: "501", color: "#d71920" },
+                    },
+                  },
+                  // a mode this app never requests — skipped, never guessed
+                  { travelMode: "DRIVE", polyline: { encodedPolyline: "enc_car" } },
+                  // no travelMode at all: the step's identity is unknown
+                  { polyline: { encodedPolyline: "enc_modeless" } },
+                  // an empty string is not geometry; stored it would decode
+                  // to a line at (0,0)
+                  { travelMode: "WALK", polyline: { encodedPolyline: "" } },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      const leg = buildLeg(0, res, null);
+      assert.deepStrictEqual(leg.pathSegments, [
+        { mode: "walk", encodedPolyline: "enc_kept_walk", color: null },
+        { mode: "transit", encodedPolyline: "enc_kept_ride", color: "#d71920" },
+      ]);
+      // the skipped steps cost the ride nothing — the parses are independent
+      assert.strictEqual(leg.transitSegments?.length, 1);
+      assert.strictEqual(leg.transit?.lineName, "501 Queen");
+    },
+  ],
+  [
+    "an over-long step polyline is dropped, and the rest of the leg survives",
+    () => {
+      const res: ComputeRoutesResponse = {
+        routes: [
+          {
+            duration: "600s",
+            distanceMeters: 2000,
+            legs: [
+              {
+                steps: [
+                  {
+                    travelMode: "WALK",
+                    polyline: { encodedPolyline: "x".repeat(MAX_PATH_POLYLINE_CHARS + 1) },
+                  },
+                  { travelMode: "WALK", polyline: { encodedPolyline: "enc_ok" } },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      assert.deepStrictEqual(buildLeg(0, res, NO_ROUTE).pathSegments, [
+        { mode: "walk", encodedPolyline: "enc_ok", color: null },
+      ]);
+    },
+  ],
+  [
+    "geometry comes from the SAME route as the leg's numbers — a relabeled walk draws the WALK steps",
+    () => {
+      // short hop: transit data exists but the walk label wins, so the leg's
+      // minutes AND its geometry must both come from the walk route
+      const leg = buildLeg(0, STEPS_WITH_GEOMETRY, WALK_STEPS);
+      assert.strictEqual(leg.mode, "walk");
+      assert.deepStrictEqual(
+        leg.pathSegments?.map((p) => p.encodedPolyline),
+        ["enc_w_step_1", "enc_w_step_2"],
+        "the transit route's steps must never be drawn under a walk leg"
+      );
+      assert.strictEqual(leg.encodedPolyline, "enc_whole_walk");
+    },
+  ],
+  [
+    "a response with NO step geometry carries no pathSegments key at all",
+    () => {
+      // every plan stored before this shipped, and every provider response
+      // that draws no step lines: the field is ABSENT, not an empty array
+      assert.strictEqual(buildLeg(0, MULTI_RIDE_WITH_TIMES, null).pathSegments, undefined);
+      assert.ok(!("pathSegments" in buildLeg(0, mkRoute(1200, 12000), null)));
+      assert.ok(!("pathSegments" in buildLeg(0, NO_ROUTE, NO_ROUTE)));
     },
   ],
   [

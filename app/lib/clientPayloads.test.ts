@@ -226,6 +226,69 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "a leg's PER-STEP geometry passes, and a leg without any still does",
+    () => {
+      const drawn = {
+        ...transitLeg,
+        pathSegments: [
+          { mode: "walk", encodedPolyline: "enc_walk", color: null },
+          { mode: "transit", encodedPolyline: "enc_ride", color: "#d71920" },
+          // colour absent entirely is legal too — optional AND nullable
+          { mode: "walk", encodedPolyline: "enc_walk_2" },
+        ],
+      };
+      assert.strictEqual(
+        parseTravelPayload({ legs: [drawn] }).legs[0].pathSegments?.length,
+        3
+      );
+      // backward compat: walk legs, the unknown estimate, and every plan
+      // stored before geometry was read carry no such key
+      assert.strictEqual(
+        parseTravelPayload({ legs: [transitLeg] }).legs[0].pathSegments,
+        undefined
+      );
+      assert.strictEqual(
+        parseTravelPayload({ legs: [walkLeg, unknownLeg] }).legs[1].pathSegments,
+        undefined
+      );
+    },
+  ],
+  [
+    "a corrupt segment is REJECTED here — the server sanitizes on the way in, so this can only be a lie",
+    () => {
+      const withSegments = (pathSegments: unknown) => () =>
+        parseTravelPayload({ legs: [{ ...transitLeg, pathSegments }] });
+      assert.throws(withSegments("enc_ride"), /.*/, "not an array");
+      assert.throws(
+        withSegments([{ mode: "drive", encodedPolyline: "enc" }]),
+        /.*/,
+        "a mode this app never draws"
+      );
+      assert.throws(
+        withSegments([{ mode: "walk", encodedPolyline: "" }]),
+        /.*/,
+        "an empty line would decode to (0,0)"
+      );
+      assert.throws(
+        withSegments([{ mode: "walk", encodedPolyline: "x".repeat(5_000) }]),
+        /.*/,
+        "past the per-segment cap"
+      );
+      assert.throws(
+        withSegments([{ mode: "transit", encodedPolyline: "enc", color: 16711680 }]),
+        /.*/,
+        "a colour that is not a string"
+      );
+      assert.throws(
+        withSegments(
+          Array.from({ length: 129 }, () => ({ mode: "walk", encodedPolyline: "enc" }))
+        ),
+        /.*/,
+        "more steps than a journey has"
+      );
+    },
+  ],
+  [
     "a corrupt board time or transfer coordinate is REJECTED — it would be rendered, or drawn on the map",
     () => {
       assert.throws(() =>

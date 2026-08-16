@@ -6,6 +6,7 @@ import { formatStopTime } from "./lib/timeLabels";
 import { originDisplayLabel } from "./lib/locationLabels";
 import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
 import { RideDetail, transferPoints } from "./lib/transitDetail";
+import type { PathSegment } from "./api/schedule/travel";
 import { createRetryableLoader } from "./lib/retryableLoader";
 import { displayableRouteMode } from "./lib/mapRoutePolicy";
 
@@ -25,6 +26,10 @@ export interface MapStop {
   reason?: string;
   legModeToNext?: "transit" | "walk" | "unknown";
   polylineToNext?: string | null;
+  /** the same leg step by step, in travel order — the provider's own
+   * geometry for each walk and each ride. Carried here so the map HAS it;
+   * `polylineToNext` above is still what draws today. */
+  pathSegmentsToNext?: PathSegment[] | null;
   /** transit line detail for the leg leaving this stop */
   legLabel?: string | null;
   /** every ride of that leg, in order — the bubbles, and the provider's
@@ -44,6 +49,7 @@ export interface MapHome {
   lng: number;
   legModeToNext?: "transit" | "walk" | "unknown";
   polylineToNext?: string | null;
+  pathSegmentsToNext?: PathSegment[] | null;
   legLabel?: string | null;
   legSegments?: RideDetail[] | null;
   leaveBy?: string | null;

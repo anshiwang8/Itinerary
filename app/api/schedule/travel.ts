@@ -39,12 +39,37 @@ export const FALLBACK_WALK_UNCERTAINTY_RATIO = 0.2;
 export const FALLBACK_WALK_MIN_UNCERTAINTY_MIN = 5;
 const FALLBACK_WALK_SPEED_KMH = 5;
 
+// A polyline per STEP is what lets the map draw a leg as the journey it is
+// — walk to the stop, ride, transfer walk, ride — instead of one undivided
+// line. `travelMode` is what says which of those a step IS (never guessed
+// from whether transitDetails happens to be present), and `staticDuration`
+// arrives with them.
+//
+// All three are ESSENTIALS-tier fields and a request bills at its HIGHEST
+// tier — `routes.legs.steps.transitDetails` above is already Pro — so this
+// should not move the SKU. That is inferred from Google's field-list
+// pricing docs, NOT measured: check one live billing line after deploy.
 const FIELD_MASK = [
   "routes.duration",
   "routes.distanceMeters",
   "routes.polyline.encodedPolyline",
   "routes.legs.steps.transitDetails",
+  "routes.legs.steps.polyline.encodedPolyline",
+  "routes.legs.steps.travelMode",
+  "routes.legs.steps.staticDuration",
 ].join(",");
+
+/** One step's geometry, capped. The cap is a FILTER and it deletes rather
+ *  than errors, exactly like the routing price ceiling — set it too low and
+ *  a legitimate long step's line silently goes missing from the map, which
+ *  reads as a rendering bug three files away. A cross-town ride measured
+ *  ~451 chars on the live probe, so this is ~9x headroom; raise it if a real
+ *  step is ever seen near it, never lower it to "tidy up". */
+export const MAX_PATH_POLYLINE_CHARS = 4_096;
+/** A journey with more steps than this is not a journey. Turn-by-turn WALK
+ *  routes are the reason it is not smaller: a walk leg's steps are per-turn,
+ *  so dozens is ordinary where a transit leg has a handful. */
+export const MAX_PATH_SEGMENTS_PER_LEG = 128;
 
 export interface LatLng {
   latitude: number;
@@ -74,6 +99,19 @@ export interface ComputeRoutesResponse {
     polyline?: { encodedPolyline?: string };
     legs?: Array<{
       steps?: Array<{
+        /** this step's own geometry — the newly requested field, and the
+         *  only source of a per-step line. A step without one draws nothing. */
+        polyline?: { encodedPolyline?: string };
+        /** "WALK" | "TRANSIT" (Google also spells DRIVE/BICYCLE/TWO_WHEELER,
+         *  which this app never requests). Read as the step's identity, not
+         *  inferred from the presence of transitDetails. */
+        travelMode?: string;
+        /** the step's own duration ("323s"). It arrives with the geometry and
+         *  is deliberately NOT stored on the leg: a per-step number is the one
+         *  thing here that could be mistaken for a scheduling input, and the
+         *  schedule runs on `totalMinutes` alone. If a later slice ever keeps
+         *  it, it is a LABEL. */
+        staticDuration?: string;
         transitDetails?: {
           headsign?: string;
           stopCount?: number;
@@ -137,6 +175,28 @@ export interface TransitSummary {
   alightLocation?: LatLng | null;
 }
 
+/** ONE drawable piece of a leg: the geometry of a single provider STEP, in
+ *  travel order. Together they are the leg's real shape broken at every
+ *  change of mode and line — the walk to the stop, the ride, the transfer
+ *  walk, the next ride — which the single whole-leg `encodedPolyline` cannot
+ *  express because it has no seams.
+ *
+ *  DISPLAY ONLY, on the same terms as the board/alight instants above:
+ *  nothing scheduling reads a segment, and the per-step `staticDuration`
+ *  that arrives alongside is not stored at all. A step the provider drew no
+ *  line for produces NO segment — a line we did not receive is not ours to
+ *  invent. */
+export interface PathSegment {
+  mode: "walk" | "transit";
+  /** the provider's own encoded polyline for this step, verbatim */
+  encodedPolyline: string;
+  /** the ride's line colour ("#f2c10b") — the SAME field the strip's badge
+   *  reads, so a line on the map and its bubble can never disagree. null on
+   *  a walk step, and on a ride whose agency publishes no colour (the render
+   *  falls back to its own ink). */
+  color?: string | null;
+}
+
 export interface TravelLeg {
   /** leg from timed stop i to timed stop i+1 */
   fromIndex: number;
@@ -157,6 +217,14 @@ export interface TravelLeg {
    * journey is three segments. Absent on walk legs, on pre-existing
    * stored plans, and when the route carried no transit detail. */
   transitSegments?: TransitSummary[];
+  /** The leg's geometry step by step, in travel order — what the map draws
+   * a mode-and-line-aware route from. ADDITIVE and independent of
+   * `transitSegments` (which carries the rides' times/colours, not their
+   * shape); `encodedPolyline` above is untouched and stays the fallback.
+   * Absent whenever no step carried geometry: every plan stored before
+   * 2026-08-16, the `unknown` estimate, and any response the provider drew
+   * no step lines for. */
+  pathSegments?: PathSegment[];
 }
 
 function parseDurationMinutes(duration?: string): number | null {
@@ -186,21 +254,50 @@ function latLngOrNull(value: unknown): LatLng | null {
   return { latitude, longitude };
 }
 
-// EVERY transit ride of the route, in riding order. This used to return
-// on the FIRST step with transitDetails — any transfer after it was
-// discarded before the data ever reached the UI, which is why the strip
-// could only ever name one line per leg.
-//
-// Exported for the MOCK fixture, which builds provider-shaped steps and
-// runs them through this same parser: the fixture layer supplies DATA and
-// never a second copy of the extraction.
-export function extractTransitSegments(
+/** WALK / TRANSIT as the app spells them, or null for anything else. A mode
+ *  is never inferred — a step whose travelMode we do not recognise is
+ *  skipped rather than guessed into one of ours. */
+function pathMode(travelMode: unknown): PathSegment["mode"] | null {
+  if (travelMode === "WALK") return "walk";
+  if (travelMode === "TRANSIT") return "transit";
+  return null;
+}
+
+/** One step's line, or null. Geometry we cannot read, do not have, or that
+ *  is implausibly long for a single step is simply absent — never a
+ *  placeholder, because an empty string would decode to a line at (0,0). */
+function stepPolyline(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return value.length > MAX_PATH_POLYLINE_CHARS ? null : value;
+}
+
+/** Both readings of the same walk over `route.legs[].steps[]`, done ONCE:
+ *  the rides (Build A — times, colours, stops) and the geometry (this
+ *  slice). They are independent outputs of one traversal, so a step can
+ *  contribute to either, both, or neither. */
+function readSteps(
   route: NonNullable<ComputeRoutesResponse["routes"]>[number]
-): TransitSummary[] {
+): { transit: TransitSummary[]; paths: PathSegment[] } {
   const segments: TransitSummary[] = [];
+  const paths: PathSegment[] = [];
   for (const leg of route.legs ?? []) {
     for (const step of leg.steps ?? []) {
       const td = step.transitDetails;
+      // GEOMETRY first, and on its own terms: a walk step has no
+      // transitDetails and still has a line to draw. Both conditions are
+      // hard — no recognised mode or no polyline means no segment, never a
+      // half-known one.
+      const mode = pathMode(step.travelMode);
+      const encoded = stepPolyline(step.polyline?.encodedPolyline);
+      if (mode && encoded) {
+        paths.push({
+          mode,
+          encodedPolyline: encoded,
+          // the ride's own colour, read from the SAME place the badge reads
+          // it; a walk step is coloured at render, never here
+          color: mode === "transit" ? td?.transitLine?.color ?? null : null,
+        });
+      }
       if (!td) continue;
       const line = td.transitLine ?? {};
       // avoid "501 501 Queen" when the long name already contains the
@@ -228,7 +325,30 @@ export function extractTransitSegments(
       });
     }
   }
-  return segments;
+  return { transit: segments, paths };
+}
+
+// EVERY transit ride of the route, in riding order. This used to return
+// on the FIRST step with transitDetails — any transfer after it was
+// discarded before the data ever reached the UI, which is why the strip
+// could only ever name one line per leg.
+//
+// Exported for the MOCK fixture, which builds provider-shaped steps and
+// runs them through this same parser: the fixture layer supplies DATA and
+// never a second copy of the extraction. Its OUTPUT is unchanged by the
+// geometry slice — the walk over the steps is shared, the two results are
+// not.
+export function extractTransitSegments(
+  route: NonNullable<ComputeRoutesResponse["routes"]>[number]
+): TransitSummary[] {
+  return readSteps(route).transit;
+}
+
+/** The route's geometry, step by step, in the provider's own order. */
+export function extractPathSegments(
+  route: NonNullable<ComputeRoutesResponse["routes"]>[number]
+): PathSegment[] {
+  return readSteps(route).paths;
 }
 
 interface ParsedRoute {
@@ -238,6 +358,7 @@ interface ParsedRoute {
   encodedPolyline: string | null;
   transit: TransitSummary | null;
   transitSegments: TransitSummary[];
+  pathSegments: PathSegment[];
 }
 
 function parseRoute(
@@ -253,9 +374,10 @@ function parseRoute(
       encodedPolyline: null,
       transit: null,
       transitSegments: [],
+      pathSegments: [],
     };
   }
-  const segments = extractTransitSegments(route);
+  const { transit: segments, paths } = readSteps(route);
   return {
     ok: true,
     rawMinutes,
@@ -263,6 +385,8 @@ function parseRoute(
     encodedPolyline: route.polyline?.encodedPolyline ?? null,
     transit: segments[0] ?? null,
     transitSegments: segments,
+    // a leg with more steps than any journey has is not trusted to be one
+    pathSegments: paths.length > MAX_PATH_SEGMENTS_PER_LEG ? [] : paths,
   };
 }
 
@@ -292,6 +416,10 @@ export function buildLeg(
   const t = parseRoute(transitRes);
   const w = parseRoute(walkRes);
 
+  // Geometry always comes from the SAME route as the numbers it describes —
+  // a walk-labeled leg must never be drawn from the transit route's steps.
+  // Omitted when empty, exactly like transitSegments: an absent field is how
+  // this stays additive for every existing reader and stored plan.
   const walkLeg = (src: ParsedRoute): TravelLeg => ({
     fromIndex,
     mode: "walk",
@@ -300,6 +428,7 @@ export function buildLeg(
     totalMinutes: src.rawMinutes,
     distanceMeters: src.distanceMeters,
     encodedPolyline: src.encodedPolyline,
+    ...(src.pathSegments.length > 0 ? { pathSegments: src.pathSegments } : {}),
   });
 
   if (t.ok) {
@@ -324,6 +453,7 @@ export function buildLeg(
       encodedPolyline: t.encodedPolyline,
       ...(t.transit ? { transit: t.transit } : {}),
       ...(t.transitSegments.length > 0 ? { transitSegments: t.transitSegments } : {}),
+      ...(t.pathSegments.length > 0 ? { pathSegments: t.pathSegments } : {}),
     };
   }
 

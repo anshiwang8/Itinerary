@@ -266,6 +266,7 @@ function stopsFromSchedule(sched: ScheduledStop[], pools: Pools): MapStop[] {
       reason: st.reason,
       legModeToNext: st.travelToNext?.mode,
       polylineToNext: st.travelToNext?.encodedPolyline ?? null,
+      pathSegmentsToNext: st.travelToNext?.pathSegments ?? null,
       legLabel: legDetail(st.travelToNext),
       legSegments: legSegments(st.travelToNext),
     });
@@ -287,6 +288,7 @@ function stopsFromItinerary(it: Itinerary): MapStop[] {
       reason: s.reason,
       legModeToNext: s.travelToNext?.mode,
       polylineToNext: s.travelToNext?.encodedPolyline ?? null,
+      pathSegmentsToNext: s.travelToNext?.pathSegments ?? null,
       legLabel: legDetail(s.travelToNext),
       legSegments: legSegments(s.travelToNext),
     }));
@@ -2377,6 +2379,7 @@ export default function Home() {
       lng: homeOrigin.location.longitude,
       legModeToNext: homeLeg.mode,
       polylineToNext: homeLeg.encodedPolyline,
+      pathSegmentsToNext: homeLeg.pathSegments ?? null,
       legLabel: legDetail(homeLeg),
       legSegments: legSegments(homeLeg),
       leaveBy,
