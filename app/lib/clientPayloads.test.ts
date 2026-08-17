@@ -44,6 +44,12 @@ const rideWithTimes = {
   alightLocation: { latitude: 43.6624, longitude: -79.4262 },
 };
 
+const rideIdentity = {
+  rideId: "ride:fixture_1.0",
+  sourceStepIndex: 3,
+  paletteSlot: 23,
+};
+
 const transitLeg = {
   fromIndex: -1,
   mode: "transit",
@@ -84,6 +90,249 @@ const torontoGeocode = {
 };
 
 const cases: Array<[string, () => void]> = [
+  [
+    "travel identity accepts complete new bundles, preserves them, and keeps all-absent legacy legs valid",
+    () => {
+      const ride = { ...transitSummary, ...rideIdentity, paletteSlot: null };
+      const identifiedLeg = {
+        ...transitLeg,
+        legId: "leg:fixture_1.0",
+        transit: ride,
+        transitSegments: [ride],
+        pathSegments: [
+          { mode: "walk", encodedPolyline: "enc_walk", color: null },
+          {
+            mode: "transit",
+            encodedPolyline: "enc_ride",
+            color: "#d71920",
+            ...rideIdentity,
+            paletteSlot: null,
+          },
+        ],
+      };
+      const parsed = parseTravelPayload({ legs: [identifiedLeg] }).legs[0];
+
+      assert.strictEqual(parsed.legId, "leg:fixture_1.0");
+      assert.deepStrictEqual(
+        {
+          rideId: parsed.transit?.rideId,
+          sourceStepIndex: parsed.transit?.sourceStepIndex,
+          paletteSlot: parsed.transit?.paletteSlot,
+        },
+        { ...rideIdentity, paletteSlot: null }
+      );
+      assert.deepStrictEqual(parsed.pathSegments?.[1], identifiedLeg.pathSegments[1]);
+      assert.strictEqual(parseTravelPayload({ legs: [transitLeg] }).legs[0].legId, undefined);
+    },
+  ],
+  [
+    "browser travel validation rejects partial or malformed ride bundles and invalid leg IDs",
+    () => {
+      const invalidBundles = [
+        { rideId: "ride:partial" },
+        { ...rideIdentity, rideId: "-bad-prefix" },
+        { ...rideIdentity, rideId: "x".repeat(129) },
+        { ...rideIdentity, sourceStepIndex: -1 },
+        { ...rideIdentity, sourceStepIndex: 1.5 },
+        { ...rideIdentity, sourceStepIndex: Number.MAX_SAFE_INTEGER + 1 },
+        { ...rideIdentity, paletteSlot: -1 },
+        { ...rideIdentity, paletteSlot: 24 },
+        { ...rideIdentity, paletteSlot: 1.5 },
+        { ...rideIdentity, paletteSlot: undefined },
+      ];
+      for (const bundle of invalidBundles) {
+        assert.throws(() =>
+          parseTravelPayload({
+            legs: [
+              {
+                ...transitLeg,
+                transit: { ...transitSummary, ...bundle },
+              },
+            ],
+          })
+        );
+      }
+      for (const legId of ["", "-bad", "bad id", "x".repeat(129), null, 7]) {
+        assert.throws(() =>
+          parseTravelPayload({ legs: [{ ...transitLeg, legId }] })
+        );
+      }
+    },
+  ],
+  [
+    "browser path validation accepts legacy or complete transit identity and forbids ride metadata on walks",
+    () => {
+      const withPath = (pathSegments: unknown) => () =>
+        parseTravelPayload({ legs: [{ ...transitLeg, pathSegments }] });
+
+      assert.doesNotThrow(
+        withPath([
+          { mode: "transit", encodedPolyline: "legacy" },
+          { mode: "walk", encodedPolyline: "walk" },
+        ])
+      );
+      const identifiedRide = { ...transitSummary, ...rideIdentity };
+      assert.doesNotThrow(() =>
+        parseTravelPayload({
+          legs: [
+            {
+              ...transitLeg,
+              legId: "leg:identified-path",
+              transit: identifiedRide,
+              transitSegments: [identifiedRide],
+              pathSegments: [
+                { mode: "transit", encodedPolyline: "identified", ...rideIdentity },
+              ],
+            },
+          ],
+        })
+      );
+      assert.throws(
+        withPath([
+          { mode: "transit", encodedPolyline: "identified", ...rideIdentity },
+        ])
+      );
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [{ ...transitLeg, legId: "leg:partial-upgrade" }],
+        })
+      );
+      assert.throws(
+        withPath([
+          { mode: "transit", encodedPolyline: "partial", rideId: "ride:partial" },
+        ])
+      );
+      assert.throws(
+        withPath([
+          { mode: "transit", encodedPolyline: "bad_slot", ...rideIdentity, paletteSlot: 24 },
+        ])
+      );
+      assert.throws(
+        withPath([
+          { mode: "walk", encodedPolyline: "walk_with_ride", ...rideIdentity },
+        ])
+      );
+    },
+  ],
+  [
+    "browser validation rejects relational ride conflicts and cross-leg slot collisions",
+    () => {
+      const firstRide = { ...transitSummary, ...rideIdentity, paletteSlot: 0 };
+      const firstLeg = {
+        ...transitLeg,
+        legId: "leg:first",
+        transit: firstRide,
+        transitSegments: [firstRide],
+        pathSegments: [
+          {
+            mode: "transit",
+            encodedPolyline: "first",
+            ...rideIdentity,
+            paletteSlot: 0,
+          },
+        ],
+      };
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [
+            {
+              ...firstLeg,
+              pathSegments: [
+                {
+                  ...firstLeg.pathSegments[0],
+                  paletteSlot: 1,
+                },
+              ],
+            },
+          ],
+        })
+      );
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [
+            {
+              ...firstLeg,
+              transitSegments: [
+                { ...firstRide, rideId: "ride:other" },
+              ],
+            },
+          ],
+        })
+      );
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [
+            {
+              ...firstLeg,
+              transitSegments: [firstRide, { ...firstRide }],
+            },
+          ],
+        })
+      );
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [
+            {
+              ...firstLeg,
+              transitSegments: [
+                {
+                  ...firstRide,
+                  rideId: "ride:other-first",
+                  sourceStepIndex: 8,
+                  paletteSlot: 8,
+                },
+                firstRide,
+              ],
+            },
+          ],
+        })
+      );
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [{ ...firstLeg, transitSegments: undefined }],
+        })
+      );
+      assert.throws(() =>
+        parseTravelPayload({
+          legs: [{ ...firstLeg, transit: undefined }],
+        })
+      );
+
+      const secondRide = {
+        ...firstRide,
+        rideId: "ride:second",
+        sourceStepIndex: 0,
+      };
+      const secondLeg = {
+        ...firstLeg,
+        fromIndex: 0,
+        legId: "leg:second",
+        transit: secondRide,
+        transitSegments: [secondRide],
+        pathSegments: [
+          {
+            mode: "transit",
+            encodedPolyline: "second",
+            rideId: "ride:second",
+            sourceStepIndex: 0,
+            paletteSlot: 0,
+          },
+        ],
+      };
+      assert.throws(() => parseTravelPayload({ legs: [firstLeg, secondLeg] }));
+      assert.throws(() =>
+        parseItineraryPayload({
+          id: "plan-conflict",
+          version: 1,
+          createdAt: "2026-08-17T12:00:00.000Z",
+          status: "planning",
+          stops: [],
+          homeLeg: firstLeg,
+          legs: [secondLeg],
+        })
+      );
+    },
+  ],
   [
     "accepts the bounded success shapes used by every planning stage",
     () => {

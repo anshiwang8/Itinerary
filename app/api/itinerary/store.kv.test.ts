@@ -12,6 +12,7 @@ import {
   saveItinerary,
 } from "./store";
 import { ScheduledStop } from "../schedule/schedule";
+import { TravelLeg } from "../schedule/travel";
 
 // ── Redis REST stub: records commands, serves a tiny key-value map ──
 const kvData = new Map<string, string>();
@@ -81,6 +82,44 @@ function mkStops(): ScheduledStop[] {
   ];
 }
 
+function persistedTransitLeg(withMetadata: boolean): TravelLeg {
+  const metadata = withMetadata
+    ? { rideId: "ride-persisted", sourceStepIndex: 4, paletteSlot: 7 }
+    : {};
+  const ride = {
+    ...metadata,
+    lineName: "Persistent Line",
+    shortName: "P",
+    color: "#123456",
+    textColor: "#ffffff",
+    vehicle: "BUS",
+    headsign: "Persistence Terminal",
+    stopCount: 4,
+    departStop: "Stored Origin",
+    arriveStop: "Stored Destination",
+  };
+  return {
+    ...(withMetadata ? { legId: "leg-persisted" } : {}),
+    fromIndex: -1,
+    mode: "transit",
+    rawMinutes: 10,
+    marginMinutes: 5,
+    totalMinutes: 15,
+    distanceMeters: 1200,
+    encodedPolyline: "persisted-whole-leg",
+    transit: { ...ride },
+    transitSegments: [{ ...ride }],
+    pathSegments: [
+      {
+        mode: "transit",
+        encodedPolyline: "persisted-ride-path",
+        color: "#123456",
+        ...metadata,
+      },
+    ],
+  };
+}
+
 function setKvEnv(on: boolean) {
   if (on) {
     process.env.KV_REST_API_URL = "https://fake-kv.example";
@@ -136,7 +175,12 @@ const cases: Array<[string, () => Promise<void>]> = [
     "KV mode: load round-trips the full itinerary through Redis, not memory",
     async () => {
       setKvEnv(true);
-      const it = createItinerary(mkStops(), []);
+      const it = createItinerary(
+        mkStops(),
+        [],
+        undefined,
+        persistedTransitLeg(true)
+      );
       await saveItinerary(it);
       commands = [];
       const back = await loadItinerary(it.id);
@@ -147,6 +191,76 @@ const cases: Array<[string, () => Promise<void>]> = [
       // the fields the strip depends on survive serialization
       assert.strictEqual(back!.stops[0].priceLevel, "PRICE_LEVEL_MODERATE");
       assert.strictEqual(back!.stops[0].description, "A test venue.");
+      assert.strictEqual(back!.homeLeg?.legId, "leg-persisted");
+      assert.deepStrictEqual(
+        [
+          back!.homeLeg?.transit?.rideId,
+          back!.homeLeg?.transit?.sourceStepIndex,
+          back!.homeLeg?.transit?.paletteSlot,
+          back!.homeLeg?.transitSegments?.[0]?.rideId,
+          back!.homeLeg?.transitSegments?.[0]?.sourceStepIndex,
+          back!.homeLeg?.transitSegments?.[0]?.paletteSlot,
+        ],
+        ["ride-persisted", 4, 7, "ride-persisted", 4, 7]
+      );
+      const persistedPath = back!.homeLeg?.pathSegments?.[0];
+      assert.strictEqual(persistedPath?.mode, "transit");
+      if (persistedPath?.mode === "transit") {
+        assert.deepStrictEqual(
+          [
+            persistedPath.rideId,
+            persistedPath.sourceStepIndex,
+            persistedPath.paletteSlot,
+          ],
+          ["ride-persisted", 4, 7]
+        );
+      }
+    },
+  ],
+  [
+    "KV mode: legacy travel records remain metadata-absent after JSON save/load",
+    async () => {
+      setKvEnv(true);
+      const it = createItinerary(
+        mkStops(),
+        [],
+        undefined,
+        persistedTransitLeg(false)
+      );
+      await saveItinerary(it);
+      const back = await loadItinerary(it.id);
+      assert.ok(back?.homeLeg);
+      const homeLeg = back!.homeLeg!;
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(homeLeg, "legId"),
+        false
+      );
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(homeLeg.transit, "rideId"),
+        false
+      );
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(homeLeg.transit, "sourceStepIndex"),
+        false
+      );
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(homeLeg.transit, "paletteSlot"),
+        false
+      );
+      const legacyPath = homeLeg.pathSegments?.[0];
+      assert.strictEqual(legacyPath?.mode, "transit");
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(legacyPath, "rideId"),
+        false
+      );
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(legacyPath, "sourceStepIndex"),
+        false
+      );
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(legacyPath, "paletteSlot"),
+        false
+      );
     },
   ],
   [

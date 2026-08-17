@@ -138,6 +138,57 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "ride identity/palette facts never become timeline labels or rows",
+    () => {
+      const ride: RideDetail = {
+        ...RIDE_ONE,
+        color: "#ed1c24",
+        textColor: "#ffffff",
+        rideId: "ride_internal_sentinel",
+        sourceStepIndex: 17,
+        paletteSlot: 23,
+      };
+      const rows = timeline({ rides: [ride] })!;
+
+      // The facts object still carries both app-owned metadata and the
+      // provider's unchanged colours for the bubble renderer to consume.
+      assert.deepStrictEqual(
+        [ride.rideId, ride.sourceStepIndex, ride.paletteSlot],
+        ["ride_internal_sentinel", 17, 23]
+      );
+      assert.deepStrictEqual([ride.color, ride.textColor], ["#ed1c24", "#ffffff"]);
+
+      // Timeline rows project only the display contract. App-owned IDs,
+      // source ordinals and palette slots are not user-facing copy/state.
+      assert.deepStrictEqual(
+        rows
+          .filter((row) => row.kind === "board" || row.kind === "alight")
+          .map((row) =>
+            row.kind === "board" || row.kind === "alight"
+              ? [row.kind, row.line, row.stop, row.rideIndex]
+              : null
+          ),
+        [
+          ["board", "63 Ossington", "Ossington Ave at Dundas", 0],
+          ["alight", "63 Ossington", "Ossington Station", 0],
+        ]
+      );
+      for (const row of rows) {
+        assert.ok(!("rideId" in row));
+        assert.ok(!("sourceStepIndex" in row));
+        assert.ok(!("paletteSlot" in row));
+      }
+      const visibleText = rows
+        .flatMap((row) =>
+          row.kind === "board" || row.kind === "alight" ? [row.line, row.stop ?? ""] : []
+        )
+        .join(" ");
+      assert.ok(!visibleText.includes("ride_internal_sentinel"));
+      assert.ok(!visibleText.includes("17"));
+      assert.ok(!visibleText.includes("23"));
+    },
+  ],
+  [
     "an empty stop name is dropped rather than rendered as a blank",
     () => {
       const rows = timeline({ rides: [{ ...RIDE_ONE, departStop: "  ", arriveStop: undefined }] })!;

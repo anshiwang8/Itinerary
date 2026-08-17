@@ -54,6 +54,49 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "split preserves opaque leg and ride palette metadata while changing only fromIndex",
+    () => {
+      const identified: TravelLeg = {
+        ...leg(0, 25),
+        legId: "leg-home-1",
+        mode: "transit",
+        transit: {
+          rideId: "ride-home-1",
+          sourceStepIndex: 2,
+          paletteSlot: 0,
+          lineName: "505 Dundas",
+          shortName: "505",
+          color: "#DA291C",
+          textColor: "#FFFFFF",
+          vehicle: "TRAM",
+          headsign: "Broadview",
+          stopCount: 4,
+          departStop: "A",
+          arriveStop: "B",
+        },
+        pathSegments: [
+          {
+            mode: "transit",
+            encodedPolyline: "enc-home",
+            color: "#DA291C",
+            rideId: "ride-home-1",
+            sourceStepIndex: 2,
+            paletteSlot: 0,
+          },
+        ],
+      };
+      identified.transitSegments = [identified.transit!];
+      const { homeLeg } = splitHomeLeg([identified]);
+      assert.strictEqual(homeLeg?.fromIndex, HOME_LEG_INDEX);
+      assert.strictEqual(homeLeg?.legId, "leg-home-1");
+      assert.strictEqual(homeLeg?.transit?.rideId, "ride-home-1");
+      assert.strictEqual(homeLeg?.transit?.paletteSlot, 0);
+      const path = homeLeg?.pathSegments?.[0];
+      assert.strictEqual(path?.mode, "transit");
+      assert.strictEqual(path?.mode === "transit" ? path.paletteSlot : undefined, 0);
+    },
+  ],
+  [
     "split: no legs → no home leg (nothing to prepend)",
     () => {
       assert.deepStrictEqual(splitHomeLeg([]), { homeLeg: null, interLegs: [] });

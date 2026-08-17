@@ -25,6 +25,58 @@ function leg(fromIndex: number, mode: "transit" | "walk", total: number): Travel
   };
 }
 
+function transitMetadataLeg(
+  fromIndex: number,
+  total: number,
+  legId: string,
+  rideId: string,
+  paletteSlot: number | null
+): TravelLeg {
+  const ride = {
+    rideId,
+    sourceStepIndex: 0,
+    paletteSlot,
+    lineName: "Test Line",
+    shortName: "T",
+    color: null,
+    textColor: null,
+    vehicle: "BUS",
+    headsign: "Test Terminal",
+    stopCount: 3,
+    departStop: "Origin",
+    arriveStop: "Destination",
+  };
+  return {
+    ...leg(fromIndex, "transit", total),
+    legId,
+    transit: { ...ride },
+    transitSegments: [{ ...ride }],
+    pathSegments: [
+      {
+        mode: "transit",
+        encodedPolyline: `path-${rideId}`,
+        color: null,
+        rideId,
+        sourceStepIndex: 0,
+        paletteSlot,
+      },
+    ],
+  };
+}
+
+function assertRideSlot(route: TravelLeg, rideId: string, paletteSlot: number) {
+  assert.strictEqual(route.transit?.rideId, rideId);
+  assert.strictEqual(route.transit?.sourceStepIndex, 0);
+  assert.strictEqual(route.transit?.paletteSlot, paletteSlot);
+  assert.strictEqual(route.transitSegments?.[0]?.rideId, rideId);
+  assert.strictEqual(route.transitSegments?.[0]?.sourceStepIndex, 0);
+  assert.strictEqual(route.transitSegments?.[0]?.paletteSlot, paletteSlot);
+  const path = route.pathSegments?.find((segment) => segment.mode === "transit");
+  assert.strictEqual(path?.rideId, rideId);
+  assert.strictEqual(path?.sourceStepIndex, 0);
+  assert.strictEqual(path?.paletteSlot, paletteSlot);
+}
+
 function mkStops(): ScheduledStop[] {
   return [
     {
@@ -258,6 +310,91 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(it.stops[1].travelToNext?.mode, "walk");
       // dessert replans from the bar's COMMITTED end: 22:10 + 10 walk
       assert.strictEqual(new Date(it.stops[2].start_time!).getTime(), new Date(T(22, 20)).getTime());
+    },
+  ],
+  [
+    "successful reroute preserves retained route metadata and allocates the first unused ride slot",
+    async () => {
+      const homeLeg = transitMetadataLeg(
+        -1,
+        20,
+        "leg-home-retained",
+        "ride-home-retained",
+        0
+      );
+      const it = mkItinerary(homeLeg);
+      const oldBroken = transitMetadataLeg(
+        0,
+        15,
+        "leg-broken-old",
+        "ride-broken-old",
+        6
+      );
+      const oldDownstream = transitMetadataLeg(
+        1,
+        10,
+        "leg-downstream-old",
+        "ride-downstream-old",
+        1
+      );
+      it.stops[0].travelToNext = oldBroken;
+      it.stops[0].travelMinutesToNext = oldBroken.totalMinutes;
+      it.stops[1].travelToNext = oldDownstream;
+      it.stops[1].travelMinutesToNext = oldDownstream.totalMinutes;
+      it.legs = [oldBroken, oldDownstream];
+
+      const retainedHome = JSON.stringify(it.homeLeg);
+      const legCalls: LegCall[] = [];
+      let nextRoute = 0;
+      const deps: RerouteDeps = {
+        ...mkDeps(legCalls),
+        getSingleLeg: async (_origin, _destination, fromIndex, _departure, excludeTransit) => {
+          legCalls.push({ fromIndex, excludeTransit });
+          const sequence = nextRoute++;
+          if (excludeTransit) {
+            return {
+              ...leg(fromIndex, "walk", 10),
+              legId: `leg-reroute-fresh-${sequence}`,
+              encodedPolyline: `walk-reroute-fresh-${sequence}`,
+            };
+          }
+          return transitMetadataLeg(
+            fromIndex,
+            15,
+            `leg-reroute-fresh-${sequence}`,
+            `ride-reroute-fresh-${sequence}`,
+            null
+          );
+        },
+      };
+
+      const result = await rerouteItinerary(
+        it,
+        { type: "transit_cancelled", legIndex: 0 },
+        new Date(T(19, 30)),
+        deps
+      );
+      assert.ok(result.rerouted);
+      if (!result.rerouted) return;
+
+      assert.strictEqual(JSON.stringify(it.homeLeg), retainedHome);
+      assertRideSlot(it.homeLeg!, "ride-home-retained", 0);
+      assert.strictEqual(it.stops[0].travelToNext?.legId, "leg-reroute-fresh-0");
+      assert.notStrictEqual(it.stops[0].travelToNext?.legId, oldBroken.legId);
+      assert.strictEqual(it.stops[1].travelToNext?.legId, "leg-reroute-fresh-1");
+      assert.notStrictEqual(it.stops[1].travelToNext?.legId, oldDownstream.legId);
+      assertRideSlot(
+        it.stops[1].travelToNext!,
+        "ride-reroute-fresh-1",
+        1
+      );
+      assert.deepStrictEqual(
+        [
+          it.homeLeg!.transit!.paletteSlot,
+          it.stops[1].travelToNext!.transit!.paletteSlot,
+        ],
+        [0, 1]
+      );
     },
   ],
   [

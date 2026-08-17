@@ -30,6 +30,7 @@ import {
   parseParsedPrompt,
   parseScheduledStops,
   parseTravelLegs,
+  validateTravelIdentityTopology,
 } from "../_shared/schemas";
 
 // POST /api/itinerary — store the full pipeline output, return { id }.
@@ -49,6 +50,10 @@ export async function POST(request: NextRequest) {
       body.homeLeg === undefined
         ? undefined
         : parseTravelLegs([body.homeLeg], "homeLeg")[0];
+    validateTravelIdentityTopology(
+      [...(homeLeg ? [homeLeg] : []), ...legs],
+      "homeLeg/legs"
+    );
     const home: HomePoint | undefined = parseHomePoint(body.home);
     const timeZone = parseOptionalTimeZone(body.timeZone);
     // The end the user STATED, if they stated one. Optional on purpose: most

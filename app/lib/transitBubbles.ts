@@ -16,6 +16,11 @@ export interface BubbleSegment {
   shortName?: string | null;
   color?: string | null;
   textColor?: string | null;
+  /** App-owned ride identity/palette metadata. It travels with the ride
+   *  model, but is never part of the route badge or place label. */
+  rideId?: string;
+  sourceStepIndex?: number;
+  paletteSlot?: number | null;
 }
 
 /**

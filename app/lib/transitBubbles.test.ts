@@ -89,6 +89,40 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "ride metadata reaches the bubble model but never becomes user-facing badge/place text",
+    () => {
+      const ride = {
+        lineName: "091 Bayview",
+        shortName: "091",
+        color: "#ed1c24",
+        textColor: "#ffffff",
+        rideId: "ride_internal_sentinel",
+        sourceStepIndex: 17,
+        paletteSlot: 23,
+      };
+      const [line] = lineBadges([ride]);
+
+      // The bubble model keeps the exact ride/fact object, including the
+      // additive app-owned fields and the provider's published colours.
+      assert.strictEqual(line.segment, ride);
+      assert.deepStrictEqual(
+        [line.segment.rideId, line.segment.sourceStepIndex, line.segment.paletteSlot],
+        ["ride_internal_sentinel", 17, 23]
+      );
+      assert.deepStrictEqual(
+        [line.segment.color, line.segment.textColor],
+        ["#ed1c24", "#ffffff"]
+      );
+
+      // Only agency-facing route words are projected into visible copy.
+      assert.deepStrictEqual([line.badge, line.place], ["091", "Bayview"]);
+      const visibleText = [line.badge, line.place].filter(Boolean).join(" ");
+      assert.ok(!visibleText.includes("ride_internal_sentinel"));
+      assert.ok(!visibleText.includes("17"));
+      assert.ok(!visibleText.includes("23"));
+    },
+  ],
+  [
     "SINGLE-RIDE: one badge, one place, and nothing to draw an arrow between",
     () => {
       const model = lineBadges([{ lineName: "505 Fixture", shortName: "505" }]);

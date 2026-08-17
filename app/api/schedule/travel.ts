@@ -71,6 +71,38 @@ export const MAX_PATH_POLYLINE_CHARS = 4_096;
  *  so dozens is ordinary where a transit leg has a handful. */
 export const MAX_PATH_SEGMENTS_PER_LEG = 128;
 
+/** App-owned itinerary-colour capacity. Part 1 stores only this slot number;
+ *  the actual colours remain a later presentation decision. */
+export const TRANSIT_PALETTE_CAPACITY = 24;
+
+/** Opaque travel identities cross JSON, browser payloads and React keys.
+ *  UUIDs fit this deliberately small, URL/HTML-neutral alphabet. */
+export const MAX_TRAVEL_ID_CHARS = 128;
+export const TRAVEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+export type TravelIdentityKind = "leg" | "ride";
+export type TravelIdentityFactory = (kind: TravelIdentityKind) => string;
+
+/** Small injectable seam: production uses the same Web Crypto UUID source as
+ *  itinerary IDs; focused tests supply a deterministic sequence. */
+export const createTravelIdentity: TravelIdentityFactory = () =>
+  globalThis.crypto.randomUUID();
+
+function nextTravelIdentity(
+  factory: TravelIdentityFactory,
+  kind: TravelIdentityKind
+): string {
+  const id = factory(kind);
+  if (
+    typeof id !== "string" ||
+    id.length > MAX_TRAVEL_ID_CHARS ||
+    !TRAVEL_ID_PATTERN.test(id)
+  ) {
+    throw new Error(`Travel identity factory returned an invalid ${kind} id.`);
+  }
+  return id;
+}
+
 export interface LatLng {
   latitude: number;
   longitude: number;
@@ -146,6 +178,17 @@ export interface ComputeRoutesResponse {
 }
 
 export interface TransitSummary {
+  /** App-owned identity for THIS ride occurrence. Generated from the source
+   * provider step before geometry and facts are filtered independently.
+   * Optional only so pre-contract stored itineraries remain loadable. */
+  rideId?: string;
+  /** Raw provider-step ordinal within this leg's selected route, flattened
+   * across provider route legs. It preserves provider order across one-sided
+   * facts/geometry records; it is not a provider trip identifier. */
+  sourceStepIndex?: number;
+  /** Part 1 display metadata only. 0..23 is unique within the itinerary;
+   * null explicitly records overflow. Absent means legacy data. */
+  paletteSlot?: number | null;
   lineName: string;
   /** the line's own short designation ("1", "63", "501") — the bubble
    * label; null when the agency publishes no short name */
@@ -186,8 +229,7 @@ export interface TransitSummary {
  *  that arrives alongside is not stored at all. A step the provider drew no
  *  line for produces NO segment — a line we did not receive is not ours to
  *  invent. */
-export interface PathSegment {
-  mode: "walk" | "transit";
+interface PathSegmentBase {
   /** the provider's own encoded polyline for this step, verbatim */
   encodedPolyline: string;
   /** the ride's line colour ("#f2c10b") — the SAME field the strip's badge
@@ -197,7 +239,28 @@ export interface PathSegment {
   color?: string | null;
 }
 
+/** Walk geometry is deliberately outside the transit identity/palette
+ * contract. It remains presentation-neutral and carries no ride metadata. */
+export interface WalkPathSegment extends PathSegmentBase {
+  mode: "walk";
+}
+
+export interface TransitPathSegment extends PathSegmentBase {
+  mode: "transit";
+  /** Same occurrence metadata as the matching TransitSummary when that
+   * source step also supplied usable facts. Optional for legacy geometry. */
+  rideId?: string;
+  sourceStepIndex?: number;
+  paletteSlot?: number | null;
+}
+
+export type PathSegment = WalkPathSegment | TransitPathSegment;
+
 export interface TravelLeg {
+  /** Opaque app-owned identity for this computed leg. A freshly recomputed
+   * route receives a fresh identity; untouched persisted legs retain theirs.
+   * Optional only for legacy stored itineraries. */
+  legId?: string;
   /** leg from timed stop i to timed stop i+1 */
   fromIndex: number;
   mode: "transit" | "walk" | "unknown";
@@ -225,6 +288,132 @@ export interface TravelLeg {
    * 2026-08-16, the `unknown` estimate, and any response the provider drew
    * no step lines for. */
   pathSegments?: PathSegment[];
+}
+
+type RideMetadataCarrier = {
+  rideId?: string;
+  sourceStepIndex?: number;
+  paletteSlot?: number | null;
+};
+
+interface RideOccurrence {
+  rideId: string;
+  sourceStepIndex: number;
+  legOrder: number;
+  firstSeen: number;
+  records: RideMetadataCarrier[];
+  assignedSlot?: number | null;
+}
+
+function validPaletteSlot(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value < TRANSIT_PALETTE_CAPACITY
+  );
+}
+
+function identifiedRideRecord(
+  record: RideMetadataCarrier
+): record is RideMetadataCarrier & {
+  rideId: string;
+  sourceStepIndex: number;
+  paletteSlot: number | null;
+} {
+  return (
+    typeof record.rideId === "string" &&
+    record.rideId.length <= MAX_TRAVEL_ID_CHARS &&
+    TRAVEL_ID_PATTERN.test(record.rideId) &&
+    typeof record.sourceStepIndex === "number" &&
+    Number.isSafeInteger(record.sourceStepIndex) &&
+    record.sourceStepIndex >= 0 &&
+    (record.paletteSlot === null || validPaletteSlot(record.paletteSlot))
+  );
+}
+
+/**
+ * Assign the metadata-only palette slots for a COMPLETE itinerary topology.
+ * Callers pass home first, then inter-stop legs. Existing valid slots are
+ * reserved in a first pass before any unassigned ride is considered, so a
+ * newly inserted early leg can never steal a later untouched ride's slot.
+ *
+ * Geometry and facts are joined ONLY by the app-owned rideId created on the
+ * source step. `sourceStepIndex` orders the union when one side was filtered;
+ * filtered array positions, provider colour/name/time and geometry never do.
+ * Legacy records have no complete identity bundle and remain untouched.
+ */
+export function assignTransitPaletteSlots(legs: readonly TravelLeg[]): void {
+  const occurrences: RideOccurrence[] = [];
+  let firstSeen = 0;
+
+  for (const [legOrder, leg] of legs.entries()) {
+    const byRideId = new Map<string, RideOccurrence>();
+    const add = (record: RideMetadataCarrier | undefined) => {
+      if (!record || !identifiedRideRecord(record)) return;
+      const existing = byRideId.get(record.rideId);
+      if (existing) {
+        // A generated rideId has exactly one source ordinal. Refuse to merge
+        // inconsistent persisted records instead of guessing which is true.
+        if (existing.sourceStepIndex !== record.sourceStepIndex) return;
+        existing.records.push(record);
+        return;
+      }
+      const occurrence: RideOccurrence = {
+        rideId: record.rideId,
+        sourceStepIndex: record.sourceStepIndex,
+        legOrder,
+        firstSeen: firstSeen++,
+        records: [record],
+      };
+      byRideId.set(record.rideId, occurrence);
+      occurrences.push(occurrence);
+    };
+
+    // `transit` is a serialized compatibility copy of the first array item,
+    // not guaranteed object-identical after reload, so include and sync it.
+    add(leg.transit);
+    for (const ride of leg.transitSegments ?? []) add(ride);
+    for (const path of leg.pathSegments ?? []) {
+      if (path.mode === "transit") add(path);
+    }
+  }
+
+  occurrences.sort(
+    (a, b) =>
+      a.legOrder - b.legOrder ||
+      a.sourceStepIndex - b.sourceStepIndex ||
+      a.firstSeen - b.firstSeen
+  );
+
+  const used = new Set<number>();
+  // Preserve every non-colliding persisted assignment before filling gaps.
+  for (const occurrence of occurrences) {
+    const existing = occurrence.records
+      .map((record) => record.paletteSlot)
+      .find((slot): slot is number => validPaletteSlot(slot) && !used.has(slot));
+    if (existing !== undefined) {
+      occurrence.assignedSlot = existing;
+      used.add(existing);
+    }
+  }
+
+  for (const occurrence of occurrences) {
+    if (occurrence.assignedSlot === undefined) {
+      let slot: number | null = null;
+      for (let candidate = 0; candidate < TRANSIT_PALETTE_CAPACITY; candidate++) {
+        if (!used.has(candidate)) {
+          slot = candidate;
+          used.add(candidate);
+          break;
+        }
+      }
+      occurrence.assignedSlot = slot;
+    }
+    for (const record of occurrence.records) {
+      record.paletteSlot = occurrence.assignedSlot;
+    }
+  }
 }
 
 function parseDurationMinutes(duration?: string): number | null {
@@ -276,27 +465,47 @@ function stepPolyline(value: unknown): string | null {
  *  slice). They are independent outputs of one traversal, so a step can
  *  contribute to either, both, or neither. */
 function readSteps(
-  route: NonNullable<ComputeRoutesResponse["routes"]>[number]
+  route: NonNullable<ComputeRoutesResponse["routes"]>[number],
+  identityFactory: TravelIdentityFactory
 ): { transit: TransitSummary[]; paths: PathSegment[] } {
   const segments: TransitSummary[] = [];
   const paths: PathSegment[] = [];
+  let sourceStepIndex = 0;
   for (const leg of route.legs ?? []) {
     for (const step of leg.steps ?? []) {
+      // Capture the raw provider position before EITHER independent filter.
+      // A missing step therefore leaves a gap rather than shifting every
+      // later ride into somebody else's identity/slot.
+      const currentSourceStepIndex = sourceStepIndex++;
       const td = step.transitDetails;
+      const mode = pathMode(step.travelMode);
+      // A source transit occurrence can survive on either side: provider
+      // facts identify one even without drawable geometry; an explicit
+      // TRANSIT mode identifies one even when facts are absent.
+      const rideId =
+        mode === "transit" || td
+          ? nextTravelIdentity(identityFactory, "ride")
+          : null;
       // GEOMETRY first, and on its own terms: a walk step has no
       // transitDetails and still has a line to draw. Both conditions are
       // hard — no recognised mode or no polyline means no segment, never a
       // half-known one.
-      const mode = pathMode(step.travelMode);
       const encoded = stepPolyline(step.polyline?.encodedPolyline);
       if (mode && encoded) {
-        paths.push({
-          mode,
-          encodedPolyline: encoded,
-          // the ride's own colour, read from the SAME place the badge reads
-          // it; a walk step is coloured at render, never here
-          color: mode === "transit" ? td?.transitLine?.color ?? null : null,
-        });
+        if (mode === "transit" && rideId) {
+          paths.push({
+            mode,
+            encodedPolyline: encoded,
+            // the ride's own colour remains factual metadata and continues
+            // controlling the Part 1 renderer exactly as before
+            color: td?.transitLine?.color ?? null,
+            rideId,
+            sourceStepIndex: currentSourceStepIndex,
+            paletteSlot: null,
+          });
+        } else {
+          paths.push({ mode: "walk", encodedPolyline: encoded, color: null });
+        }
       }
       if (!td) continue;
       const line = td.transitLine ?? {};
@@ -308,6 +517,9 @@ function readSteps(
           : [line.nameShort, line.name].filter(Boolean).join(" ").trim();
       const stops = td.stopDetails;
       segments.push({
+        rideId: rideId!,
+        sourceStepIndex: currentSourceStepIndex,
+        paletteSlot: null,
         lineName: lineName || "transit",
         shortName: line.nameShort ?? null,
         color: line.color ?? null,
@@ -333,22 +545,15 @@ function readSteps(
 // discarded before the data ever reached the UI, which is why the strip
 // could only ever name one line per leg.
 //
-// Exported for the MOCK fixture, which builds provider-shaped steps and
-// runs them through this same parser: the fixture layer supplies DATA and
-// never a second copy of the extraction. Its OUTPUT is unchanged by the
-// geometry slice — the walk over the steps is shared, the two results are
-// not.
-export function extractTransitSegments(
-  route: NonNullable<ComputeRoutesResponse["routes"]>[number]
-): TransitSummary[] {
-  return readSteps(route).transit;
-}
-
-/** The route's geometry, step by step, in the provider's own order. */
-export function extractPathSegments(
-  route: NonNullable<ComputeRoutesResponse["routes"]>[number]
-): PathSegment[] {
-  return readSteps(route).paths;
+// Exported as ONE combined result for the MOCK fixture, which builds
+// provider-shaped steps and runs them through this same parser. Facts and
+// geometry must never be extracted through separate traversals: each pass
+// would mint a different app-owned ride identity for the same source step.
+export function extractTravelStepRecords(
+  route: NonNullable<ComputeRoutesResponse["routes"]>[number],
+  identityFactory: TravelIdentityFactory = createTravelIdentity
+): { transit: TransitSummary[]; paths: PathSegment[] } {
+  return readSteps(route, identityFactory);
 }
 
 interface ParsedRoute {
@@ -362,7 +567,8 @@ interface ParsedRoute {
 }
 
 function parseRoute(
-  res: ComputeRoutesResponse | null | undefined
+  res: ComputeRoutesResponse | null | undefined,
+  identityFactory: TravelIdentityFactory
 ): ParsedRoute {
   const route = res?.routes?.[0];
   const rawMinutes = parseDurationMinutes(route?.duration);
@@ -377,7 +583,10 @@ function parseRoute(
       pathSegments: [],
     };
   }
-  const { transit: segments, paths } = readSteps(route);
+  const { transit: segments, paths } = extractTravelStepRecords(
+    route,
+    identityFactory
+  );
   return {
     ok: true,
     rawMinutes,
@@ -411,16 +620,19 @@ function parseRoute(
 export function buildLeg(
   fromIndex: number,
   transitRes: ComputeRoutesResponse | null,
-  walkRes: ComputeRoutesResponse | null
+  walkRes: ComputeRoutesResponse | null,
+  identityFactory: TravelIdentityFactory = createTravelIdentity
 ): TravelLeg {
-  const t = parseRoute(transitRes);
-  const w = parseRoute(walkRes);
+  const legId = nextTravelIdentity(identityFactory, "leg");
+  const t = parseRoute(transitRes, identityFactory);
+  const w = parseRoute(walkRes, identityFactory);
 
   // Geometry always comes from the SAME route as the numbers it describes —
   // a walk-labeled leg must never be drawn from the transit route's steps.
   // Omitted when empty, exactly like transitSegments: an absent field is how
   // this stays additive for every existing reader and stored plan.
   const walkLeg = (src: ParsedRoute): TravelLeg => ({
+    legId,
     fromIndex,
     mode: "walk",
     rawMinutes: src.rawMinutes,
@@ -444,6 +656,7 @@ export function buildLeg(
       return walkLeg(w.ok ? w : t);
     }
     return {
+      legId,
       fromIndex,
       mode: "transit",
       rawMinutes: t.rawMinutes,
@@ -460,6 +673,7 @@ export function buildLeg(
   if (w.ok) return walkLeg(w);
 
   return {
+    legId,
     fromIndex,
     mode: "unknown",
     rawMinutes: 0,
@@ -537,7 +751,8 @@ export async function getSingleLeg(
   destination: LatLng,
   fromIndex: number,
   departureTime?: string,
-  excludeTransit = false
+  excludeTransit = false,
+  identityFactory: TravelIdentityFactory = createTravelIdentity
 ): Promise<TravelLeg> {
   const straightLineMeters = haversineMeters(origin, destination);
   const skipTransit =
@@ -549,7 +764,7 @@ export async function getSingleLeg(
       : computeRoute(apiKey, origin, destination, "TRANSIT", departureTime),
     computeRoute(apiKey, origin, destination, "WALK", departureTime),
   ]);
-  const leg = buildLeg(fromIndex, transitRes, walkRes);
+  const leg = buildLeg(fromIndex, transitRes, walkRes, identityFactory);
   // Neither mode came back. "We don't know how long this takes" was being
   // rendered as "this takes zero minutes", which schedules the next stop
   // the instant this one ends, across any distance — a WRONG time, not a
@@ -590,7 +805,8 @@ export async function getTravelLegs(
   apiKey: string,
   points: LatLng[],
   departureTime?: string,
-  dwellMinutes: number[] = []
+  dwellMinutes: number[] = [],
+  identityFactory: TravelIdentityFactory = createTravelIdentity
 ): Promise<TravelLeg[]> {
   if (points.length < 2) return [];
 
@@ -610,12 +826,21 @@ export async function getTravelLegs(
     const depart = Number.isFinite(cursorMs)
       ? new Date(cursorMs).toISOString()
       : undefined;
-    const leg = await getSingleLeg(apiKey, points[i], points[i + 1], i, depart, false);
+    const leg = await getSingleLeg(
+      apiKey,
+      points[i],
+      points[i + 1],
+      i,
+      depart,
+      false,
+      identityFactory
+    );
     legs.push(leg);
     if (Number.isFinite(cursorMs)) {
       // travel, then stay at the destination before the next leg departs
       cursorMs += (leg.totalMinutes + (dwellMinutes[i + 1] ?? 0)) * 60_000;
     }
   }
+  assignTransitPaletteSlots(legs);
   return legs;
 }

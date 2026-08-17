@@ -38,6 +38,61 @@ function leg(fromIndex: number, totalMinutes = 10): TravelLeg {
   };
 }
 
+function transitMetadataLeg(
+  fromIndex: number,
+  legId: string,
+  rideId: string,
+  paletteSlot: number | null,
+  totalMinutes = 10
+): TravelLeg {
+  const ride = {
+    rideId,
+    sourceStepIndex: 0,
+    paletteSlot,
+    lineName: "Test Line",
+    shortName: "T",
+    color: null,
+    textColor: null,
+    vehicle: "BUS",
+    headsign: "Test Terminal",
+    stopCount: 3,
+    departStop: "Origin",
+    arriveStop: "Destination",
+  };
+  return {
+    ...leg(fromIndex, totalMinutes),
+    legId,
+    mode: "transit",
+    rawMinutes: totalMinutes - 5,
+    marginMinutes: 5,
+    transit: { ...ride },
+    transitSegments: [{ ...ride }],
+    pathSegments: [
+      {
+        mode: "transit",
+        encodedPolyline: `path-${rideId}`,
+        color: null,
+        rideId,
+        sourceStepIndex: 0,
+        paletteSlot,
+      },
+    ],
+  };
+}
+
+function assertRideSlot(route: TravelLeg, rideId: string, paletteSlot: number) {
+  assert.strictEqual(route.transit?.rideId, rideId);
+  assert.strictEqual(route.transit?.sourceStepIndex, 0);
+  assert.strictEqual(route.transit?.paletteSlot, paletteSlot);
+  assert.strictEqual(route.transitSegments?.[0]?.rideId, rideId);
+  assert.strictEqual(route.transitSegments?.[0]?.sourceStepIndex, 0);
+  assert.strictEqual(route.transitSegments?.[0]?.paletteSlot, paletteSlot);
+  const path = route.pathSegments?.find((segment) => segment.mode === "transit");
+  assert.strictEqual(path?.rideId, rideId);
+  assert.strictEqual(path?.sourceStepIndex, 0);
+  assert.strictEqual(path?.paletteSlot, paletteSlot);
+}
+
 function fridayHours(
   openHour: number,
   openMinute: number,
@@ -398,6 +453,102 @@ const cases: Array<[string, () => Promise<void>]> = [
         new Date(plan.stops[2].start_time!).getTime() >=
           new Date(plan.stops[1].end_time!).getTime() + 10 * 60_000
       );
+    },
+  ],
+  [
+    "successful swap retains untouched identities and assigns new rides the first unused slots",
+    async () => {
+      const plan = itinerary();
+      plan.homeLeg = transitMetadataLeg(
+        -1,
+        "leg-swap-home-retained",
+        "ride-swap-home-retained",
+        0
+      );
+      const retainedUpstream = transitMetadataLeg(
+        0,
+        "leg-swap-upstream-retained",
+        "ride-swap-upstream-retained",
+        5
+      );
+      const oldInbound = transitMetadataLeg(
+        1,
+        "leg-swap-inbound-old",
+        "ride-swap-inbound-old",
+        1
+      );
+      const oldOutbound = transitMetadataLeg(
+        2,
+        "leg-swap-outbound-old",
+        "ride-swap-outbound-old",
+        2
+      );
+      plan.stops[0].travelToNext = retainedUpstream;
+      plan.stops[0].travelMinutesToNext = retainedUpstream.totalMinutes;
+      plan.stops[1].travelToNext = oldInbound;
+      plan.stops[1].travelMinutesToNext = oldInbound.totalMinutes;
+      plan.stops[2].travelToNext = oldOutbound;
+      plan.stops[2].travelMinutesToNext = oldOutbound.totalMinutes;
+      plan.legs = [retainedUpstream, oldInbound, oldOutbound];
+
+      const homeBefore = JSON.stringify(plan.homeLeg);
+      const upstreamBefore = JSON.stringify(plan.stops[0].travelToNext);
+      const h = harness({
+        intent: "duration",
+        duration: { mode: "relative", deltaMinutes: 10 },
+      });
+      let nextRoute = 0;
+      const deps: SwapDeps = {
+        ...h.deps,
+        getSingleLeg: async (_origin, _destination, fromIndex) => {
+          const sequence = nextRoute++;
+          return transitMetadataLeg(
+            fromIndex,
+            `leg-swap-fresh-${sequence}`,
+            `ride-swap-fresh-${sequence}`,
+            null
+          );
+        },
+      };
+
+      const result = await swapStop(
+        plan,
+        2,
+        "stay ten minutes longer",
+        now,
+        deps
+      );
+      assert.ok(result.swapped);
+      if (!result.swapped) return;
+
+      assert.strictEqual(JSON.stringify(plan.homeLeg), homeBefore);
+      assert.strictEqual(
+        JSON.stringify(plan.stops[0].travelToNext),
+        upstreamBefore
+      );
+      assertRideSlot(plan.homeLeg!, "ride-swap-home-retained", 0);
+      assertRideSlot(
+        plan.stops[0].travelToNext!,
+        "ride-swap-upstream-retained",
+        5
+      );
+
+      const newInbound = plan.stops[1].travelToNext!;
+      const newOutbound = plan.stops[2].travelToNext!;
+      assert.strictEqual(newInbound.legId, "leg-swap-fresh-0");
+      assert.notStrictEqual(newInbound.legId, oldInbound.legId);
+      assert.strictEqual(newOutbound.legId, "leg-swap-fresh-1");
+      assert.notStrictEqual(newOutbound.legId, oldOutbound.legId);
+      assert.notStrictEqual(newInbound.legId, newOutbound.legId);
+      assertRideSlot(newInbound, "ride-swap-fresh-0", 1);
+      assertRideSlot(newOutbound, "ride-swap-fresh-1", 2);
+
+      const slots = [
+        plan.homeLeg!.transit!.paletteSlot,
+        ...plan.legs.map((route) => route.transit!.paletteSlot),
+      ];
+      assert.deepStrictEqual(slots, [0, 5, 1, 2]);
+      assert.strictEqual(new Set(slots).size, slots.length);
     },
   ],
   [

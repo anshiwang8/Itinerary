@@ -2,8 +2,11 @@ import type { ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
 import type { LatLng } from "../schedule/travel";
 import type { PathSegment, TravelLeg } from "../schedule/travel";
 import {
+  MAX_TRAVEL_ID_CHARS,
   MAX_PATH_POLYLINE_CHARS,
   MAX_PATH_SEGMENTS_PER_LEG,
+  TRANSIT_PALETTE_CAPACITY,
+  TRAVEL_ID_PATTERN,
 } from "../schedule/travel";
 import type { ScheduledStop } from "../schedule/schedule";
 import type { HomePoint } from "../schedule/home";
@@ -364,16 +367,55 @@ export function parseScheduledStops(value: unknown): ScheduledStop[] {
   });
 }
 
-/**
- * The board/alight instants and stop coordinates a transit ride now
- * carries. Every field is OPTIONAL and NULLABLE, in both directions: a
- * walk leg has no ride at all, a plan stored before this shipped has rides
- * without these keys, and a provider response may publish a ride without
- * them. Only a value that is PRESENT and malformed is rejected — the
- * coordinates especially, since a bad one would be drawn on the map.
- */
+/** New ride identity is atomic: new facts carry all three values, while a
+ * legacy stored ride carries none. A partial bundle is more dangerous than
+ * an absent one because it could falsely associate facts with geometry. */
+const RIDE_IDENTITY_FIELDS = [
+  "rideId",
+  "sourceStepIndex",
+  "paletteSlot",
+] as const;
+
+function validTravelId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= MAX_TRAVEL_ID_CHARS &&
+    TRAVEL_ID_PATTERN.test(value)
+  );
+}
+
+function rideIdentityBundle(
+  value: Record<string, unknown>
+): "legacy" | "complete" | "invalid" {
+  const present = RIDE_IDENTITY_FIELDS.map((key) =>
+    Object.prototype.hasOwnProperty.call(value, key)
+  );
+  if (present.every((entry) => !entry)) return "legacy";
+  if (!present.every(Boolean)) return "invalid";
+
+  return validTravelId(value.rideId) &&
+    finiteNumber(value.sourceStepIndex) &&
+    Number.isSafeInteger(value.sourceStepIndex) &&
+    value.sourceStepIndex >= 0 &&
+    (value.paletteSlot === null ||
+      (finiteNumber(value.paletteSlot) &&
+        Number.isSafeInteger(value.paletteSlot) &&
+        value.paletteSlot >= 0 &&
+        value.paletteSlot < TRANSIT_PALETTE_CAPACITY))
+    ? "complete"
+    : "invalid";
+}
+
+/** The board/alight instants and stop coordinates are optional and nullable;
+ * the occurrence identity bundle is optional only as one complete legacy/new
+ * unit. Any present malformed fact rejects the request before persistence. */
 function checkRideDetail(ride: unknown, where: string): void {
   if (!isRecord(ride)) badRequest(`\`${where}\` must be an object.`);
+  if (rideIdentityBundle(ride) === "invalid") {
+    badRequest(
+      `\`${where}\` must carry either no ride identity fields or one complete, valid ride identity bundle.`
+    );
+  }
   for (const key of ["boardISO", "alightISO"] as const) {
     const instant = ride[key];
     if (instant !== undefined && instant !== null && !validIsoInstant(instant)) {
@@ -423,13 +465,223 @@ function keepPathSegments(value: unknown, where: string): PathSegment[] | undefi
       continue;
     }
     if (color !== undefined && color !== null && typeof color !== "string") continue;
+    const identity = rideIdentityBundle(segment);
+    // Walk paths never carry transit occurrence metadata. Transit paths are
+    // either legacy (all three absent) or carry the complete new bundle.
+    // As with every other malformed path record, an invalid bundle drops only
+    // that decorative segment and never the containing itinerary.
+    if (identity === "invalid" || (mode === "walk" && identity !== "legacy")) {
+      continue;
+    }
+    if (mode === "walk") {
+      kept.push({
+        mode,
+        encodedPolyline,
+        ...(color === undefined ? {} : { color: color as string | null }),
+      });
+      continue;
+    }
     kept.push({
       mode,
       encodedPolyline,
       ...(color === undefined ? {} : { color: color as string | null }),
+      ...(identity === "complete"
+        ? {
+            rideId: segment.rideId as string,
+            sourceStepIndex: segment.sourceStepIndex as number,
+            paletteSlot: segment.paletteSlot as number | null,
+          }
+        : {}),
     });
   }
   return kept.length > 0 ? kept : undefined;
+}
+
+type CompleteRideIdentity = {
+  rideId: string;
+  sourceStepIndex: number;
+  paletteSlot: number | null;
+};
+
+type TopologyOccurrence = CompleteRideIdentity & { legIndex: number };
+
+function completeRideIdentity(value: unknown): CompleteRideIdentity | null {
+  if (!isRecord(value) || rideIdentityBundle(value) !== "complete") return null;
+  return {
+    rideId: value.rideId as string,
+    sourceStepIndex: value.sourceStepIndex as number,
+    paletteSlot: value.paletteSlot as number | null,
+  };
+}
+
+function sameOccurrence(a: TopologyOccurrence, b: TopologyOccurrence): boolean {
+  return (
+    a.legIndex === b.legIndex &&
+    a.rideId === b.rideId &&
+    a.sourceStepIndex === b.sourceStepIndex
+  );
+}
+
+function sameRideIdentity(
+  a: CompleteRideIdentity,
+  b: CompleteRideIdentity
+): boolean {
+  return (
+    a.rideId === b.rideId &&
+    a.sourceStepIndex === b.sourceStepIndex &&
+    a.paletteSlot === b.paletteSlot
+  );
+}
+
+/**
+ * Enforce the relational half of the ride contract across one complete
+ * travel topology. Per-record shape checks happen first; this pass proves
+ * that exact IDs, source-step ordinals and non-null palette slots cannot
+ * disagree across the compatibility fact copy, the facts array, geometry,
+ * home, or later legs.
+ *
+ * Facts and leg IDs are authoritative stored data, so a contradiction
+ * rejects. Geometry keeps its established decoration policy: a conflicting
+ * identified path is dropped, never guessed or allowed to cost the plan.
+ * Legacy all-absent records remain outside the relationship entirely.
+ */
+export function validateTravelIdentityTopology(
+  legs: TravelLeg[],
+  field = "legs"
+): TravelLeg[] {
+  const legIds = new Set<string>();
+  const byRideId = new Map<string, TopologyOccurrence>();
+  const bySource = new Map<string, TopologyOccurrence>();
+  const bySlot = new Map<number, TopologyOccurrence>();
+
+  const conflict = (candidate: TopologyOccurrence): boolean => {
+    const sameRide = byRideId.get(candidate.rideId);
+    if (
+      sameRide &&
+      (!sameOccurrence(sameRide, candidate) ||
+        sameRide.paletteSlot !== candidate.paletteSlot)
+    ) {
+      return true;
+    }
+    const sameSource = bySource.get(
+      `${candidate.legIndex}:${candidate.sourceStepIndex}`
+    );
+    if (
+      sameSource &&
+      (!sameOccurrence(sameSource, candidate) ||
+        sameSource.paletteSlot !== candidate.paletteSlot)
+    ) {
+      return true;
+    }
+    if (candidate.paletteSlot !== null) {
+      const sameSlot = bySlot.get(candidate.paletteSlot);
+      if (sameSlot && !sameOccurrence(sameSlot, candidate)) return true;
+    }
+    return false;
+  };
+
+  const register = (candidate: TopologyOccurrence): boolean => {
+    if (conflict(candidate)) return false;
+    byRideId.set(candidate.rideId, candidate);
+    bySource.set(
+      `${candidate.legIndex}:${candidate.sourceStepIndex}`,
+      candidate
+    );
+    if (candidate.paletteSlot !== null) {
+      bySlot.set(candidate.paletteSlot, candidate);
+    }
+    return true;
+  };
+
+  // Reserve every fact occurrence before considering geometry. A bad line
+  // can be dropped; a later fact must never lose to whichever path appeared
+  // first in the request.
+  for (const [legIndex, leg] of legs.entries()) {
+    if (leg.legId !== undefined) {
+      if (legIds.has(leg.legId)) {
+        badRequest(`\`${field}\` contains a duplicate leg identity.`);
+      }
+      legIds.add(leg.legId);
+    }
+    const segmentFacts = leg.transitSegments ?? [];
+    const hasLegIdentity = leg.legId !== undefined;
+    const allFacts = [
+      ...(leg.transit ? [leg.transit] : []),
+      ...segmentFacts,
+    ];
+    if (
+      hasLegIdentity &&
+      Boolean(leg.transit) !== (segmentFacts.length > 0)
+    ) {
+      badRequest(
+        `\`${field}\` must keep the transit compatibility record with its identified ride array.`
+      );
+    }
+    for (const fact of allFacts) {
+      const hasRideIdentity = completeRideIdentity(fact) !== null;
+      if (hasLegIdentity !== hasRideIdentity) {
+        badRequest(
+          `\`${field}\` must keep leg and transit ride identity metadata together.`
+        );
+      }
+    }
+    const compatibilityIdentity = completeRideIdentity(leg.transit);
+    const firstSegmentIdentity = completeRideIdentity(segmentFacts[0]);
+    if (
+      compatibilityIdentity &&
+      firstSegmentIdentity &&
+      !sameRideIdentity(compatibilityIdentity, firstSegmentIdentity)
+    ) {
+      badRequest(
+        `\`${field}\` contains a transit compatibility record that is not its first identified ride.`
+      );
+    }
+    const factRideIds = new Set<string>();
+    for (const fact of segmentFacts) {
+      const identity = completeRideIdentity(fact);
+      if (!identity) continue;
+      if (factRideIds.has(identity.rideId)) {
+        badRequest(`\`${field}\` contains a duplicate identified transit ride.`);
+      }
+      factRideIds.add(identity.rideId);
+    }
+    for (const fact of allFacts) {
+      const identity = completeRideIdentity(fact);
+      if (!identity) continue;
+      if (!register({ ...identity, legIndex })) {
+        badRequest(
+          `\`${field}\` contains conflicting transit ride identities or palette slots.`
+        );
+      }
+    }
+  }
+
+  for (const [legIndex, leg] of legs.entries()) {
+    if (!leg.pathSegments) continue;
+    const pathsSeen = new Set<string>();
+    const kept: PathSegment[] = [];
+    for (const path of leg.pathSegments) {
+      if (path.mode !== "transit") {
+        kept.push(path);
+        continue;
+      }
+      const identity = completeRideIdentity(path);
+      if (!identity) {
+        if (leg.legId === undefined) kept.push(path);
+        continue;
+      }
+      if (leg.legId === undefined) continue;
+      const occurrenceKey = `${legIndex}:${identity.rideId}`;
+      const candidate = { ...identity, legIndex };
+      if (pathsSeen.has(occurrenceKey) || !register(candidate)) continue;
+      pathsSeen.add(occurrenceKey);
+      kept.push(path);
+    }
+    if (kept.length > 0) leg.pathSegments = kept;
+    else delete leg.pathSegments;
+  }
+
+  return legs;
 }
 
 export function parseTravelLegs(value: unknown, field = "legs"): TravelLeg[] {
@@ -437,8 +689,11 @@ export function parseTravelLegs(value: unknown, field = "legs"): TravelLeg[] {
   if (!Array.isArray(value) || value.length > REQUEST_LIMITS.points - 1) {
     badRequest(`\`${field}\` must contain at most ${REQUEST_LIMITS.points - 1} legs.`);
   }
-  return value.map((entry, index) => {
+  const legs = value.map((entry, index) => {
     if (!isRecord(entry)) badRequest(`\`${field}[${index}]\` must be an object.`);
+    if (entry.legId !== undefined && !validTravelId(entry.legId)) {
+      badRequest(`\`${field}[${index}].legId\` is invalid.`);
+    }
     if (
       !finiteNumber(entry.fromIndex) ||
       !Number.isInteger(entry.fromIndex) ||
@@ -487,6 +742,7 @@ export function parseTravelLegs(value: unknown, field = "legs"): TravelLeg[] {
     else delete sanitized.pathSegments;
     return sanitized;
   });
+  return validateTravelIdentityTopology(legs, field);
 }
 
 export function parseHomePoint(value: unknown): HomePoint | undefined {

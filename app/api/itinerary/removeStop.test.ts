@@ -27,6 +27,58 @@ function leg(fromIndex: number, mode: "transit" | "walk", total: number): Travel
   };
 }
 
+function transitMetadataLeg(
+  fromIndex: number,
+  total: number,
+  legId: string,
+  rideId: string,
+  paletteSlot: number | null
+): TravelLeg {
+  const ride = {
+    rideId,
+    sourceStepIndex: 0,
+    paletteSlot,
+    lineName: "Test Line",
+    shortName: "T",
+    color: null,
+    textColor: null,
+    vehicle: "BUS",
+    headsign: "Test Terminal",
+    stopCount: 3,
+    departStop: "Origin",
+    arriveStop: "Destination",
+  };
+  return {
+    ...leg(fromIndex, "transit", total),
+    legId,
+    transit: { ...ride },
+    transitSegments: [{ ...ride }],
+    pathSegments: [
+      {
+        mode: "transit",
+        encodedPolyline: `path-${rideId}`,
+        color: null,
+        rideId,
+        sourceStepIndex: 0,
+        paletteSlot,
+      },
+    ],
+  };
+}
+
+function assertRideSlot(route: TravelLeg, rideId: string, paletteSlot: number) {
+  assert.strictEqual(route.transit?.rideId, rideId);
+  assert.strictEqual(route.transit?.sourceStepIndex, 0);
+  assert.strictEqual(route.transit?.paletteSlot, paletteSlot);
+  assert.strictEqual(route.transitSegments?.[0]?.rideId, rideId);
+  assert.strictEqual(route.transitSegments?.[0]?.sourceStepIndex, 0);
+  assert.strictEqual(route.transitSegments?.[0]?.paletteSlot, paletteSlot);
+  const path = route.pathSegments?.find((segment) => segment.mode === "transit");
+  assert.strictEqual(path?.rideId, rideId);
+  assert.strictEqual(path?.sourceStepIndex, 0);
+  assert.strictEqual(path?.paletteSlot, paletteSlot);
+}
+
 /** Same hours every day, so a case never depends on which weekday the fixture
  *  date lands on. `closeH <= openH` wraps past midnight. */
 function openHours(openH: number, closeH: number, closeM = 0): CurrentOpeningHours {
@@ -224,6 +276,68 @@ const cases: Array<[string, () => Promise<void>]> = [
       // and the plan's leg projection followed it
       assert.strictEqual(it.legs.length, 1);
       assert.strictEqual(it.legs[0].encodedPolyline, "enc_new");
+    },
+  ],
+  [
+    "MIDDLE: retained route metadata survives and the bridge gets a fresh identity and first free slot",
+    async () => {
+      const homeLeg = transitMetadataLeg(
+        -1,
+        20,
+        "leg-remove-home-retained",
+        "ride-remove-home-retained",
+        0
+      );
+      const it = mkItinerary(homeLeg);
+      const oldInbound = transitMetadataLeg(
+        0,
+        15,
+        "leg-remove-inbound-old",
+        "ride-remove-inbound-old",
+        1
+      );
+      const oldOutbound = transitMetadataLeg(
+        1,
+        10,
+        "leg-remove-outbound-old",
+        "ride-remove-outbound-old",
+        2
+      );
+      it.stops[0].travelToNext = oldInbound;
+      it.stops[0].travelMinutesToNext = oldInbound.totalMinutes;
+      it.stops[1].travelToNext = oldOutbound;
+      it.stops[1].travelMinutesToNext = oldOutbound.totalMinutes;
+      it.legs = [oldInbound, oldOutbound];
+
+      const homeBefore = JSON.stringify(it.homeLeg);
+      const deps: SwapDeps = {
+        ...mkDeps({ legMin: 10 }),
+        getSingleLeg: async (_origin, _destination, fromIndex) =>
+          transitMetadataLeg(
+            fromIndex,
+            10,
+            "leg-remove-bridge-fresh",
+            "ride-remove-bridge-fresh",
+            null
+          ),
+      };
+      const result = await removeStop(it, 1, new Date(T(18, 0)), deps);
+      assert.ok(result.removed);
+      if (!result.removed) return;
+
+      assert.strictEqual(JSON.stringify(it.homeLeg), homeBefore);
+      assertRideSlot(it.homeLeg!, "ride-remove-home-retained", 0);
+      const bridge = it.stops[0].travelToNext!;
+      assert.strictEqual(bridge.legId, "leg-remove-bridge-fresh");
+      assert.notStrictEqual(bridge.legId, oldInbound.legId);
+      assert.notStrictEqual(bridge.legId, oldOutbound.legId);
+      assertRideSlot(bridge, "ride-remove-bridge-fresh", 1);
+      const slots = [
+        it.homeLeg!.transit!.paletteSlot,
+        it.legs[0].transit!.paletteSlot,
+      ];
+      assert.deepStrictEqual(slots, [0, 1]);
+      assert.strictEqual(new Set(slots).size, slots.length);
     },
   ],
   [

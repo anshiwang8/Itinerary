@@ -18,7 +18,11 @@ import type { GeocodeRequest } from "../geocode/geocode";
 // openness reasoning of its own (see the availability-seam note below)
 import type { CurrentOpeningHours } from "../places/search/hours";
 import type { LatLng, TravelLeg } from "../schedule/travel";
-import { extractTransitSegments } from "../schedule/travel";
+import {
+  assignTransitPaletteSlots,
+  createTravelIdentity,
+  extractTravelStepRecords,
+} from "../schedule/travel";
 import type { Selection, SelectModelCall } from "../select/selectVenues";
 import { GENERAL_CATEGORY, isGeneralCategory } from "../places/search/searchPlaces";
 import {
@@ -1043,11 +1047,13 @@ export function mockLeg(
   excludeTransit = false,
   departureISO?: string | null
 ): TravelLeg {
+  const legId = createTravelIdentity("leg");
   const km = haversineKm(from, to);
   const distanceMeters = Math.round(km * 1000);
   const walkMin = Math.max(3, Math.round(km * 13));
   if (excludeTransit || km < 1.0) {
     return {
+      legId,
       fromIndex,
       mode: "walk",
       rawMinutes: walkMin,
@@ -1060,7 +1066,7 @@ export function mockLeg(
   const raw = Math.max(8, Math.round(km * 4));
   // ONE ride, described the way the PROVIDER describes one — a
   // steps[].transitDetails object — and read back through the REAL
-  // `extractTransitSegments`. The fixture layer supplies DATA; the parse
+  // `extractTravelStepRecords`. The fixture layer supplies DATA; the parse
   // that ships is the parse mock e2e exercises, so a change that breaks
   // the board/alight extraction cannot pass here while passing there.
   //
@@ -1073,7 +1079,7 @@ export function mockLeg(
     Number.isFinite(departureMs)
       ? new Date(departureMs + offsetMin * 60_000).toISOString()
       : undefined;
-  const [ride] = extractTransitSegments({
+  const { transit: [ride] } = extractTravelStepRecords({
     legs: [
       {
         steps: [
@@ -1113,6 +1119,7 @@ export function mockLeg(
     ],
   });
   return {
+    legId,
     fromIndex,
     mode: "transit",
     rawMinutes: raw,
@@ -1150,6 +1157,7 @@ export function mockTravelLegs(
       cursorMs += (leg.totalMinutes + (dwellMinutes[i + 1] ?? 0)) * 60_000;
     }
   }
+  assignTransitPaletteSlots(legs);
   return legs;
 }
 

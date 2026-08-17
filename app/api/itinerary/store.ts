@@ -1,7 +1,10 @@
 // Versioned itinerary persistence. Redis is authoritative when configured;
 // memory mode implements the same clone/CAS contract for dev and tests.
 import { ScheduledStop } from "../schedule/schedule";
-import { TravelLeg } from "../schedule/travel";
+import {
+  assignTransitPaletteSlots,
+  type TravelLeg,
+} from "../schedule/travel";
 import { HomePoint } from "../schedule/home";
 import { ParsedPrompt } from "../places/search/filter";
 import { ApiError, isRecord } from "../_shared/http";
@@ -481,6 +484,13 @@ export function rebuildLegs(itinerary: Itinerary): void {
   itinerary.legs = itinerary.stops
     .filter((s) => s.start_time && s.travelToNext)
     .map((s) => s.travelToNext!);
+  // Every successful route-changing mutation already converges here. Reserve
+  // untouched ride slots first, then fill freshly computed rides across the
+  // final topology (home first) without changing which legs were rebuilt.
+  assignTransitPaletteSlots([
+    ...(itinerary.homeLeg ? [itinerary.homeLeg] : []),
+    ...itinerary.legs,
+  ]);
 }
 
 /**

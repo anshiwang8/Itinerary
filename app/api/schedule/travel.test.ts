@@ -18,6 +18,16 @@ import { buildSchedule } from "./schedule";
 
 const NOW = new Date(2026, 6, 3, 13, 20, 0); // Fri 2026-07-03 13:20 EDT
 
+/** Compare the pre-contract travel facts exactly while testing the new
+ * metadata separately in rideMetadata.test.ts. This keeps timing, geometry
+ * and provider-color regressions visible instead of weakening assertions. */
+function withoutTravelMetadata<T>(value: T): T {
+  const metadata = new Set(["legId", "rideId", "sourceStepIndex", "paletteSlot"]);
+  return JSON.parse(
+    JSON.stringify(value, (key, entry) => (metadata.has(key) ? undefined : entry))
+  ) as T;
+}
+
 // helper: computeRoutes response mock
 function mkRoute(
   seconds: number,
@@ -206,7 +216,7 @@ const cases: Array<[string, () => void]> = [
     "transit leg: margin applied, polyline present",
     () => {
       const leg = buildLeg(0, mkRoute(1200, 12000, { polyline: "enc_t" }), null);
-      assert.deepStrictEqual(leg, {
+      assert.deepStrictEqual(withoutTravelMetadata(leg), {
         fromIndex: 0,
         mode: "transit",
         rawMinutes: 20,
@@ -221,7 +231,7 @@ const cases: Array<[string, () => void]> = [
     "transit no-route → walk fallback, NO margin, walk polyline",
     () => {
       const leg = buildLeg(0, NO_ROUTE, mkRoute(540, 5400, { polyline: "enc_w" }));
-      assert.deepStrictEqual(leg, {
+      assert.deepStrictEqual(withoutTravelMetadata(leg), {
         fromIndex: 0,
         mode: "walk",
         rawMinutes: 9,
@@ -236,7 +246,7 @@ const cases: Array<[string, () => void]> = [
     "neither transit nor walk usable → mode unknown, 0 minutes, null polyline",
     () => {
       const leg = buildLeg(0, NO_ROUTE, NO_ROUTE);
-      assert.deepStrictEqual(leg, {
+      assert.deepStrictEqual(withoutTravelMetadata(leg), {
         fromIndex: 0,
         mode: "unknown",
         rawMinutes: 0,
@@ -257,7 +267,7 @@ const cases: Array<[string, () => void]> = [
     "193m scenario: short transit hop relabeled walk, margin skipped, keeps route data",
     () => {
       const leg = buildLeg(0, mkRoute(180, 193, { polyline: "enc_short" }), null);
-      assert.deepStrictEqual(leg, {
+      assert.deepStrictEqual(withoutTravelMetadata(leg), {
         fromIndex: 0,
         mode: "walk",
         rawMinutes: 3,
@@ -333,7 +343,7 @@ const cases: Array<[string, () => void]> = [
     () => {
       const leg = buildLeg(0, mkRoute(1080, 4200, { transitStep: true }), null);
       assert.strictEqual(leg.mode, "transit");
-      assert.deepStrictEqual(leg.transit, {
+      assert.deepStrictEqual(withoutTravelMetadata(leg.transit), {
         lineName: "506 Carlton",
         shortName: "506",
         color: null, // unpublished in this fixture — keep-on-missing
@@ -542,7 +552,7 @@ const cases: Array<[string, () => void]> = [
     "PER-STEP GEOMETRY rides on the leg in travel order, each ride in its own colour",
     () => {
       const leg = buildLeg(0, STEPS_WITH_GEOMETRY, null);
-      assert.deepStrictEqual(leg.pathSegments, [
+      assert.deepStrictEqual(withoutTravelMetadata(leg.pathSegments), [
         { mode: "walk", encodedPolyline: "enc_walk_to_stop", color: null },
         { mode: "transit", encodedPolyline: "enc_ride_1", color: "#ed1c24" },
         { mode: "walk", encodedPolyline: "enc_transfer_walk", color: null },
@@ -606,7 +616,7 @@ const cases: Array<[string, () => void]> = [
         ],
       };
       const leg = buildLeg(0, res, null);
-      assert.deepStrictEqual(leg.pathSegments, [
+      assert.deepStrictEqual(withoutTravelMetadata(leg.pathSegments), [
         { mode: "walk", encodedPolyline: "enc_kept_walk", color: null },
         { mode: "transit", encodedPolyline: "enc_kept_ride", color: "#d71920" },
       ]);
@@ -703,6 +713,11 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(stops[0].end_time, "2026-07-03T20:45:00-04:00");
       assert.strictEqual(stops[0].travelMinutesToNext, 25);
       assert.strictEqual(stops[0].travelToNext?.mode, "transit");
+      assert.strictEqual(
+        stops[0].travelToNext?.legId,
+        legs[0].legId,
+        "the scheduler carries display identity without reading or changing it"
+      );
       assert.strictEqual(stops[1].start_time, "2026-07-03T21:10:00-04:00");
       assert.strictEqual(stops[1].end_time, "2026-07-03T22:20:00-04:00");
       assert.strictEqual(stops[1].travelMinutesToNext, 13);
@@ -734,6 +749,71 @@ const cases: Array<[string, () => void]> = [
 // got early-evening transit frequencies (and sometimes services that had
 // stopped running). Each leg must depart at its own estimated instant.
 const asyncCases: Array<[string, () => Promise<void>]> = [
+  [
+    "getTravelLegs assigns fresh identities and route-wide slots in travel order",
+    async () => {
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("routes.googleapis.com")) {
+          const body = JSON.parse(String(init?.body));
+          const transit = body.travelMode === "TRANSIT";
+          return new Response(
+            JSON.stringify({
+              routes: [
+                {
+                  duration: transit ? "600s" : "3000s",
+                  distanceMeters: 5000,
+                  legs: transit
+                    ? [
+                        {
+                          steps: [
+                            {
+                              travelMode: "TRANSIT",
+                              polyline: { encodedPolyline: "enc-ride" },
+                              transitDetails: {
+                                headsign: "Fixture",
+                                transitLine: { name: "505 Fixture", nameShort: "505" },
+                              },
+                            },
+                          ],
+                        },
+                      ]
+                    : [],
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      let id = 0;
+      try {
+        const legs = await getTravelLegs(
+          "k",
+          [
+            { latitude: 43.65, longitude: -79.4 },
+            { latitude: 43.66, longitude: -79.41 },
+            { latitude: 43.67, longitude: -79.42 },
+          ],
+          undefined,
+          [],
+          (kind) => `route-${kind}-${id++}`
+        );
+        assert.deepStrictEqual(legs.map((leg) => leg.legId), ["route-leg-0", "route-leg-2"]);
+        assert.deepStrictEqual(
+          legs.map((leg) => leg.transitSegments?.[0].paletteSlot),
+          [0, 1]
+        );
+        assert.deepStrictEqual(
+          legs.map((leg) => leg.transitSegments?.[0].rideId),
+          ["route-ride-1", "route-ride-3"]
+        );
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
   [
     "Routes failure over irregular geography gets a detour-adjusted uncertain estimate",
     async () => {

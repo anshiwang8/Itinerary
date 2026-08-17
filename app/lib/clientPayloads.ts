@@ -211,12 +211,40 @@ function isCurrentOpeningHours(value: unknown): value is CurrentOpeningHours {
   );
 }
 
+const TRAVEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const TRANSIT_PALETTE_CAPACITY = 24;
+const RIDE_IDENTITY_FIELDS = [
+  "rideId",
+  "sourceStepIndex",
+  "paletteSlot",
+] as const;
+
+function validTravelId(value: unknown): value is string {
+  return typeof value === "string" && TRAVEL_ID_PATTERN.test(value);
+}
+
+function rideIdentityBundle(value: JsonRecord): "legacy" | "complete" | "invalid" {
+  const present = RIDE_IDENTITY_FIELDS.map((key) =>
+    Object.prototype.hasOwnProperty.call(value, key)
+  );
+  if (present.every((entry) => !entry)) return "legacy";
+  if (!present.every(Boolean)) return "invalid";
+
+  return validTravelId(value.rideId) &&
+    nonNegativeInteger(value.sourceStepIndex) &&
+    (value.paletteSlot === null ||
+      nonNegativeInteger(value.paletteSlot, TRANSIT_PALETTE_CAPACITY - 1))
+    ? "complete"
+    : "invalid";
+}
+
 function isTransitSummary(value: unknown): value is TransitSummary {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
   const transit = value as JsonRecord;
   return (
+    rideIdentityBundle(transit) !== "invalid" &&
     typeof transit.lineName === "string" &&
     nullableString(transit.shortName) &&
     nullableString(transit.color) &&
@@ -296,19 +324,190 @@ const MAX_PATH_SEGMENTS_PER_LEG = 128;
 function isPathSegment(value: unknown): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const segment = value as JsonRecord;
-  return (
+  const baseIsValid =
     (segment.mode === "walk" || segment.mode === "transit") &&
     typeof segment.encodedPolyline === "string" &&
     segment.encodedPolyline.length > 0 &&
     segment.encodedPolyline.length <= MAX_PATH_POLYLINE_CHARS &&
-    (segment.color === undefined || nullableString(segment.color))
+    (segment.color === undefined || nullableString(segment.color));
+  if (!baseIsValid) return false;
+
+  const identity = rideIdentityBundle(segment);
+  return segment.mode === "walk"
+    ? identity === "legacy"
+    : identity !== "invalid";
+}
+
+type CompleteRideIdentity = {
+  rideId: string;
+  sourceStepIndex: number;
+  paletteSlot: number | null;
+};
+
+type TopologyOccurrence = CompleteRideIdentity & { legIndex: number };
+
+function completeRideIdentity(value: unknown): CompleteRideIdentity | null {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value)
+  ) {
+    return null;
+  }
+  const record = value as JsonRecord;
+  if (rideIdentityBundle(record) !== "complete") return null;
+  return {
+    rideId: record.rideId as string,
+    sourceStepIndex: record.sourceStepIndex as number,
+    paletteSlot: record.paletteSlot as number | null,
+  };
+}
+
+function sameOccurrence(a: TopologyOccurrence, b: TopologyOccurrence): boolean {
+  return (
+    a.legIndex === b.legIndex &&
+    a.rideId === b.rideId &&
+    a.sourceStepIndex === b.sourceStepIndex
   );
 }
 
-function isTravelLeg(value: unknown): value is TravelLeg {
+function sameRideIdentity(
+  a: CompleteRideIdentity,
+  b: CompleteRideIdentity
+): boolean {
+  return (
+    a.rideId === b.rideId &&
+    a.sourceStepIndex === b.sourceStepIndex &&
+    a.paletteSlot === b.paletteSlot
+  );
+}
+
+/** Browser-side relational validation for the complete travel topology.
+ * Shape-valid records must still agree on the exact app-owned occurrence,
+ * and distinct occurrences must not claim the same non-null palette slot. */
+function hasCoherentTravelIdentityTopology(legs: JsonRecord[]): boolean {
+  const legIds = new Set<string>();
+  const byRideId = new Map<string, TopologyOccurrence>();
+  const bySource = new Map<string, TopologyOccurrence>();
+  const bySlot = new Map<number, TopologyOccurrence>();
+
+  const register = (candidate: TopologyOccurrence): boolean => {
+    const sameRide = byRideId.get(candidate.rideId);
+    if (
+      sameRide &&
+      (!sameOccurrence(sameRide, candidate) ||
+        sameRide.paletteSlot !== candidate.paletteSlot)
+    ) {
+      return false;
+    }
+    const sameSource = bySource.get(
+      `${candidate.legIndex}:${candidate.sourceStepIndex}`
+    );
+    if (
+      sameSource &&
+      (!sameOccurrence(sameSource, candidate) ||
+        sameSource.paletteSlot !== candidate.paletteSlot)
+    ) {
+      return false;
+    }
+    if (candidate.paletteSlot !== null) {
+      const sameSlot = bySlot.get(candidate.paletteSlot);
+      if (sameSlot && !sameOccurrence(sameSlot, candidate)) return false;
+    }
+    byRideId.set(candidate.rideId, candidate);
+    bySource.set(
+      `${candidate.legIndex}:${candidate.sourceStepIndex}`,
+      candidate
+    );
+    if (candidate.paletteSlot !== null) {
+      bySlot.set(candidate.paletteSlot, candidate);
+    }
+    return true;
+  };
+
+  for (const [legIndex, leg] of legs.entries()) {
+    if (typeof leg.legId === "string") {
+      if (legIds.has(leg.legId)) return false;
+      legIds.add(leg.legId);
+    }
+    const segmentFacts = Array.isArray(leg.transitSegments)
+      ? leg.transitSegments
+      : [];
+    const hasLegIdentity = typeof leg.legId === "string";
+    const allFacts = [
+      ...(leg.transit ? [leg.transit] : []),
+      ...segmentFacts,
+    ];
+    if (
+      hasLegIdentity &&
+      Boolean(leg.transit) !== (segmentFacts.length > 0)
+    ) {
+      return false;
+    }
+    for (const fact of allFacts) {
+      if (hasLegIdentity !== (completeRideIdentity(fact) !== null)) {
+        return false;
+      }
+    }
+    const compatibilityIdentity = completeRideIdentity(leg.transit);
+    const firstSegmentIdentity = completeRideIdentity(segmentFacts[0]);
+    if (
+      compatibilityIdentity &&
+      firstSegmentIdentity &&
+      !sameRideIdentity(compatibilityIdentity, firstSegmentIdentity)
+    ) {
+      return false;
+    }
+    const factRideIds = new Set<string>();
+    for (const fact of segmentFacts) {
+      const identity = completeRideIdentity(fact);
+      if (!identity) continue;
+      if (factRideIds.has(identity.rideId)) return false;
+      factRideIds.add(identity.rideId);
+    }
+    for (const fact of allFacts) {
+      const identity = completeRideIdentity(fact);
+      if (identity && !register({ ...identity, legIndex })) return false;
+    }
+  }
+
+  for (const [legIndex, leg] of legs.entries()) {
+    const hasLegIdentity = typeof leg.legId === "string";
+    const pathsSeen = new Set<string>();
+    const paths = Array.isArray(leg.pathSegments) ? leg.pathSegments : [];
+    for (const path of paths) {
+      if (
+        typeof path !== "object" ||
+        path === null ||
+        Array.isArray(path) ||
+        (path as JsonRecord).mode !== "transit"
+      ) {
+        continue;
+      }
+      const identity = completeRideIdentity(path);
+      if (!identity) {
+        if (hasLegIdentity) return false;
+        continue;
+      }
+      if (!hasLegIdentity) return false;
+      const occurrenceKey = `${legIndex}:${identity.rideId}`;
+      if (
+        pathsSeen.has(occurrenceKey) ||
+        !register({ ...identity, legIndex })
+      ) {
+        return false;
+      }
+      pathsSeen.add(occurrenceKey);
+    }
+  }
+  return true;
+}
+
+function isTravelLegShape(value: unknown): value is TravelLeg {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const leg = value as JsonRecord;
   return (
+    (leg.legId === undefined || validTravelId(leg.legId)) &&
     validLegIndex(leg.fromIndex) &&
     (leg.mode === "walk" ||
       leg.mode === "transit" ||
@@ -329,6 +528,13 @@ function isTravelLeg(value: unknown): value is TravelLeg {
       (Array.isArray(leg.pathSegments) &&
         leg.pathSegments.length <= MAX_PATH_SEGMENTS_PER_LEG &&
         leg.pathSegments.every(isPathSegment)))
+  );
+}
+
+function isTravelLeg(value: unknown): value is TravelLeg {
+  return (
+    isTravelLegShape(value) &&
+    hasCoherentTravelIdentityTopology([value as unknown as JsonRecord])
   );
 }
 
@@ -608,7 +814,13 @@ export function parseSelectionsPayload(value: unknown): { selections: Selection[
 
 export function parseTravelPayload(value: unknown): { legs: TravelLeg[] } {
   const data = record(value);
-  if (!Array.isArray(data.legs) || !data.legs.every(isTravelLeg)) {
+  if (
+    !Array.isArray(data.legs) ||
+    !data.legs.every(isTravelLeg) ||
+    !hasCoherentTravelIdentityTopology(
+      data.legs as unknown as JsonRecord[]
+    )
+  ) {
     throw new Error("invalid travel legs");
   }
   return { legs: data.legs };
@@ -641,6 +853,13 @@ export function parseItineraryPayload(value: unknown): Itinerary {
     (data.home !== undefined && !isHomePoint(data.home)) ||
     (data.timeZone !== undefined && !isIanaTimeZone(data.timeZone))
   ) {
+    throw new Error("invalid itinerary");
+  }
+  const travelTopology = [
+    ...(data.homeLeg === undefined ? [] : [data.homeLeg]),
+    ...data.legs,
+  ] as unknown as JsonRecord[];
+  if (!hasCoherentTravelIdentityTopology(travelTopology)) {
     throw new Error("invalid itinerary");
   }
   if (data.parsed !== undefined) parseParsedPayload(data.parsed);
