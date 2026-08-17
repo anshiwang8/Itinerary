@@ -45,10 +45,15 @@ const ROUTE_STOPS: MapStop[] = [
     // data exists: a broken ride step cannot become a fabricated fallback.
     polylineToNext: "whole-transit",
     pathSegmentsToNext: [
-      { mode: "walk", encodedPolyline: "walk-step", color: null },
+      // exact shared boundary → one run with the shared point only once
+      { mode: "walk", encodedPolyline: "walk-exact-a", color: null },
+      { mode: "walk", encodedPolyline: "walk-exact-b", color: null },
       { mode: "transit", encodedPolyline: "ride-red", color: "#D71920" },
-      { mode: "transit", encodedPolyline: "", color: "#123456" },
+      // one E5-scale rounding mismatch → one safely merged run
+      { mode: "walk", encodedPolyline: "walk-near-a", color: null },
+      { mode: "walk", encodedPolyline: "walk-near-b", color: null },
       { mode: "transit", encodedPolyline: "ride-fallback", color: null },
+      { mode: "transit", encodedPolyline: "", color: "#123456" },
       { mode: "transit", encodedPolyline: "decode-throw", color: "#654321" },
       { mode: "transit", encodedPolyline: "decode-empty", color: "#654321" },
       { mode: "transit", encodedPolyline: "decode-one", color: "#654321" },
@@ -56,7 +61,9 @@ const ROUTE_STOPS: MapStop[] = [
       { mode: "transit", encodedPolyline: "decode-out-of-range", color: "#654321" },
       { mode: "transit", encodedPolyline: "ride-invalid-color", color: "route-red" },
       { mode: "transit", encodedPolyline: "ride-blue", color: "#0066CC" },
-      { mode: "walk", encodedPolyline: "walk-step-two", color: null },
+      // The next leg begins at this exact endpoint. Per-leg ownership must
+      // still keep the two walking runs separate.
+      { mode: "walk", encodedPolyline: "walk-leg-tail", color: null },
     ],
   },
   {
@@ -71,8 +78,31 @@ const ROUTE_STOPS: MapStop[] = [
     // `changed` lives on the destination stop, so every ride entering this
     // stop should receive the same non-colour changed-leg emphasis.
     changed: true,
-    legModeToNext: "walk",
-    polylineToNext: "plain-walk",
+    legModeToNext: "transit",
+    polylineToNext: "whole-transit-two",
+    pathSegmentsToNext: [
+      { mode: "walk", encodedPolyline: "walk-leg-head", color: null },
+      { mode: "transit", encodedPolyline: "ride-green", color: "#00843D" },
+      // The valid paths on either side meet exactly, but this missing shape
+      // is an authoritative break and must prevent a merge across it.
+      { mode: "walk", encodedPolyline: "walk-break-before", color: null },
+      { mode: "walk", encodedPolyline: "", color: null },
+      { mode: "walk", encodedPolyline: "walk-break-after", color: null },
+      // Every invalid/degenerate decoder shape is isolated here.
+      { mode: "walk", encodedPolyline: "walk-decode-throw", color: null },
+      { mode: "walk", encodedPolyline: "walk-decode-malformed", color: null },
+      { mode: "walk", encodedPolyline: "walk-decode-empty", color: null },
+      { mode: "walk", encodedPolyline: "walk-decode-one", color: null },
+      { mode: "walk", encodedPolyline: "walk-decode-nonfinite", color: null },
+      { mode: "walk", encodedPolyline: "walk-decode-out-of-range", color: null },
+      { mode: "walk", encodedPolyline: "walk-decode-zero", color: null },
+      // Both pairs contain valid paths. The first is plainly disconnected;
+      // the second misses the two-metre tolerance by a small measured amount.
+      { mode: "walk", encodedPolyline: "walk-disconnected-a", color: null },
+      { mode: "walk", encodedPolyline: "walk-disconnected-b", color: null },
+      { mode: "walk", encodedPolyline: "walk-beyond-a", color: null },
+      { mode: "walk", encodedPolyline: "walk-beyond-b", color: null },
+    ],
   },
   {
     id: "maps-route-three",
@@ -83,9 +113,13 @@ const ROUTE_STOPS: MapStop[] = [
     startTime: "2026-07-25T22:00:00-04:00",
     endTime: "2026-07-25T23:00:00-04:00",
     status: "upcoming",
-    // A legacy transit leg with no provider geometry must not become an
-    // endpoint-to-endpoint straight line either.
-    legModeToNext: "transit",
+    // An ordinary whole-leg WALK keeps its one solid legacy line and ignores
+    // step geometry entirely — embedded walk runs are transit-leg-only.
+    legModeToNext: "walk",
+    polylineToNext: "plain-walk",
+    pathSegmentsToNext: [
+      { mode: "walk", encodedPolyline: "ordinary-walk-step", color: null },
+    ],
   },
   {
     id: "maps-route-four",
@@ -95,6 +129,19 @@ const ROUTE_STOPS: MapStop[] = [
     lng: -79.405,
     startTime: "2026-07-25T23:15:00-04:00",
     endTime: "2026-07-25T23:45:00-04:00",
+    status: "upcoming",
+    // A legacy transit leg with no provider geometry must not become an
+    // endpoint-to-endpoint straight line either.
+    legModeToNext: "transit",
+  },
+  {
+    id: "maps-route-five",
+    category: "late snack",
+    name: "Route Specimen Five",
+    lat: 43.6575,
+    lng: -79.402,
+    startTime: "2026-07-26T00:00:00-04:00",
+    endTime: "2026-07-26T00:30:00-04:00",
     status: "upcoming",
   },
 ];

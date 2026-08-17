@@ -27,8 +27,8 @@ export interface MapStop {
   legModeToNext?: "transit" | "walk" | "unknown";
   polylineToNext?: string | null;
   /** the same leg step by step, in travel order — the provider's own
-   * geometry for each walk and each ride. Transit steps draw separately;
-   * walk-step rendering is deliberately deferred. */
+   * geometry for each walk and each ride. Transit rides draw separately;
+   * consecutive connected walk steps draw as one dotted run. */
   pathSegmentsToNext?: PathSegment[] | null;
   /** transit line detail for the leg leaving this stop */
   legLabel?: string | null;
@@ -77,7 +77,24 @@ const PAPER_STYLE: google.maps.MapTypeStyle[] = [
 // Route lines: a deep teal that reads on the pale map. It is the fallback
 // when an agency does not publish a usable transit-line colour.
 const INK = "#2E6F8A";
+// The map-label gray is the established neutral on this pale-blue canvas.
+// Walking stays semantically neutral instead of borrowing a route colour.
+const WALK_GRAY = "#6B8797";
 const PROVIDER_HEX_COLOR = /^#[\da-f]{6}$/i;
+
+/**
+ * Google encoded polylines use an E5 coordinate grid: one diagonal grid
+ * cell is at most ~1.6 m at the equator (less in Toronto). Two metres admits
+ * that rounding-scale boundary mismatch plus floating noise, while remaining
+ * about one pixel even at an ordinary close itinerary zoom. Anything farther
+ * is a real gap and starts a separate run — no connector is invented.
+ */
+const WALK_BOUNDARY_TOLERANCE_METERS = 2;
+// Sub-half-metre cumulative paths are repeated-point / rounding noise, not a
+// meaningful walk instruction. computeLength is used so a small loop is not
+// mistaken for zero merely because its endpoints happen to meet.
+const WALK_MIN_PATH_METERS = 0.5;
+const WALK_DOT_REPEAT = "10px";
 
 function transitStrokeColor(color?: string | null): string {
   const candidate = color?.trim();
@@ -327,14 +344,127 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
           });
         };
 
+        const addWalkRun = (
+          path: google.maps.LatLng[],
+          changed: boolean
+        ) => {
+          const addDots = (
+            scale: number,
+            fillOpacity: number,
+            zIndex: number
+          ) => {
+            addLine({
+              map,
+              path,
+              clickable: false,
+              // Both layers are genuinely dotted. A zero-opacity base stroke
+              // prevents changed emphasis from turning walking into a solid
+              // route, while the repeated native circle symbol stays crisp.
+              strokeOpacity: 0,
+              zIndex,
+              icons: [
+                {
+                  icon: {
+                    path: google.maps.SymbolPath.CIRCLE,
+                    fillColor: WALK_GRAY,
+                    fillOpacity,
+                    scale,
+                    strokeOpacity: 0,
+                  },
+                  offset: "0",
+                  repeat: WALK_DOT_REPEAT,
+                },
+              ],
+            });
+          };
+
+          // Changed walking keeps its neutral meaning: larger, lighter dots
+          // underneath the unchanged primary rather than a semantic recolour.
+          if (changed) addDots(2.4, 0.18, 1);
+          addDots(1.35, 0.72, 2);
+        };
+
         for (const seg of segs) {
           const mode = displayableRouteMode(seg.mode);
           if (!mode) continue;
 
           if (mode === "transit" && Array.isArray(seg.pathSegments)) {
+            // This accumulator is deliberately scoped to ONE itinerary leg.
+            // A new outer segment can never inherit or join the previous
+            // leg's final walk, even when their decoded endpoints coincide.
+            let walkRun: google.maps.LatLng[] | null = null;
+            const flushWalkRun = () => {
+              if (walkRun) addWalkRun(walkRun, seg.changed);
+              walkRun = null;
+            };
+
             for (const pathSegment of seg.pathSegments) {
-              // Piece 2 draws ride geometry only. Walk-step geometry stays
-              // untouched until Piece 3 and is not decoded or merged here.
+              if (pathSegment.mode === "walk") {
+                let path: google.maps.LatLng[] | null = null;
+                if (pathSegment.encodedPolyline) {
+                  try {
+                    const decoded = usableDecodedPath(
+                      geometry.encoding.decodePath(pathSegment.encodedPolyline)
+                    );
+                    const length = decoded
+                      ? geometry.spherical.computeLength(decoded)
+                      : Number.NaN;
+                    if (
+                      decoded &&
+                      Number.isFinite(length) &&
+                      length > WALK_MIN_PATH_METERS
+                    ) {
+                      path = decoded;
+                    }
+                  } catch {
+                    // Decode/geometry failures break only this walking gap.
+                  }
+                }
+
+                // A missing, malformed, degenerate, or throwing walk entry is
+                // a hard boundary. Valid geometry on either side must never be
+                // silently joined across it.
+                if (!path) {
+                  flushWalkRun();
+                  continue;
+                }
+
+                if (!walkRun) {
+                  walkRun = path;
+                  continue;
+                }
+
+                let boundaryMeters = Number.POSITIVE_INFINITY;
+                try {
+                  boundaryMeters = geometry.spherical.computeDistanceBetween(
+                    walkRun[walkRun.length - 1],
+                    path[0]
+                  );
+                } catch {
+                  // Treat a distance failure exactly like a disconnected path.
+                }
+
+                if (
+                  Number.isFinite(boundaryMeters) &&
+                  boundaryMeters <= WALK_BOUNDARY_TOLERANCE_METERS
+                ) {
+                  // The next first point is the same provider boundary at E5
+                  // precision. Keep the earlier decoded point and omit the
+                  // duplicate/rounding-equivalent one: no tiny bridge edge is
+                  // added, and every remaining coordinate is provider-native.
+                  walkRun = [...walkRun, ...path.slice(1)];
+                } else {
+                  // Both shapes are valid but spatially separate. Render two
+                  // runs; never draw the straight line between their endpoints.
+                  flushWalkRun();
+                  walkRun = path;
+                }
+                continue;
+              }
+
+              // Every transit step ends the walking gap BEFORE ride decoding,
+              // so even a malformed ride cannot join walks across itself.
+              flushWalkRun();
               if (pathSegment.mode !== "transit" || !pathSegment.encodedPolyline) {
                 continue;
               }
@@ -362,8 +492,9 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
                 zIndex: 2,
               });
             }
+            flushWalkRun();
             // The presence of step data is authoritative. Missing/invalid
-            // ride shapes never fall back to a fabricated whole-leg line.
+            // step shapes never fall back to a fabricated whole-leg line.
             continue;
           }
 
