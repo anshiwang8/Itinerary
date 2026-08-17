@@ -10,10 +10,10 @@ import type { PathSegment } from "./api/schedule/travel";
 import { createRetryableLoader } from "./lib/retryableLoader";
 import { displayableRouteMode } from "./lib/mapRoutePolicy";
 
-// Printed-cartography map: warm-paper Google styling (inline JSON, so no
-// Cloud map id), ink-navy route lines, and an HTML overlay layer for the
-// chips / editorial cards positioned off the live map projection. Acid
-// green is reserved for the active "now" stop and reroute-changed stops.
+// Printed-cartography map: pale-blue Google styling (inline JSON, so no
+// Cloud map id), provider-coloured transit lines, and an HTML overlay layer
+// for the chips / editorial cards positioned off the live map projection.
+// Acid green is reserved for the active "now" stop and changed pin accents.
 
 export interface MapStop {
   id: string;
@@ -27,8 +27,8 @@ export interface MapStop {
   legModeToNext?: "transit" | "walk" | "unknown";
   polylineToNext?: string | null;
   /** the same leg step by step, in travel order — the provider's own
-   * geometry for each walk and each ride. Carried here so the map HAS it;
-   * `polylineToNext` above is still what draws today. */
+   * geometry for each walk and each ride. Transit steps draw separately;
+   * walk-step rendering is deliberately deferred. */
   pathSegmentsToNext?: PathSegment[] | null;
   /** transit line detail for the leg leaving this stop */
   legLabel?: string | null;
@@ -74,10 +74,41 @@ const PAPER_STYLE: google.maps.MapTypeStyle[] = [
   { featureType: "water", elementType: "geometry", stylers: [{ color: "#bcdcea" }] },
 ];
 
-// Route lines: a deep teal that reads on the pale map. Dashed transit vs
-// solid walk is unchanged — only the hue moved off the old ink-navy.
+// Route lines: a deep teal that reads on the pale map. It is the fallback
+// when an agency does not publish a usable transit-line colour.
 const INK = "#2E6F8A";
-const LIVE = "#C8F000";
+const PROVIDER_HEX_COLOR = /^#[\da-f]{6}$/i;
+
+function transitStrokeColor(color?: string | null): string {
+  const candidate = color?.trim();
+  return candidate && PROVIDER_HEX_COLOR.test(candidate) ? candidate : INK;
+}
+
+function usableDecodedPath(value: unknown): google.maps.LatLng[] | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+
+  for (const point of value) {
+    if (!point || typeof point !== "object") return null;
+    const latMember = (point as { lat?: unknown }).lat;
+    const lngMember = (point as { lng?: unknown }).lng;
+    const lat = typeof latMember === "function" ? latMember.call(point) : latMember;
+    const lng = typeof lngMember === "function" ? lngMember.call(point) : lngMember;
+    if (
+      typeof lat !== "number" ||
+      typeof lng !== "number" ||
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lng) ||
+      lat < -90 ||
+      lat > 90 ||
+      lng < -180 ||
+      lng > 180
+    ) {
+      return null;
+    }
+  }
+
+  return value as google.maps.LatLng[];
+}
 
 const loadMapLibs = createRetryableLoader(async () => {
     const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY?.trim();
@@ -214,24 +245,42 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     };
   }, [retryCount]);
 
-  // route polylines + fit bounds when the stops change
+  // Route overlays. Each effect invocation owns exactly the polylines it
+  // creates so a stale async cleanup can never detach a newer render's lines.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || mapState !== "ready") return;
     let cancelled = false;
+    const ownedLines: google.maps.Polyline[] = [];
+
+    const removeOwnedLines = () => {
+      ownedLines.forEach((line) => line.setMap(null));
+      if (linesRef.current === ownedLines) {
+        linesRef.current = [];
+      } else if (ownedLines.length > 0) {
+        const owned = new Set(ownedLines);
+        linesRef.current = linesRef.current.filter((line) => !owned.has(line));
+      }
+    };
+
+    // Normally the previous invocation's cleanup already did this. Keeping
+    // the ownership ref empty at setup also covers a map-state transition
+    // that disposed the old effect before its async loader resolved.
+    linesRef.current.forEach((line) => line.setMap(null));
+    linesRef.current = [];
+
     (async () => {
       try {
         const [maps, geometry] = await loadMapLibs();
-        if (cancelled) return;
-        linesRef.current.forEach((l) => l.setMap(null));
-        linesRef.current = [];
+        if (cancelled || mapRef.current !== map) return;
 
         const segs: {
           from: google.maps.LatLngLiteral;
           to: google.maps.LatLngLiteral;
           mode?: "transit" | "walk" | "unknown";
           encoded?: string | null;
-          live: boolean;
+          pathSegments?: PathSegment[] | null;
+          changed: boolean;
         }[] = [];
 
         if (home && stops[0]) {
@@ -240,7 +289,8 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
             to: { lat: stops[0].lat, lng: stops[0].lng },
             mode: home.legModeToNext,
             encoded: home.polylineToNext,
-            live: false,
+            pathSegments: home.pathSegmentsToNext,
+            changed: false,
           });
         }
         for (let i = 0; i < stops.length - 1; i++) {
@@ -249,36 +299,128 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
             to: { lat: stops[i + 1].lat, lng: stops[i + 1].lng },
             mode: stops[i].legModeToNext,
             encoded: stops[i].polylineToNext,
-            // the redrawn inbound leg of a changed stop reads live
-            live: !!stops[i + 1].changed,
+            pathSegments: stops[i].pathSegmentsToNext,
+            // A changed destination marks its inbound leg as changed.
+            changed: !!stops[i + 1].changed,
           });
         }
+
+        const addLine = (options: google.maps.PolylineOptions) => {
+          const line = new maps.Polyline(options);
+          ownedLines.push(line);
+          linesRef.current = ownedLines;
+        };
+
+        const addHalo = (
+          path: google.maps.LatLng[] | google.maps.LatLngLiteral[],
+          color: string,
+          strokeWeight: number
+        ) => {
+          addLine({
+            map,
+            path,
+            clickable: false,
+            strokeColor: color,
+            strokeOpacity: 0.22,
+            strokeWeight: strokeWeight + 5,
+            zIndex: 1,
+          });
+        };
 
         for (const seg of segs) {
           const mode = displayableRouteMode(seg.mode);
           if (!mode) continue;
-          const path = seg.encoded
-            ? geometry.encoding.decodePath(seg.encoded)
-            : [seg.from, seg.to];
-          const color = seg.live ? LIVE : INK;
-          const line =
-            mode === "transit"
-              ? new maps.Polyline({
-                  map,
-                  path,
-                  strokeOpacity: 0,
-                  icons: [
-                    {
-                      icon: { path: "M 0,-1 0,1", strokeOpacity: 1, strokeColor: color, strokeWeight: 2.5, scale: 3 },
-                      offset: "0",
-                      repeat: "13px",
-                    },
-                  ],
-                })
-              : new maps.Polyline({ map, path, strokeColor: color, strokeOpacity: 0.92, strokeWeight: seg.live ? 3.5 : 2.5 });
-          linesRef.current.push(line);
+
+          if (mode === "transit" && Array.isArray(seg.pathSegments)) {
+            for (const pathSegment of seg.pathSegments) {
+              // Piece 2 draws ride geometry only. Walk-step geometry stays
+              // untouched until Piece 3 and is not decoded or merged here.
+              if (pathSegment.mode !== "transit" || !pathSegment.encodedPolyline) {
+                continue;
+              }
+
+              let path: google.maps.LatLng[] | null = null;
+              try {
+                path = usableDecodedPath(
+                  geometry.encoding.decodePath(pathSegment.encodedPolyline)
+                );
+              } catch {
+                // One malformed provider step must not hide later valid rides.
+              }
+              if (!path) continue;
+
+              const color = transitStrokeColor(pathSegment.color);
+              const strokeWeight = 3.5;
+              if (seg.changed) addHalo(path, color, strokeWeight);
+              addLine({
+                map,
+                path,
+                clickable: false,
+                strokeColor: color,
+                strokeOpacity: 0.92,
+                strokeWeight,
+                zIndex: 2,
+              });
+            }
+            // The presence of step data is authoritative. Missing/invalid
+            // ride shapes never fall back to a fabricated whole-leg line.
+            continue;
+          }
+
+          let path: google.maps.LatLng[] | google.maps.LatLngLiteral[] | null;
+          if (seg.encoded) {
+            try {
+              path = usableDecodedPath(geometry.encoding.decodePath(seg.encoded));
+            } catch {
+              path = null;
+            }
+          } else if (mode === "walk") {
+            path = [seg.from, seg.to];
+          } else {
+            // A transit leg without provider geometry has no honest route
+            // shape. Never connect its endpoints with a fabricated ride.
+            continue;
+          }
+          if (!path) continue;
+
+          // Pre-Piece-1 transit legs retain their existing whole-leg dashed
+          // fallback, and ordinary walking legs retain their solid ink line.
+          const strokeWeight = 2.5;
+          const changedPrimaryLayer = seg.changed ? { zIndex: 2 } : {};
+          if (seg.changed) addHalo(path, INK, strokeWeight);
+          if (mode === "transit") {
+            addLine({
+              map,
+              path,
+              strokeOpacity: 0,
+              ...changedPrimaryLayer,
+              icons: [
+                {
+                  icon: {
+                    path: "M 0,-1 0,1",
+                    strokeOpacity: 1,
+                    strokeColor: INK,
+                    strokeWeight,
+                    scale: 3,
+                  },
+                  offset: "0",
+                  repeat: "13px",
+                },
+              ],
+            });
+          } else {
+            addLine({
+              map,
+              path,
+              strokeColor: INK,
+              strokeOpacity: 0.92,
+              strokeWeight,
+              ...changedPrimaryLayer,
+            });
+          }
         }
       } catch {
+        removeOwnedLines();
         if (!cancelled) {
           projRef.current = null;
           setMapState("failed");
@@ -287,8 +429,8 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     })();
     return () => {
       cancelled = true;
+      removeOwnedLines();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stops, home, mapState]);
 
   // Fit bounds only when the geography actually changes (initial plan or a
