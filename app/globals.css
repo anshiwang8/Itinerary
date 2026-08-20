@@ -689,6 +689,10 @@ button { font-family: var(--grot); cursor: pointer; }
   background: transparent; color: inherit; text-align: left;
 }
 .lstrip__legselect:hover .lstrip__legline { color: var(--accent-deep); }
+.lstrip__legselect[aria-pressed="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .lstrip__timeline {
   list-style: none; margin: 6px 0 0; padding: 6px 0 0;
   border-top: 1px solid var(--rule);

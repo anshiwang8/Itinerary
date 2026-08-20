@@ -23,6 +23,7 @@ import { originDisplayLabel } from "./lib/locationLabels";
 // Space Grotesk; chartreuse stays reserved for the active/changed stop.
 
 export interface StripLeg {
+  legId?: string | null;
   mode: "transit" | "walk" | "unknown";
   totalMinutes: number;
   marginMinutes: number;
@@ -217,17 +218,21 @@ function LegCard({
   leg,
   timeZone,
   now,
+  manualLegId,
+  onToggleManualLeg,
 }: {
   leg: StripLeg;
   timeZone: string;
   /** the instant the plan is being READ at — the app's one "now", so the
    *  leg that is underway agrees with the stop wearing the "now" pill */
   now: Date;
+  manualLegId: string | null;
+  onToggleManualLeg: (legId: string) => void;
 }) {
   // This leg's SELECTION: the user tapped this card. One of the two inputs
   // to the visibility rule — the other is the clock, and neither is a
   // disclosure the user has to find.
-  const [selected, setSelected] = useState(false);
+  const [legacySelected, setLegacySelected] = useState(false);
   const timelineId = useId();
   const isTransit = leg.mode === "transit";
   const segments = isTransit ? leg.segments ?? [] : [];
@@ -238,11 +243,14 @@ function LegCard({
         rides: segments,
       })
     : null;
+  const identified = typeof leg.legId === "string";
+  const manuallySelected = identified ? manualLegId === leg.legId : legacySelected;
+  const underway = legUnderway(leg, now.getTime());
   const showTimeline = shouldShowTimeline({
     isTransit,
     hasTimeline: timeline !== null,
-    isActiveNow: legUnderway(leg, now.getTime()),
-    isSelected: selected,
+    isActiveNow: underway,
+    isSelected: manuallySelected,
   });
   const legLabel =
     leg.mode === "transit"
@@ -300,15 +308,26 @@ function LegCard({
     >
       {isTransit ? (
         <>
-          {timeline ? (
+          {identified ? (
             // A native button, like the stop card's summary — the timeline
             // is its SIBLING, never nested inside it.
             <button
               type="button"
               className="lstrip__legselect"
+              aria-pressed={manuallySelected}
+              aria-expanded={timeline ? showTimeline : undefined}
+              aria-controls={timeline ? timelineId : undefined}
+              onClick={() => onToggleManualLeg(leg.legId!)}
+            >
+              {transitSummary}
+            </button>
+          ) : timeline ? (
+            <button
+              type="button"
+              className="lstrip__legselect"
               aria-expanded={showTimeline}
               aria-controls={timelineId}
-              onClick={() => setSelected((v) => !v)}
+              onClick={() => setLegacySelected((v) => !v)}
             >
               {transitSummary}
             </button>
@@ -722,6 +741,8 @@ export interface ItineraryStripProps {
    *  read at RENDER: nothing here ticks, so an auto-shown leg re-evaluates
    *  on the app's existing render cadence, never on a timer of its own. */
   now?: Date;
+  manualLegId?: string | null;
+  onToggleManualLeg?: (legId: string) => void;
   focusRequest?: StripFocusRequest | null;
   onFocusHandled?: (nonce: number) => void;
 }
@@ -735,6 +756,8 @@ export default function ItineraryStrip({
   remove,
   timeZone = "America/Toronto",
   now = new Date(),
+  manualLegId = null,
+  onToggleManualLeg = () => {},
   focusRequest,
   onFocusHandled,
 }: ItineraryStripProps) {
@@ -755,7 +778,7 @@ export default function ItineraryStrip({
           {home.leaveBy && <div className="lstrip__be">leave by {home.leaveBy}</div>}
         </div>
       )}
-      {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} now={now} />}
+      {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} now={now} manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} />}
       {stops.map((s, i) => (
         <Fragment key={s.id}>
           <StopCard
@@ -770,7 +793,7 @@ export default function ItineraryStrip({
             onFocusHandled={onFocusHandled}
           />
           {s.legToNext && (
-            <LegCard leg={s.legToNext} timeZone={timeZone} now={now} />
+            <LegCard leg={s.legToNext} timeZone={timeZone} now={now} manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} />
           )}
         </Fragment>
       ))}

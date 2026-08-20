@@ -92,6 +92,13 @@ import ItineraryStrip, {
   StripHome,
   StripStop,
 } from "./ItineraryStrip";
+import {
+  automaticTransitLegId,
+  hasLegacyTransitLeg,
+  retainManualLegId,
+  toggleManualLegId,
+  visibleTransitLegIds as deriveVisibleTransitLegIds,
+} from "./lib/travelLegVisibility";
 
 const SHOW_DEV_CONTROLS = shouldShowDevControls(
   process.env.NODE_ENV,
@@ -265,6 +272,7 @@ function stopsFromSchedule(sched: ScheduledStop[], pools: Pools): MapStop[] {
       endTime: st.end_time,
       reason: st.reason,
       legModeToNext: st.travelToNext?.mode,
+      legIdToNext: st.travelToNext?.legId ?? null,
       polylineToNext: st.travelToNext?.encodedPolyline ?? null,
       pathSegmentsToNext: st.travelToNext?.pathSegments ?? null,
       legLabel: legDetail(st.travelToNext),
@@ -287,6 +295,7 @@ function stopsFromItinerary(it: Itinerary): MapStop[] {
       endTime: s.end_time,
       reason: s.reason,
       legModeToNext: s.travelToNext?.mode,
+      legIdToNext: s.travelToNext?.legId ?? null,
       polylineToNext: s.travelToNext?.encodedPolyline ?? null,
       pathSegmentsToNext: s.travelToNext?.pathSegments ?? null,
       legLabel: legDetail(s.travelToNext),
@@ -550,6 +559,7 @@ export default function Home() {
   const [mapStops, setMapStops] = useState<MapStop[]>([]);
   const [itinerary, setItinerary] = useState<Itinerary | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [manualLegId, setManualLegId] = useState<string | null>(null);
   const [stripFocusRequest, setStripFocusRequest] =
     useState<StripFocusRequest | null>(null);
   const stripFocusNonce = useRef(0);
@@ -1867,6 +1877,7 @@ export default function Home() {
     setMapStops([]);
     setHomeLeg(null);
     setSelected(null);
+    setManualLegId(null);
     setBanner(null);
     setChangedIds(new Set());
     setOldStarts({});
@@ -2365,6 +2376,7 @@ export default function Home() {
   // render on purpose — nothing here ticks, so anything keyed on it
   // re-evaluates on the render cadence the app already has.
   const displayNow = simNow ? new Date(simNow) : new Date();
+  const displayNowMs = displayNow.getTime();
 
   const mapHome = useMemo<MapHome | null>(() => {
     if (!homeLeg) return null;
@@ -2378,13 +2390,13 @@ export default function Home() {
       lat: homeOrigin.location.latitude,
       lng: homeOrigin.location.longitude,
       legModeToNext: homeLeg.mode,
+      legIdToNext: homeLeg.legId ?? null,
       polylineToNext: homeLeg.encodedPolyline,
       pathSegmentsToNext: homeLeg.pathSegments ?? null,
       legLabel: legDetail(homeLeg),
       legSegments: legSegments(homeLeg),
       leaveBy,
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [homeLeg, schedule, homeOrigin.label, homeOrigin.location.latitude, homeOrigin.location.longitude, displayZone]);
 
   const timedStops = itinerary?.stops.filter((s) => s.start_time) ?? [];
@@ -2422,6 +2434,7 @@ export default function Home() {
         oldStart: oldStarts[s.id!] ?? null,
         legToNext: leg
           ? {
+              legId: leg.legId ?? null,
               mode: leg.mode,
               totalMinutes: leg.totalMinutes,
               marginMinutes: leg.marginMinutes,
@@ -2453,6 +2466,7 @@ export default function Home() {
       label: (itinerary.home ?? homePoint ?? HOME).label,
       leaveBy: leaveISO ? formatStopTime(leaveISO, new Date(), displayZone) : null,
       leg: {
+        legId: homeLeg.legId ?? null,
         mode: homeLeg.mode,
         totalMinutes: homeLeg.totalMinutes,
         marginMinutes: homeLeg.marginMinutes,
@@ -2465,8 +2479,45 @@ export default function Home() {
         segments: homeLeg.transitSegments ?? (homeLeg.transit ? [homeLeg.transit] : null),
       },
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [homeLeg, itinerary, homePoint, displayZone]);
+
+  const projectedTravelLegs = useMemo(
+    () => [stripHome?.leg, ...stripStops.map((stop) => stop.legToNext)],
+    [stripHome, stripStops]
+  );
+  const legacyTransitVisibility = useMemo(
+    () => hasLegacyTransitLeg(projectedTravelLegs),
+    [projectedTravelLegs]
+  );
+  const automaticLegId = useMemo(
+    () =>
+      automaticTransitLegId({
+        nowMs: displayNowMs,
+        home: stripHome?.leg,
+        stops: stripStops.map((stop) => ({
+          status: stop.status,
+          outbound: stop.legToNext,
+        })),
+      }),
+    [displayNowMs, stripHome, stripStops]
+  );
+  const visibleTransitLegIds = useMemo(
+    () => deriveVisibleTransitLegIds(automaticLegId, manualLegId),
+    [automaticLegId, manualLegId]
+  );
+  const displayedItineraryId = useRef<string | null>(null);
+
+  useEffect(() => {
+    const nextId = itinerary?.id ?? null;
+    if (displayedItineraryId.current !== nextId) {
+      setManualLegId(null);
+      displayedItineraryId.current = nextId;
+    }
+  }, [itinerary?.id]);
+
+  useEffect(() => {
+    setManualLegId((current) => retainManualLegId(current, projectedTravelLegs));
+  }, [projectedTravelLegs]);
 
   const wxNow = weather?.[0] ?? null;
 
@@ -2892,7 +2943,15 @@ export default function Home() {
   return (
     <main className={"stage" + (banner ? " stage--banner" : "")}>
       <h1 className="sr-only">Your itinerary</h1>
-      <ItineraryMap stops={styledStops} home={mapHome} selected={selected} timeZone={displayZone} onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))} />
+      <ItineraryMap
+        stops={styledStops}
+        home={mapHome}
+        selected={selected}
+        timeZone={displayZone}
+        visibleTransitLegIds={visibleTransitLegIds}
+        legacyTransitVisibility={legacyTransitVisibility}
+        onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))}
+      />
 
       {wxNow && (
         <div className="weather" aria-label={`Current weather — ${city.trim() || "Toronto"}`}>
@@ -2908,6 +2967,10 @@ export default function Home() {
         selected={selected}
         timeZone={displayZone}
         now={displayNow}
+        manualLegId={manualLegId}
+        onToggleManualLeg={(legId) =>
+          setManualLegId((current) => toggleManualLegId(current, legId))
+        }
         onSelect={(c) => setSelected(c)}
         focusRequest={stripFocusRequest}
         onFocusHandled={(nonce) =>

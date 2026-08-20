@@ -454,6 +454,61 @@ async function openRouteSpecimen(page: Page): Promise<PolylineSnapshot[]> {
   return (await polylineSnapshots(page)).filter((line) => line.active);
 }
 
+test("@mock complete-leg visibility couples manual strip selection to every native and HTML map visual", async ({ page }) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+  await page.getByRole("button", { name: "Show visibility specimen" }).click();
+
+  const firstLeg = page.locator(".lstrip__leg").filter({ hasText: "501 Shared" });
+  const secondLeg = page.locator(".lstrip__leg").filter({ hasText: "77 Overflow Green" });
+  const firstControl = firstLeg.getByRole("button");
+  const secondControl = secondLeg.getByRole("button");
+
+  await expect(firstControl).toHaveAttribute("aria-pressed", "false");
+  await expect(secondControl).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator(".leglab").filter({ hasText: "2 transfers" })).toHaveCount(0);
+  await expect(page.locator(".mk--transfer")).toHaveCount(0);
+  await expect(page.locator(".leglab").filter({ hasText: "77 Overflow Green" })).toHaveCount(1);
+  await expect.poll(async () =>
+    (await polylineSnapshots(page)).filter((line) => line.active && line.strokeColor === "#005A9C").length
+  ).toBe(0);
+  await expect.poll(async () =>
+    (await polylineSnapshots(page)).filter((line) => line.active && line.strokeColor === "#00843D").length
+  ).toBe(1);
+
+  await firstControl.press("Enter");
+  await expect(firstControl).toHaveAttribute("aria-pressed", "true");
+  await expect(firstControl).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".leglab").filter({ hasText: "2 transfers" })).toHaveCount(1);
+  await expect(page.locator(".mk--transfer")).toHaveCount(2);
+  await expect.poll(async () =>
+    (await polylineSnapshots(page)).filter((line) => line.active && line.iconFillColor === "#4F6F7E").length
+  ).toBeGreaterThan(0);
+
+  const noTimelineControl = page
+    .locator(".lstrip__leg")
+    .filter({ hasText: "transit" })
+    .last()
+    .getByRole("button");
+  await expect(noTimelineControl).toHaveAttribute("aria-pressed", "false");
+  await expect(noTimelineControl).not.toHaveAttribute("aria-expanded", /.+/);
+  await expect(noTimelineControl).not.toHaveAttribute("aria-controls", /.+/);
+  await noTimelineControl.click();
+  await expect(noTimelineControl).toHaveAttribute("aria-pressed", "true");
+  await expect(firstControl).toHaveAttribute("aria-pressed", "false");
+
+  await secondControl.press("Space");
+  await expect(firstControl).toHaveAttribute("aria-pressed", "false");
+  await expect(secondControl).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".leglab").filter({ hasText: "2 transfers" })).toHaveCount(0);
+  await expect(page.locator(".mk--transfer")).toHaveCount(0);
+
+  await secondControl.click();
+  await expect(secondControl).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator(".leglab").filter({ hasText: "77 Overflow Green" })).toHaveCount(1);
+});
+
 test("@mock invalid Maps key auth failure keeps fallback pins usable", async ({
   page,
 }) => {

@@ -4,6 +4,7 @@ import { useState } from "react";
 import ItineraryMap, { MapStop } from "../../ItineraryMap";
 import ItineraryStrip, { StripStop } from "../../ItineraryStrip";
 import type { RideDetail } from "../../lib/transitDetail";
+import { automaticTransitLegId } from "../../lib/travelLegVisibility";
 
 const PROVIDER_RED = "#D71920";
 
@@ -87,6 +88,7 @@ const FIRST_LEG_RIDES: RideDetail[] = [
     alightISO: "2026-07-25T20:33:00-04:00",
     departStop: "Shared Start",
     arriveStop: "Shared First",
+    alightLocation: { latitude: 43.649, longitude: -79.419 },
   },
   {
     ...FACTS_ONLY_SLOT_ONE,
@@ -98,6 +100,7 @@ const FIRST_LEG_RIDES: RideDetail[] = [
     alightISO: "2026-07-25T20:36:00-04:00",
     departStop: "Facts Only Start",
     arriveStop: "Facts Only End",
+    alightLocation: { latitude: 43.65, longitude: -79.417 },
   },
   {
     ...SLOT_THREE,
@@ -176,6 +179,7 @@ const ROUTE_STOPS: MapStop[] = [
     endTime: "2026-07-25T20:30:00-04:00",
     status: "upcoming",
     legModeToNext: "transit",
+    legIdToNext: "leg:harness-first",
     legLabel: "2 transfers · 15 min",
     legSegments: FIRST_LEG_RIDES,
     // This valid whole-leg shape must not be used once authoritative step
@@ -260,6 +264,7 @@ const ROUTE_STOPS: MapStop[] = [
     // stop should receive the same non-colour changed-leg emphasis.
     changed: true,
     legModeToNext: "transit",
+    legIdToNext: "leg:harness-second",
     legLabel: "77 Overflow Green · 2 stops · 15 min",
     legSegments: [OVERFLOW_RIDE],
     polylineToNext: "whole-transit-two",
@@ -365,6 +370,7 @@ const ROUTE_STRIP_STOPS: StripStop[] = [
     end: "2026-07-25T20:30:00-04:00",
     status: "upcoming",
     legToNext: {
+      legId: "leg:harness-first",
       mode: "transit",
       totalMinutes: 15,
       marginMinutes: 5,
@@ -382,6 +388,7 @@ const ROUTE_STRIP_STOPS: StripStop[] = [
     end: "2026-07-25T21:45:00-04:00",
     status: "upcoming",
     legToNext: {
+      legId: "leg:harness-second",
       mode: "transit",
       totalMinutes: 15,
       marginMinutes: 5,
@@ -440,8 +447,35 @@ export default function MapsHarness() {
   const [mounted, setMounted] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [routeSpecimen, setRouteSpecimen] = useState(false);
+  const [visibilitySpecimen, setVisibilitySpecimen] = useState(false);
+  const [manualLegId, setManualLegId] = useState<string | null>(null);
   const [routeStops, setRouteStops] = useState(ROUTE_STOPS);
   const stops = routeSpecimen ? routeStops : STOPS;
+  const visibilityNow = new Date("2026-07-25T21:00:00-04:00");
+  const visibilityStripStops = ROUTE_STRIP_STOPS.map((stop, index) => ({
+    ...stop,
+    status: index === 1 ? ("active" as const) : stop.status,
+    legToNext:
+      index === 4
+        ? {
+            legId: "leg:harness-no-timeline",
+            mode: "transit" as const,
+            totalMinutes: 15,
+            marginMinutes: 5,
+            lineName: "transit",
+            leaveISO: "2026-07-26T00:30:00-04:00",
+            arriveISO: "2026-07-26T00:45:00-04:00",
+            segments: [],
+          }
+        : stop.legToNext,
+  }));
+  const automaticLegId = automaticTransitLegId({
+    nowMs: visibilityNow.getTime(),
+    stops: visibilityStripStops.map((stop) => ({
+      status: stop.status,
+      outbound: stop.legToNext,
+    })),
+  });
 
   return (
     <main>
@@ -470,20 +504,41 @@ export default function MapsHarness() {
           Rerender routes
         </button>
       )}
+      <button
+        type="button"
+        style={{ position: "fixed", zIndex: 1000, top: 104, left: 8 }}
+        onClick={() => {
+          setRouteSpecimen(true);
+          setVisibilitySpecimen((value) => !value);
+          setManualLegId(null);
+        }}
+      >
+        {visibilitySpecimen ? "Show all-leg specimen" : "Show visibility specimen"}
+      </button>
       {mounted && (
         <ItineraryMap
           stops={stops}
           selected={selected}
           onSelect={setSelected}
+          visibleTransitLegIds={
+            visibilitySpecimen
+              ? [automaticLegId, manualLegId].filter((id): id is string => id !== null)
+              : []
+          }
+          legacyTransitVisibility={!visibilitySpecimen}
         />
       )}
       {routeSpecimen && (
         <div data-testid="route-strip-specimen">
           <ItineraryStrip
-            stops={ROUTE_STRIP_STOPS}
+            stops={visibilitySpecimen ? visibilityStripStops : ROUTE_STRIP_STOPS}
             selected={selected}
             onSelect={setSelected}
-            now={new Date("2026-07-25T18:00:00-04:00")}
+            now={visibilitySpecimen ? visibilityNow : new Date("2026-07-25T18:00:00-04:00")}
+            manualLegId={manualLegId}
+            onToggleManualLeg={(legId) =>
+              setManualLegId((current) => (current === legId ? null : legId))
+            }
           />
         </div>
       )}
