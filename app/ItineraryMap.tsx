@@ -4,14 +4,20 @@ import { useEffect, useRef, useState } from "react";
 import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 import { formatStopTime } from "./lib/timeLabels";
 import { originDisplayLabel } from "./lib/locationLabels";
-import { BubbleSegment, bubbleLabel, groupBubbleUnits } from "./lib/transitBubbles";
+import {
+  BubbleSegment,
+  bubbleDisplayColors,
+  bubbleLabel,
+  groupBubbleUnits,
+} from "./lib/transitBubbles";
 import { RideDetail, transferPoints } from "./lib/transitDetail";
 import type { PathSegment } from "./api/schedule/travel";
 import { createRetryableLoader } from "./lib/retryableLoader";
 import { displayableRouteMode } from "./lib/mapRoutePolicy";
+import { transitRideColor } from "./lib/transitRidePalette";
 
 // Printed-cartography map: pale-blue Google styling (inline JSON, so no
-// Cloud map id), provider-coloured transit lines, and an HTML overlay layer
+// Cloud map id), occurrence-coloured transit lines, and an HTML overlay layer
 // for the chips / editorial cards positioned off the live map projection.
 // Acid green is reserved for the active "now" stop and changed pin accents.
 
@@ -79,7 +85,7 @@ const PAPER_STYLE: google.maps.MapTypeStyle[] = [
 const INK = "#2E6F8A";
 // The map-label gray is the established neutral on this pale-blue canvas.
 // Walking stays semantically neutral instead of borrowing a route colour.
-const WALK_GRAY = "#6B8797";
+const WALK_GRAY = "#4F6F7E";
 const PROVIDER_HEX_COLOR = /^#[\da-f]{6}$/i;
 
 /**
@@ -94,7 +100,7 @@ const WALK_BOUNDARY_TOLERANCE_METERS = 2;
 // meaningful walk instruction. computeLength is used so a small loop is not
 // mistaken for zero merely because its endpoints happen to meet.
 const WALK_MIN_PATH_METERS = 0.5;
-const WALK_DOT_REPEAT = "10px";
+const WALK_DOT_REPEAT = "12px";
 
 function transitStrokeColor(color?: string | null): string {
   const candidate = color?.trim();
@@ -380,8 +386,8 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
 
           // Changed walking keeps its neutral meaning: larger, lighter dots
           // underneath the unchanged primary rather than a semantic recolour.
-          if (changed) addDots(2.4, 0.18, 1);
-          addDots(1.35, 0.72, 2);
+          if (changed) addDots(3.6, 0.24, 1);
+          addDots(2.0, 0.88, 2);
         };
 
         for (const seg of segs) {
@@ -479,7 +485,9 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
               }
               if (!path) continue;
 
-              const color = transitStrokeColor(pathSegment.color);
+              const color =
+                transitRideColor(pathSegment.paletteSlot) ??
+                transitStrokeColor(pathSegment.color);
               const strokeWeight = 3.5;
               if (seg.changed) addHalo(path, color, strokeWeight);
               addLine({
@@ -707,26 +715,37 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
         {legLabels.map((l) => (
           <div key={l.key} className="leglab" style={{ left: l.x, top: l.y }}>
             {l.segs.length > 0 && (
-              // the strip's stacked-bubble treatment at map scale: pairs
-              // of small circles, odd leftover full-size. Small circles
-              // are colour-only dots (a 10px circle can't carry text) —
-              // the full line names stay in the title tooltip.
-              <span className="leglab__bubbles" aria-hidden="true">
-                {groupBubbleUnits(l.segs).map((unit, i) => (
-                  <span key={i} className="leglab__bunit">
-                    {unit.map((seg, j) => (
-                      <span
-                        key={j}
-                        className={unit.length === 2 ? "leglab__bubble leglab__bubble--sm" : "leglab__bubble"}
-                        style={{ background: seg.color || "var(--ink)", color: seg.textColor || "#FFFFFF" }}
-                        title={seg.lineName}
-                      >
-                        {unit.length === 2 ? "" : bubbleLabel(seg)}
-                      </span>
-                    ))}
+              <>
+                {/* Paired bubbles are intentionally colour-only at this map
+                    scale, so publish their authentic riding-order names via
+                    the existing screen-reader-only mechanism. */}
+                {l.segs.length > 1 && (
+                  <span className="sr-only">
+                    Routes {l.segs.map((seg) => seg.lineName).join(", then ")}
                   </span>
-                ))}
-              </span>
+                )}
+                {/* the strip's stacked-bubble treatment at map scale: pairs
+                    of small circles, odd leftover full-size. */}
+                <span className="leglab__bubbles" aria-hidden="true">
+                  {groupBubbleUnits(l.segs).map((unit, i) => (
+                    <span key={i} className="leglab__bunit">
+                      {unit.map((seg, j) => {
+                        const colors = bubbleDisplayColors(seg);
+                        return (
+                          <span
+                            key={j}
+                            className={unit.length === 2 ? "leglab__bubble leglab__bubble--sm" : "leglab__bubble"}
+                            style={{ background: colors.background, color: colors.foreground }}
+                            title={seg.lineName}
+                          >
+                            {unit.length === 2 ? "" : bubbleLabel(seg)}
+                          </span>
+                        );
+                      })}
+                    </span>
+                  ))}
+                </span>
+              </>
             )}
             {l.text}
           </div>

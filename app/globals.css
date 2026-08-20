@@ -651,10 +651,9 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__legicon { display: block; width: 22px; height: 22px; margin-bottom: 5px; }
 .lstrip__legicon svg { width: 22px; height: 22px; fill: var(--accent); }
 /* ─── route badges: one circle per ride, INLINE where its route is
-   referenced. The circle is unchanged — the agency's colour, its own
-   designation — and it used to sit stacked above the card with the route
-   number spelled out again in the text below. It now sits in the text, and
-   the words beside it are the PLACE the route serves. */
+   referenced. Its authentic designation uses the app-owned occurrence
+   colour for a slotted ride and the provider fallback for legacy/overflow.
+   The words beside it are the PLACE the route serves. */
 .lstrip__bubble {
   display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; border-radius: 50%;

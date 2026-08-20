@@ -3,7 +3,11 @@
 import { Fragment, useCallback, useEffect, useId, useRef, useState } from "react";
 import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 import { resolveCategory } from "./api/schedule/durations";
-import { LineBadge, lineBadges } from "./lib/transitBubbles";
+import {
+  LineBadge,
+  bubbleDisplayColors,
+  lineBadges,
+} from "./lib/transitBubbles";
 import {
   RideDetail,
   buildTransitTimeline,
@@ -111,12 +115,10 @@ function TransitIcon({ mode }: { mode: StripLeg["mode"] }) {
   );
 }
 
-/** The route badge: the agency's own designation in the line's own colour.
- *  The SAME circle it has always been — colour, shape, border, shadow — and
- *  what changed is only WHERE it sits. It used to stack above the card with
- *  the route number ALSO spelled out in the text below it; it now sits
- *  inline at each place its route is referenced, and the text beside it is
- *  the place rather than the number a second time.
+/** The route badge: the agency's authentic designation in the ride
+ *  occurrence's app-owned colour. Legacy and overflow records retain the
+ *  provider-colour treatment. Shape, border, shadow and placement stay the
+ *  same everywhere the badge appears, including BOARD timeline rows.
  *
  *  Decorative by construction: an unpublished colour falls back to ink and
  *  an unpublished short name to initials, so there is never a blank circle,
@@ -124,12 +126,13 @@ function TransitIcon({ mode }: { mode: StripLeg["mode"] }) {
  *  reader (spans, not divs — this sits inside the card's selection button,
  *  whose content model is phrasing content). */
 function RouteBadge({ line }: { line: LineBadge }) {
+  const colors = bubbleDisplayColors(line.segment);
   return (
     <span
       className="lstrip__bubble lstrip__bubble--inline"
       style={{
-        background: line.segment.color || "var(--ink)",
-        color: line.segment.textColor || "#FFFFFF",
+        background: colors.background,
+        color: colors.foreground,
       }}
       title={line.segment.lineName}
       aria-hidden="true"

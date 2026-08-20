@@ -193,8 +193,8 @@ export interface TransitSummary {
   /** the line's own short designation ("1", "63", "501") — the bubble
    * label; null when the agency publishes no short name */
   shortName: string | null;
-  /** the agency's line colour ("#f2c10b") / label text colour; null when
-   * unpublished — the UI falls back to its own palette */
+  /** the agency's factual line colour ("#f2c10b") / label text colour; null
+   * when unpublished. These control only legacy/null-overflow display fallback. */
   color: string | null;
   textColor: string | null;
   /** vehicle kind ("SUBWAY", "BUS", "TRAM"…); null when unpublished */
@@ -232,10 +232,9 @@ export interface TransitSummary {
 interface PathSegmentBase {
   /** the provider's own encoded polyline for this step, verbatim */
   encodedPolyline: string;
-  /** the ride's line colour ("#f2c10b") — the SAME field the strip's badge
-   *  reads, so a line on the map and its bubble can never disagree. null on
-   *  a walk step, and on a ride whose agency publishes no colour (the render
-   *  falls back to its own ink). */
+  /** the provider's factual ride colour ("#f2c10b"). Identified, slotted
+   *  rides display the app-owned occurrence colour instead; this remains the
+   *  legacy/overflow fallback. null on walking and when unpublished. */
   color?: string | null;
 }
 
@@ -496,8 +495,8 @@ function readSteps(
           paths.push({
             mode,
             encodedPolyline: encoded,
-            // the ride's own colour remains factual metadata and continues
-            // controlling the Part 1 renderer exactly as before
+            // The provider colour remains factual metadata and the display
+            // fallback for legacy/null-overflow rides.
             color: td?.transitLine?.color ?? null,
             rideId,
             sourceStepIndex: currentSourceStepIndex,

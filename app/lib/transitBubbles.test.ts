@@ -4,7 +4,13 @@
 // the rules are pinned here exactly).
 // Run with: npx tsx app/lib/transitBubbles.test.ts
 import assert from "node:assert";
-import { bubbleLabel, groupBubbleUnits, lineBadges, linePlace } from "./transitBubbles";
+import {
+  bubbleDisplayColors,
+  bubbleLabel,
+  groupBubbleUnits,
+  lineBadges,
+  linePlace,
+} from "./transitBubbles";
 
 const cases: Array<[string, () => void]> = [
   [
@@ -120,6 +126,90 @@ const cases: Array<[string, () => void]> = [
       assert.ok(!visibleText.includes("ride_internal_sentinel"));
       assert.ok(!visibleText.includes("17"));
       assert.ok(!visibleText.includes("23"));
+    },
+  ],
+  [
+    "a slotted ride ignores provider colors and always uses its app color with white text",
+    () => {
+      const first = bubbleDisplayColors({
+        lineName: "501 Queen",
+        color: "#DA291C",
+        textColor: "#111111",
+        rideId: "ride-slotted",
+        sourceStepIndex: 4,
+        paletteSlot: 0,
+      });
+      const providerChanged = bubbleDisplayColors({
+        lineName: "501 Queen",
+        color: "#00FF00",
+        textColor: "#F2C10B",
+        rideId: "ride-slotted",
+        sourceStepIndex: 4,
+        paletteSlot: 0,
+      });
+
+      assert.deepStrictEqual(first, {
+        background: "#005A9C",
+        foreground: "#FFFFFF",
+      });
+      assert.deepStrictEqual(providerChanged, first);
+    },
+  ],
+  [
+    "two rides with the same provider red but different slots display different colors",
+    () => {
+      const provider = { color: "#DA291C", textColor: "#000000" };
+      const first = bubbleDisplayColors({
+        lineName: "501 Queen",
+        ...provider,
+        rideId: "ride-501-occurrence",
+        sourceStepIndex: 1,
+        paletteSlot: 0,
+      });
+      const second = bubbleDisplayColors({
+        lineName: "504 King",
+        ...provider,
+        rideId: "ride-504-occurrence",
+        sourceStepIndex: 4,
+        paletteSlot: 1,
+      });
+
+      assert.deepStrictEqual(first, {
+        background: "#005A9C",
+        foreground: "#FFFFFF",
+      });
+      assert.deepStrictEqual(second, {
+        background: "#9A4D00",
+        foreground: "#FFFFFF",
+      });
+      assert.notStrictEqual(first.background, second.background);
+    },
+  ],
+  [
+    "legacy and explicit-overflow rides retain the exact provider fallback",
+    () => {
+      const provider = {
+        lineName: "501 Queen",
+        color: "#DA291C",
+        textColor: "#101010",
+      };
+      const legacy = bubbleDisplayColors(provider);
+      const overflow = bubbleDisplayColors({
+        ...provider,
+        rideId: "ride-overflow",
+        sourceStepIndex: 24,
+        paletteSlot: null,
+      });
+
+      assert.deepStrictEqual(legacy, {
+        background: "#DA291C",
+        foreground: "#101010",
+      });
+      assert.deepStrictEqual(overflow, legacy);
+      assert.deepStrictEqual(bubbleDisplayColors({ lineName: "uncolored" }), {
+        background: "var(--ink)",
+        foreground: "#FFFFFF",
+      });
     },
   ],
   [

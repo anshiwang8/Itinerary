@@ -9,6 +9,8 @@
 // designation and the words beside it carry the place, rather than the
 // number being printed twice: once in a badge and once in the text.
 
+import { transitRideColor } from "./transitRidePalette";
+
 /** The slice of a TransitSummary a bubble needs. Structural, so both the
  *  server TravelLeg segments and the client view-models satisfy it. */
 export interface BubbleSegment {
@@ -21,6 +23,22 @@ export interface BubbleSegment {
   rideId?: string;
   sourceStepIndex?: number;
   paletteSlot?: number | null;
+}
+
+/** The exact colours a ride badge/bubble displays. Identified, slotted rides
+ * use the app-owned occurrence palette with a known-readable white foreground;
+ * legacy and explicit-overflow rides retain their provider metadata fallback. */
+export function bubbleDisplayColors(seg: BubbleSegment): {
+  background: string;
+  foreground: string;
+} {
+  const assigned = transitRideColor(seg.paletteSlot);
+  return assigned
+    ? { background: assigned, foreground: "#FFFFFF" }
+    : {
+        background: seg.color || "var(--ink)",
+        foreground: seg.textColor || "#FFFFFF",
+      };
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./test";
 
 const MAPS_SCRIPT = /^https:\/\/maps\.googleapis\.com\/maps\/api\/js\?/;
@@ -140,7 +140,7 @@ const MAPS_STUB = String.raw`
       "walk-near-b": [[43.649412, -79.4194], [43.6497, -79.419]],
       "ride-fallback": [[43.6497, -79.419], [43.65, -79.418]],
       "ride-invalid-color": [[43.6502, -79.417], [43.6505, -79.416]],
-      "ride-blue": [[43.6505, -79.416], [43.6508, -79.4154]],
+      "ride-blue": [[43.656, -79.405], [43.6575, -79.402]],
       "walk-leg-tail": [[43.6508, -79.4154], [43.651, -79.415]],
       // This exact shared endpoint belongs to a NEW itinerary leg.
       "walk-leg-head": [[43.651, -79.415], [43.6513, -79.4145]],
@@ -334,7 +334,50 @@ async function polylineSnapshots(page: Page): Promise<PolylineSnapshot[]> {
   });
 }
 
+function overlaySignature(
+  line: PolylineSnapshot
+): Omit<PolylineSnapshot, "id" | "active"> {
+  const { id, active, ...signature } = line;
+  void id;
+  void active;
+  return signature;
+}
+
+type ElementColor = { background: string; foreground: string };
+
+async function elementColors(locator: Locator): Promise<ElementColor[]> {
+  return locator.evaluateAll((elements) =>
+    elements.map((element) => {
+      const style = getComputedStyle(element);
+      return {
+        background: style.backgroundColor,
+        foreground: style.color,
+      };
+    })
+  );
+}
+
 const ACTIVE_ROUTE_OVERLAY_COUNT = 23;
+const APP_RIDE_COLORS = {
+  slot0: "#005A9C",
+  slot1: "#9A4D00",
+  slot2: "#006B57",
+  slot3: "#A31545",
+} as const;
+const APP_RIDE_CSS_COLORS = {
+  slot0: "rgb(0, 90, 156)",
+  slot1: "rgb(154, 77, 0)",
+  slot3: "rgb(163, 21, 69)",
+  white: "rgb(255, 255, 255)",
+} as const;
+const FIRST_RIDE_PATH: Array<[number, number]> = [
+  [43.6488, -79.4202],
+  [43.6491, -79.4198],
+];
+const LATER_SHARED_RIDE_PATH: Array<[number, number]> = [
+  [43.6497, -79.419],
+  [43.65, -79.418],
+];
 
 const WALK_PATHS = {
   exact: [
@@ -472,7 +515,7 @@ test("@mock an uncertain travel estimate does not draw a solid map route", async
   ).toBe(0);
 });
 
-test("@mock transit rides keep provider colors and ordinary walk legs stay solid", async ({
+test("@mock transit rides use their own palette slots while fallback and ordinary walk stay intact", async ({
   page,
 }) => {
   const active = await openRouteSpecimen(page);
@@ -480,26 +523,39 @@ test("@mock transit rides keep provider colors and ordinary walk legs stay solid
     (line) => line.strokeOpacity === 0.92 && line.strokeWeight === 3.5
   );
   expect(rideLines.map((line) => line.strokeColor)).toEqual([
-    "#D71920",
-    "#2E6F8A",
-    "#2E6F8A",
-    "#0066CC",
+    APP_RIDE_COLORS.slot0,
+    APP_RIDE_COLORS.slot3,
+    APP_RIDE_COLORS.slot2,
     "#00843D",
+    "#0066CC",
   ]);
   expect(rideLines.every((line) => !line.hasIcons && line.zIndex === 2)).toBe(
     true
   );
 
   const halos = active.filter((line) => line.strokeOpacity === 0.22);
-  expect(halos.map((line) => line.strokeColor)).toEqual(
-    rideLines.slice(0, 4).map((line) => line.strokeColor)
-  );
+  expect(halos.map((line) => line.strokeColor)).toEqual([
+    APP_RIDE_COLORS.slot0,
+    APP_RIDE_COLORS.slot3,
+    APP_RIDE_COLORS.slot2,
+    "#0066CC",
+  ]);
   expect(halos.every((line) => line.strokeWeight === 8.5 && line.zIndex === 1)).toBe(
     true
   );
-  for (let index = 0; index < halos.length; index += 1) {
-    expect(halos[index].id).toBeLessThan(rideLines[index].id);
+  for (const halo of halos) {
+    const primary = rideLines.find(
+      (line) =>
+        line.strokeColor === halo.strokeColor &&
+        JSON.stringify(line.path) === JSON.stringify(halo.path)
+    );
+    expect(primary).toBeDefined();
+    expect(halo.id).toBeLessThan(primary!.id);
   }
+  // The first three geometry records all publish the same provider red. A
+  // facts-only slot between them cannot shift their per-record slot colours.
+  expect(new Set(rideLines.slice(0, 3).map((line) => line.strokeColor)).size).toBe(3);
+  expect(active.some((line) => line.strokeColor === "#D71920")).toBe(false);
   expect(active.some((line) => line.strokeColor === "#C8F000")).toBe(false);
   expect(active.some((line) => line.strokeColor === "#654321")).toBe(false);
   expect(active.some((line) => line.strokeColor === "#123456")).toBe(false);
@@ -540,7 +596,6 @@ test("@mock transit rides keep provider colors and ordinary walk legs stay solid
     "decode-nonfinite",
     "decode-out-of-range",
     "ride-invalid-color",
-    "ride-blue",
     "walk-leg-tail",
     "walk-leg-head",
     "ride-green",
@@ -558,11 +613,201 @@ test("@mock transit rides keep provider colors and ordinary walk legs stay solid
     "walk-beyond-a",
     "walk-beyond-b",
     "plain-walk",
+    "ride-blue",
   ]);
   expect(decodeCalls).not.toContain("");
   expect(decodeCalls).not.toContain("whole-transit");
   expect(decodeCalls).not.toContain("whole-transit-two");
+  expect(decodeCalls).not.toContain("legacy-whole-transit");
   expect(decodeCalls).not.toContain("ordinary-walk-step");
+});
+
+test("@mock one ride color agrees across map line, halo, map bubble, compact badge, and BOARD badge", async ({
+  page,
+}) => {
+  const active = await openRouteSpecimen(page);
+  const hasFirstRidePath = (line: PolylineSnapshot) =>
+    JSON.stringify(line.path) === JSON.stringify(FIRST_RIDE_PATH);
+  const firstPrimary = active.find(
+    (line) =>
+      hasFirstRidePath(line) &&
+      line.strokeOpacity === 0.92 &&
+      line.strokeWeight === 3.5
+  );
+  const firstHalo = active.find(
+    (line) => hasFirstRidePath(line) && line.strokeOpacity === 0.22
+  );
+  expect(firstPrimary).toEqual(
+    expect.objectContaining({ strokeColor: APP_RIDE_COLORS.slot0, zIndex: 2 })
+  );
+  expect(firstHalo).toEqual(
+    expect.objectContaining({
+      strokeColor: APP_RIDE_COLORS.slot0,
+      strokeWeight: 8.5,
+      zIndex: 1,
+    })
+  );
+  expect(firstHalo!.id).toBeLessThan(firstPrimary!.id);
+  const laterSharedPrimary = active.find(
+    (line) =>
+      JSON.stringify(line.path) === JSON.stringify(LATER_SHARED_RIDE_PATH) &&
+      line.strokeOpacity === 0.92 &&
+      line.strokeWeight === 3.5
+  );
+  // The facts-only ride sits before this shared slot-three occurrence, while
+  // geometry-only slot two sits after it. Any filtered-array zip therefore
+  // gives this exact later ride the wrong colour.
+  expect(laterSharedPrimary).toEqual(
+    expect.objectContaining({ strokeColor: APP_RIDE_COLORS.slot3, zIndex: 2 })
+  );
+
+  const firstMapLabel = page
+    .locator(".leglab")
+    .filter({ hasText: "2 transfers · 15 min" });
+  await expect(firstMapLabel).toHaveCount(1);
+  const mapBubbles = firstMapLabel.locator(".leglab__bubble");
+  await expect(mapBubbles).toHaveCount(3);
+  // Facts are slot 0, facts-only slot 1, then slot 3; geometry-only slot 2
+  // must not shift this list. The first pair is color-only, while the odd
+  // final ride keeps its compact route designation.
+  await expect(mapBubbles).toHaveText(["", "", "501"]);
+  const expectedFactColors: ElementColor[] = [
+    {
+      background: APP_RIDE_CSS_COLORS.slot0,
+      foreground: APP_RIDE_CSS_COLORS.white,
+    },
+    {
+      background: APP_RIDE_CSS_COLORS.slot1,
+      foreground: APP_RIDE_CSS_COLORS.white,
+    },
+    {
+      background: APP_RIDE_CSS_COLORS.slot3,
+      foreground: APP_RIDE_CSS_COLORS.white,
+    },
+  ];
+  expect(await elementColors(mapBubbles)).toEqual(expectedFactColors);
+  expect((await elementColors(mapBubbles)).map((color) => color.background)).not.toContain(
+    "rgb(0, 107, 87)"
+  );
+
+  // Paired map bubbles stay color-only visually, but their full authentic
+  // route names remain outside the aria-hidden visual cluster in ride order.
+  const accessibleRoutes = firstMapLabel.locator(".sr-only");
+  await expect(accessibleRoutes).toHaveText(
+    "Routes 501 Shared, then 63 Facts Only, then 501 Shared"
+  );
+  expect(
+    await accessibleRoutes.evaluate(
+      (element) => element.closest('[aria-hidden="true"]') === null
+    )
+  ).toBe(true);
+  await expect(firstMapLabel.locator(".leglab__bubbles")).toHaveAttribute(
+    "aria-hidden",
+    "true"
+  );
+
+  const overflowMapLabel = page
+    .locator(".leglab")
+    .filter({ hasText: "77 Overflow Green · 2 stops · 15 min" });
+  await expect(overflowMapLabel).toHaveCount(1);
+  expect(await elementColors(overflowMapLabel.locator(".leglab__bubble"))).toEqual([
+    { background: "rgb(0, 132, 61)", foreground: "rgb(232, 243, 248)" },
+  ]);
+  await expect(overflowMapLabel.locator(".sr-only")).toHaveCount(0);
+
+  const legacyMapLabel = page
+    .locator(".leglab")
+    .filter({ hasText: "900 Legacy Blue · 1 stop · 15 min" });
+  await expect(legacyMapLabel).toHaveCount(1);
+  expect(await elementColors(legacyMapLabel.locator(".leglab__bubble"))).toEqual([
+    { background: "rgb(0, 102, 204)", foreground: "rgb(255, 255, 0)" },
+  ]);
+  await expect(legacyMapLabel.locator(".sr-only")).toHaveCount(0);
+
+  const strip = page.getByTestId("route-strip-specimen");
+  const stripLegs = strip.locator('.lstrip__leg[aria-label="transit leg"]');
+  await expect(stripLegs).toHaveCount(3);
+  const firstStripLeg = stripLegs.nth(0);
+  const compactBadges = firstStripLeg.locator(
+    ".lstrip__legline .lstrip__bubble"
+  );
+  await expect(compactBadges).toHaveCount(3);
+  expect(await elementColors(compactBadges)).toEqual(expectedFactColors);
+  await expect(firstStripLeg.locator(".lstrip__legselect")).toHaveAccessibleName(
+    /501 Shared.*63 Facts Only.*501 Shared/
+  );
+
+  const overflowCompact = stripLegs
+    .nth(1)
+    .locator(".lstrip__legline .lstrip__bubble");
+  expect(await elementColors(overflowCompact)).toEqual([
+    { background: "rgb(0, 132, 61)", foreground: "rgb(232, 243, 248)" },
+  ]);
+
+  const legacyCompact = stripLegs
+    .nth(2)
+    .locator(".lstrip__legline .lstrip__bubble");
+  expect(await elementColors(legacyCompact)).toEqual([
+    { background: "rgb(0, 102, 204)", foreground: "rgb(255, 255, 0)" },
+  ]);
+
+  await firstStripLeg.locator(".lstrip__legselect").click();
+  const boardBadges = firstStripLeg.locator(
+    ".lstrip__tlrow--board .lstrip__bubble"
+  );
+  await expect(boardBadges).toHaveCount(3);
+  expect(await elementColors(boardBadges)).toEqual(expectedFactColors);
+
+  // The exact slot-zero appearance agrees everywhere; provider yellow never
+  // controls an app-palette foreground, and app-owned metadata never leaks.
+  for (const colors of [
+    (await elementColors(mapBubbles))[0],
+    (await elementColors(compactBadges))[0],
+    (await elementColors(boardBadges))[0],
+  ]) {
+    expect(colors).toEqual({
+      background: APP_RIDE_CSS_COLORS.slot0,
+      foreground: APP_RIDE_CSS_COLORS.white,
+    });
+  }
+  for (const colors of [
+    (await elementColors(mapBubbles))[2],
+    (await elementColors(compactBadges))[2],
+    (await elementColors(boardBadges))[2],
+  ]) {
+    expect(colors).toEqual({
+      background: APP_RIDE_CSS_COLORS.slot3,
+      foreground: APP_RIDE_CSS_COLORS.white,
+    });
+  }
+
+  const metadataIds = [
+    "ride:harness-slot-zero",
+    "ride:harness-facts-only-slot-one",
+    "ride:harness-geometry-only-slot-two",
+    "ride:harness-slot-three",
+    "ride:harness-overflow",
+    "ride:harness-invalid-missing",
+    "ride:harness-invalid-throw",
+    "ride:harness-invalid-empty",
+    "ride:harness-invalid-one",
+    "ride:harness-invalid-nonfinite",
+    "ride:harness-invalid-out-of-range",
+  ];
+  const visibleText = await page.locator("body").innerText();
+  for (const id of metadataIds) expect(visibleText).not.toContain(id);
+  const leakedAttributeValues = await page.evaluate((ids) => {
+    const leaks: string[] = [];
+    for (const element of document.querySelectorAll("*")) {
+      for (const attribute of element.attributes) {
+        if (ids.some((id) => attribute.value.includes(id))) {
+          leaks.push(`${attribute.name}=${attribute.value}`);
+        }
+      }
+    }
+    return leaks;
+  }, metadataIds);
+  expect(leakedAttributeValues).toEqual([]);
 });
 
 test("@mock consecutive embedded walks merge only at connected boundaries in provider order", async ({
@@ -570,7 +815,7 @@ test("@mock consecutive embedded walks merge only at connected boundaries in pro
 }) => {
   const active = await openRouteSpecimen(page);
   const walkPrimaries = active.filter(
-    (line) => line.iconPath === "CIRCLE" && line.iconFillOpacity === 0.72
+    (line) => line.iconPath === "CIRCLE" && line.iconFillOpacity === 0.88
   );
 
   // Exact path data, not overlay counts, is the contract: order is retained,
@@ -587,12 +832,14 @@ test("@mock consecutive embedded walks merge only at connected boundaries in pro
   // second copy is omitted; every retained point is decoder-supplied.
   expect(walkPrimaries[1].path).not.toContainEqual([43.649412, -79.4194]);
 
-  const rideRed = active.find(
-    (line) => line.strokeColor === "#D71920" && line.strokeOpacity === 0.92
+  const slotZeroRide = active.find(
+    (line) =>
+      line.strokeColor === APP_RIDE_COLORS.slot0 &&
+      line.strokeOpacity === 0.92
   );
-  expect(rideRed).toBeDefined();
-  expect(walkPrimaries[0].id).toBeLessThan(rideRed!.id);
-  expect(rideRed!.id).toBeLessThan(walkPrimaries[1].id);
+  expect(slotZeroRide).toBeDefined();
+  expect(walkPrimaries[0].id).toBeLessThan(slotZeroRide!.id);
+  expect(slotZeroRide!.id).toBeLessThan(walkPrimaries[1].id);
 
   // These two runs meet at exactly [43.651, -79.415], but belong to
   // different itinerary legs and therefore remain separate native paths.
@@ -606,7 +853,7 @@ test("@mock invalid and disconnected embedded walks break runs without fabricate
   const active = await openRouteSpecimen(page);
   const paths = active
     .filter(
-      (line) => line.iconPath === "CIRCLE" && line.iconFillOpacity === 0.72
+      (line) => line.iconPath === "CIRCLE" && line.iconFillOpacity === 0.88
     )
     .map((line) => line.path);
 
@@ -653,10 +900,10 @@ test("@mock embedded walk styling stays neutral and changed emphasis remains dot
 }) => {
   const active = await openRouteSpecimen(page);
   const walkPrimaries = active.filter(
-    (line) => line.iconPath === "CIRCLE" && line.iconFillOpacity === 0.72
+    (line) => line.iconPath === "CIRCLE" && line.iconFillOpacity === 0.88
   );
   const walkUnderlays = active.filter(
-    (line) => line.iconPath === "CIRCLE" && line.iconFillOpacity === 0.18
+    (line) => line.iconPath === "CIRCLE" && line.iconFillOpacity === 0.24
   );
 
   expect(walkPrimaries).toHaveLength(10);
@@ -667,13 +914,13 @@ test("@mock embedded walk styling stays neutral and changed emphasis remains dot
         line.strokeColor === null &&
         line.strokeOpacity === 0 &&
         line.strokeWeight === null &&
-        line.iconFillColor === "#6B8797" &&
+        line.iconFillColor === "#4F6F7E" &&
         line.iconStrokeColor === null &&
         line.iconStrokeOpacity === 0 &&
         line.iconStrokeWeight === null &&
-        line.iconScale === 1.35 &&
+        line.iconScale === 2 &&
         line.iconOffset === "0" &&
-        line.iconRepeat === "10px" &&
+        line.iconRepeat === "12px" &&
         line.zIndex === 2
     )
   ).toBe(true);
@@ -693,11 +940,14 @@ test("@mock embedded walk styling stays neutral and changed emphasis remains dot
         line.clickable === false &&
         line.strokeColor === null &&
         line.strokeOpacity === 0 &&
-        line.iconFillColor === "#6B8797" &&
+        line.strokeWeight === null &&
+        line.iconFillColor === "#4F6F7E" &&
+        line.iconStrokeColor === null &&
         line.iconStrokeOpacity === 0 &&
-        line.iconScale === 2.4 &&
+        line.iconStrokeWeight === null &&
+        line.iconScale === 3.6 &&
         line.iconOffset === "0" &&
-        line.iconRepeat === "10px" &&
+        line.iconRepeat === "12px" &&
         line.zIndex === 1
     )
   ).toBe(true);
@@ -707,12 +957,14 @@ test("@mock embedded walk styling stays neutral and changed emphasis remains dot
   );
   expect(walkPrimaries.every((line) => line.iconFillOpacity! < 0.92)).toBe(true);
   expect(rideLines.every((line) => !line.hasIcons)).toBe(true);
+  const rideColors = new Set(rideLines.map((line) => line.strokeColor));
   expect(
     [...walkPrimaries, ...walkUnderlays].some(
       (line) =>
         line.iconFillColor === "#C8F000" ||
         line.iconFillColor === "#2E6F8A" ||
-        /^#(?:D71920|0066CC|00843D)$/i.test(line.iconFillColor ?? "")
+        line.iconFillColor === "#D71920" ||
+        rideColors.has(line.iconFillColor)
     )
   ).toBe(false);
 });
@@ -730,9 +982,11 @@ test("@mock route overlays are replaced on rerender and detached on unmount", as
   await expect
     .poll(async () => (await polylineSnapshots(page)).filter((line) => line.active).length)
     .toBe(ACTIVE_ROUTE_OVERLAY_COUNT);
-  const firstIds = (await polylineSnapshots(page))
-    .filter((line) => line.active)
-    .map((line) => line.id);
+  const firstActive = (await polylineSnapshots(page)).filter(
+    (line) => line.active
+  );
+  const firstIds = firstActive.map((line) => line.id);
+  const expectedOverlaySet = firstActive.map(overlaySignature);
 
   await page.getByRole("button", { name: "Rerender routes" }).click();
   await expect
@@ -761,6 +1015,13 @@ test("@mock route overlays are replaced on rerender and detached on unmount", as
   await expect
     .poll(async () => (await polylineSnapshots(page)).filter((line) => line.active).length)
     .toBe(ACTIVE_ROUTE_OVERLAY_COUNT);
+  await expect
+    .poll(async () =>
+      (await polylineSnapshots(page))
+        .filter((line) => line.active)
+        .map(overlaySignature)
+    )
+    .toEqual(expectedOverlaySet);
 });
 
 test("@mock blocked Maps script keeps fallback pins usable and Retry recovers", async ({
