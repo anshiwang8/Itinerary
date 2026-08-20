@@ -1,10 +1,19 @@
 "use client";
 
-import { useState } from "react";
-import ItineraryMap, { MapStop } from "../../ItineraryMap";
-import ItineraryStrip, { StripStop } from "../../ItineraryStrip";
+import { useEffect, useMemo, useRef, useState } from "react";
+import ItineraryMap, { MapHome, MapStop } from "../../ItineraryMap";
+import ItineraryStrip, {
+  StripHome,
+  StripStop,
+} from "../../ItineraryStrip";
 import type { RideDetail } from "../../lib/transitDetail";
-import { automaticTransitLegId } from "../../lib/travelLegVisibility";
+import {
+  automaticTravelLegId,
+  hasLegacyTransitLeg,
+  retainManualLegId,
+  toggleManualLegId,
+  visibleTravelLegIds,
+} from "../../lib/travelLegVisibility";
 
 const PROVIDER_RED = "#D71920";
 
@@ -443,6 +452,378 @@ const ROUTE_STRIP_STOPS: StripStop[] = [
   },
 ];
 
+// A separate modern visibility specimen. It intentionally contains no
+// identity-absent transit: the established global legacy fallback belongs to
+// ROUTE_STOPS above and would make every identified transit leg visible,
+// masking the exact home-boundary behavior this specimen exists to exercise.
+const VISIBILITY_HOME_LEG_ID = "leg:visibility-home";
+const VISIBILITY_DECODED_WALK_ID = "leg:visibility-walk-decoded";
+const VISIBILITY_FALLBACK_WALK_ID = "leg:visibility-walk-fallback";
+const VISIBILITY_MANUAL_WALK_ID = "leg:visibility-walk-manual";
+const VISIBILITY_CHANGED_TRANSIT_ID = "leg:visibility-transit-changed";
+
+const VISIBILITY_HOME_RIDES: RideDetail[] = [
+  {
+    rideId: "ride:visibility-home-local",
+    sourceStepIndex: 1,
+    paletteSlot: 12,
+    lineName: "10 Home Local",
+    shortName: "10",
+    color: PROVIDER_RED,
+    textColor: "#FFFF00",
+    boardISO: "2026-08-20T09:08:00-04:00",
+    alightISO: "2026-08-20T09:28:00-04:00",
+    departStop: "Home Platform",
+    arriveStop: "Visibility Junction",
+    alightLocation: { latitude: 43.6485, longitude: -79.4205 },
+  },
+  {
+    rideId: "ride:visibility-home-crosstown",
+    sourceStepIndex: 3,
+    paletteSlot: 13,
+    lineName: "20 Crosstown",
+    shortName: "20",
+    color: PROVIDER_RED,
+    textColor: "#FFFF00",
+    boardISO: "2026-08-20T09:34:00-04:00",
+    alightISO: "2026-08-20T09:55:00-04:00",
+    departStop: "Visibility Junction East",
+    arriveStop: "First Event Stop",
+    boardLocation: { latitude: 43.6487, longitude: -79.4203 },
+  },
+];
+
+const VISIBILITY_CHANGED_RIDE: RideDetail = {
+  rideId: "ride:visibility-changed",
+  sourceStepIndex: 0,
+  paletteSlot: 14,
+  lineName: "40 Changed Line",
+  shortName: "40",
+  color: "#0066CC",
+  textColor: "#FFFFFF",
+  boardISO: "2026-08-20T14:05:00-04:00",
+  alightISO: "2026-08-20T14:20:00-04:00",
+  departStop: "Fourth Event Stop",
+  arriveStop: "Changed Event Stop",
+};
+
+type VisibilityPlan = {
+  id: string;
+  mapHome: MapHome;
+  stripHome: StripHome;
+  mapStops: MapStop[];
+  stripStops: StripStop[];
+};
+
+function makeVisibilityPlan(id: string, legSuffix = ""): VisibilityPlan {
+  const legId = (base: string) => `${base}${legSuffix}`;
+  const mapHome: MapHome = {
+    label: "Visibility Home",
+    lat: 43.648,
+    lng: -79.421,
+    legModeToNext: "transit",
+    legIdToNext: legId(VISIBILITY_HOME_LEG_ID),
+    legLabel: "10 Home Local → 20 Crosstown · 60 min",
+    legSegments: VISIBILITY_HOME_RIDES,
+    leaveBy: "9:00 AM",
+    pathSegmentsToNext: [
+      { mode: "walk", encodedPolyline: "visibility-home-walk", color: null },
+      {
+        mode: "transit",
+        encodedPolyline: "visibility-home-ride-local",
+        color: PROVIDER_RED,
+        rideId: VISIBILITY_HOME_RIDES[0].rideId!,
+        sourceStepIndex: VISIBILITY_HOME_RIDES[0].sourceStepIndex!,
+        paletteSlot: VISIBILITY_HOME_RIDES[0].paletteSlot!,
+      },
+      {
+        mode: "walk",
+        encodedPolyline: "visibility-home-transfer-walk",
+        color: null,
+      },
+      {
+        mode: "transit",
+        encodedPolyline: "visibility-home-ride-crosstown",
+        color: PROVIDER_RED,
+        rideId: VISIBILITY_HOME_RIDES[1].rideId!,
+        sourceStepIndex: VISIBILITY_HOME_RIDES[1].sourceStepIndex!,
+        paletteSlot: VISIBILITY_HOME_RIDES[1].paletteSlot!,
+      },
+    ],
+  };
+  const stripHome: StripHome = {
+    label: mapHome.label,
+    leaveBy: mapHome.leaveBy,
+    leg: {
+      legId: mapHome.legIdToNext,
+      mode: "transit",
+      totalMinutes: 60,
+      marginMinutes: 5,
+      lineName: VISIBILITY_HOME_RIDES[0].lineName,
+      leaveISO: "2026-08-20T09:00:00-04:00",
+      arriveISO: "2026-08-20T10:00:00-04:00",
+      segments: VISIBILITY_HOME_RIDES,
+    },
+  };
+
+  const mapStops: MapStop[] = [
+    {
+      id: `visibility-first${legSuffix}`,
+      category: "breakfast",
+      name: "First Visibility Event",
+      lat: 43.649,
+      lng: -79.42,
+      startTime: "2026-08-20T10:00:00-04:00",
+      endTime: "2026-08-20T11:00:00-04:00",
+      legModeToNext: "walk",
+      legIdToNext: legId(VISIBILITY_DECODED_WALK_ID),
+      legLabel: "Decoded walk · 15 min",
+      polylineToNext: "visibility-walk-decoded",
+    },
+    {
+      id: `visibility-second${legSuffix}`,
+      category: "gallery",
+      name: "Second Visibility Event",
+      lat: 43.65,
+      lng: -79.419,
+      startTime: "2026-08-20T11:15:00-04:00",
+      endTime: "2026-08-20T12:00:00-04:00",
+      legModeToNext: "walk",
+      legIdToNext: legId(VISIBILITY_FALLBACK_WALK_ID),
+      legLabel: "Endpoint fallback walk · 12 min",
+      // No encoded polyline: once legitimately visible, this exercises the
+      // established exact two-provider-endpoint WALK fallback.
+    },
+    {
+      id: `visibility-third${legSuffix}`,
+      category: "lunch",
+      name: "Third Visibility Event",
+      lat: 43.651,
+      lng: -79.418,
+      startTime: "2026-08-20T12:12:00-04:00",
+      endTime: "2026-08-20T13:00:00-04:00",
+      legModeToNext: "walk",
+      legIdToNext: legId(VISIBILITY_MANUAL_WALK_ID),
+      legLabel: "Manual decoded walk · 18 min",
+      polylineToNext: "visibility-walk-manual",
+    },
+    {
+      id: `visibility-fourth${legSuffix}`,
+      category: "park",
+      name: "Fourth Visibility Event",
+      lat: 43.652,
+      lng: -79.417,
+      startTime: "2026-08-20T13:18:00-04:00",
+      endTime: "2026-08-20T14:00:00-04:00",
+      legModeToNext: "transit",
+      legIdToNext: legId(VISIBILITY_CHANGED_TRANSIT_ID),
+      legLabel: "40 Changed Line · 25 min",
+      legSegments: [VISIBILITY_CHANGED_RIDE],
+      pathSegmentsToNext: [
+        {
+          mode: "transit",
+          encodedPolyline: "visibility-transit-changed",
+          color: VISIBILITY_CHANGED_RIDE.color,
+          rideId: VISIBILITY_CHANGED_RIDE.rideId!,
+          sourceStepIndex: VISIBILITY_CHANGED_RIDE.sourceStepIndex!,
+          paletteSlot: VISIBILITY_CHANGED_RIDE.paletteSlot!,
+        },
+      ],
+    },
+    {
+      id: `visibility-fifth${legSuffix}`,
+      category: "drinks",
+      name: "Changed Visibility Event",
+      lat: 43.653,
+      lng: -79.416,
+      startTime: "2026-08-20T14:25:00-04:00",
+      endTime: "2026-08-20T15:00:00-04:00",
+      changed: true,
+    },
+  ];
+
+  const stripStops: StripStop[] = [
+    {
+      id: mapStops[0].id,
+      category: mapStops[0].category,
+      name: mapStops[0].name,
+      start: mapStops[0].startTime,
+      end: mapStops[0].endTime,
+      legToNext: {
+        legId: mapStops[0].legIdToNext,
+        mode: "walk",
+        totalMinutes: 15,
+        marginMinutes: 0,
+        leaveISO: mapStops[0].endTime,
+        arriveISO: mapStops[1].startTime,
+      },
+    },
+    {
+      id: mapStops[1].id,
+      category: mapStops[1].category,
+      name: mapStops[1].name,
+      start: mapStops[1].startTime,
+      end: mapStops[1].endTime,
+      legToNext: {
+        legId: mapStops[1].legIdToNext,
+        mode: "walk",
+        totalMinutes: 12,
+        marginMinutes: 0,
+        leaveISO: mapStops[1].endTime,
+        arriveISO: mapStops[2].startTime,
+      },
+    },
+    {
+      id: mapStops[2].id,
+      category: mapStops[2].category,
+      name: mapStops[2].name,
+      start: mapStops[2].startTime,
+      end: mapStops[2].endTime,
+      legToNext: {
+        legId: mapStops[2].legIdToNext,
+        mode: "walk",
+        totalMinutes: 18,
+        marginMinutes: 0,
+        leaveISO: mapStops[2].endTime,
+        arriveISO: mapStops[3].startTime,
+      },
+    },
+    {
+      id: mapStops[3].id,
+      category: mapStops[3].category,
+      name: mapStops[3].name,
+      start: mapStops[3].startTime,
+      end: mapStops[3].endTime,
+      legToNext: {
+        legId: mapStops[3].legIdToNext,
+        mode: "transit",
+        totalMinutes: 25,
+        marginMinutes: 5,
+        lineName: VISIBILITY_CHANGED_RIDE.lineName,
+        leaveISO: mapStops[3].endTime,
+        arriveISO: mapStops[4].startTime,
+        segments: [VISIBILITY_CHANGED_RIDE],
+      },
+    },
+    {
+      id: mapStops[4].id,
+      category: mapStops[4].category,
+      name: mapStops[4].name,
+      start: mapStops[4].startTime,
+      end: mapStops[4].endTime,
+      changed: true,
+      legToNext: null,
+    },
+  ];
+
+  return { id, mapHome, stripHome, mapStops, stripStops };
+}
+
+function cloneVisibilityPlan(plan: VisibilityPlan): VisibilityPlan {
+  return {
+    ...plan,
+    mapHome: {
+      ...plan.mapHome,
+      legSegments: plan.mapHome.legSegments?.map((ride) => ({ ...ride })),
+      pathSegmentsToNext: plan.mapHome.pathSegmentsToNext?.map((path) => ({
+        ...path,
+      })),
+    },
+    stripHome: {
+      ...plan.stripHome,
+      leg: plan.stripHome.leg
+        ? {
+            ...plan.stripHome.leg,
+            segments: plan.stripHome.leg.segments?.map((ride) => ({ ...ride })),
+          }
+        : plan.stripHome.leg,
+    },
+    mapStops: plan.mapStops.map((stop) => ({
+      ...stop,
+      legSegments: stop.legSegments?.map((ride) => ({ ...ride })),
+      pathSegmentsToNext: stop.pathSegmentsToNext?.map((path) => ({ ...path })),
+    })),
+    stripStops: plan.stripStops.map((stop) => ({
+      ...stop,
+      legToNext: stop.legToNext
+        ? {
+            ...stop.legToNext,
+            segments: stop.legToNext.segments?.map((ride) => ({ ...ride })),
+          }
+        : stop.legToNext,
+    })),
+  };
+}
+
+function replaceVisibilityLeg(
+  plan: VisibilityPlan,
+  oldLegId: string,
+  newLegId: string
+): VisibilityPlan {
+  const clone = cloneVisibilityPlan(plan);
+  return {
+    ...clone,
+    mapStops: clone.mapStops.map((stop) =>
+      stop.legIdToNext === oldLegId
+        ? { ...stop, legIdToNext: newLegId }
+        : stop
+    ),
+    stripStops: clone.stripStops.map((stop) =>
+      stop.legToNext?.legId === oldLegId
+        ? { ...stop, legToNext: { ...stop.legToNext, legId: newLegId } }
+        : stop
+    ),
+  };
+}
+
+type VisibilityMoment =
+  | "before"
+  | "departure"
+  | "boundary"
+  | "second-active"
+  | "later-active"
+  | "completed";
+
+const VISIBILITY_MOMENTS: Record<
+  VisibilityMoment,
+  {
+    now: string;
+    statuses: Record<string, NonNullable<MapStop["status"]>>;
+  }
+> = {
+  before: { now: "2026-08-20T08:00:00-04:00", statuses: {} },
+  departure: { now: "2026-08-20T09:00:00-04:00", statuses: {} },
+  boundary: {
+    now: "2026-08-20T10:00:00-04:00",
+    statuses: { "visibility-first": "active" },
+  },
+  "second-active": {
+    now: "2026-08-20T11:30:00-04:00",
+    statuses: {
+      "visibility-first": "completed",
+      "visibility-second": "active",
+    },
+  },
+  "later-active": {
+    now: "2026-08-20T12:30:00-04:00",
+    statuses: {
+      "visibility-first": "completed",
+      "visibility-second": "completed",
+      "visibility-third": "active",
+    },
+  },
+  completed: {
+    now: "2026-08-20T16:00:00-04:00",
+    statuses: {
+      "visibility-first": "completed",
+      "visibility-second": "completed",
+      "visibility-third": "completed",
+      "visibility-fourth": "completed",
+      "visibility-fifth": "completed",
+    },
+  },
+};
+
 export default function MapsHarness() {
   const [mounted, setMounted] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
@@ -450,32 +831,114 @@ export default function MapsHarness() {
   const [visibilitySpecimen, setVisibilitySpecimen] = useState(false);
   const [manualLegId, setManualLegId] = useState<string | null>(null);
   const [routeStops, setRouteStops] = useState(ROUTE_STOPS);
-  const stops = routeSpecimen ? routeStops : STOPS;
-  const visibilityNow = new Date("2026-07-25T21:00:00-04:00");
-  const visibilityStripStops = ROUTE_STRIP_STOPS.map((stop, index) => ({
-    ...stop,
-    status: index === 1 ? ("active" as const) : stop.status,
-    legToNext:
-      index === 4
-        ? {
-            legId: "leg:harness-no-timeline",
-            mode: "transit" as const,
-            totalMinutes: 15,
-            marginMinutes: 5,
-            lineName: "transit",
-            leaveISO: "2026-07-26T00:30:00-04:00",
-            arriveISO: "2026-07-26T00:45:00-04:00",
-            segments: [],
-          }
-        : stop.legToNext,
-  }));
-  const automaticLegId = automaticTransitLegId({
-    nowMs: visibilityNow.getTime(),
-    stops: visibilityStripStops.map((stop) => ({
-      status: stop.status,
-      outbound: stop.legToNext,
-    })),
-  });
+  const [visibilityPlan, setVisibilityPlan] = useState(() =>
+    makeVisibilityPlan("visibility-plan")
+  );
+  const [visibilityMoment, setVisibilityMoment] =
+    useState<VisibilityMoment>("before");
+  const displayedPlanId = useRef(visibilityPlan.id);
+  const moment = VISIBILITY_MOMENTS[visibilityMoment];
+  const visibilityNow = useMemo(() => new Date(moment.now), [moment.now]);
+  const visibilityMapStops = useMemo(
+    () =>
+      visibilityPlan.mapStops.map((stop) => ({
+        ...stop,
+        status: moment.statuses[stop.id] ?? "upcoming",
+      })),
+    [moment.statuses, visibilityPlan.mapStops]
+  );
+  const visibilityStripStops = useMemo(
+    () =>
+      visibilityPlan.stripStops.map((stop) => ({
+        ...stop,
+        status: moment.statuses[stop.id] ?? "upcoming",
+      })),
+    [moment.statuses, visibilityPlan.stripStops]
+  );
+  const currentHome = visibilitySpecimen
+    ? visibilityPlan.mapHome
+    : undefined;
+  const currentStripHome = visibilitySpecimen
+    ? visibilityPlan.stripHome
+    : undefined;
+  const currentStripStops = useMemo(
+    () =>
+      visibilitySpecimen
+        ? visibilityStripStops
+        : routeSpecimen
+          ? ROUTE_STRIP_STOPS
+          : [],
+    [routeSpecimen, visibilitySpecimen, visibilityStripStops]
+  );
+  const stops = visibilitySpecimen
+    ? visibilityMapStops
+    : routeSpecimen
+      ? routeStops
+      : STOPS;
+  const projectedTravelLegs = useMemo(
+    () => [
+      currentStripHome?.leg,
+      ...currentStripStops.map((stop) => stop.legToNext),
+    ],
+    [currentStripHome, currentStripStops]
+  );
+  const automaticLegId = useMemo(
+    () =>
+      automaticTravelLegId({
+        nowMs: visibilitySpecimen
+          ? visibilityNow.getTime()
+          : new Date("2026-07-25T18:00:00-04:00").getTime(),
+        home: currentStripHome?.leg,
+        stops: currentStripStops.map((stop) => ({
+          status: stop.status,
+          outbound: stop.legToNext,
+        })),
+      }),
+    [currentStripHome, currentStripStops, visibilityNow, visibilitySpecimen]
+  );
+  const visibleLegIds = useMemo(
+    () => visibleTravelLegIds(automaticLegId, manualLegId),
+    [automaticLegId, manualLegId]
+  );
+  const legacyTransitVisibility = useMemo(
+    () => hasLegacyTransitLeg(projectedTravelLegs),
+    [projectedTravelLegs]
+  );
+
+  // These two effects deliberately mirror page.tsx. Plan/history identity
+  // replacement clears ephemeral manual state, while an ordinary render or
+  // topology update retains it only if that exact app-owned leg ID survives.
+  useEffect(() => {
+    if (displayedPlanId.current !== visibilityPlan.id) {
+      setManualLegId(null);
+      displayedPlanId.current = visibilityPlan.id;
+    }
+  }, [visibilityPlan.id]);
+
+  useEffect(() => {
+    // Same retention effect as the product page; the state update is the
+    // synchronization target, not derived render data.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setManualLegId((current) =>
+      retainManualLegId(current, projectedTravelLegs)
+    );
+  }, [projectedTravelLegs]);
+
+  const showRouteSpecimen = () => {
+    setVisibilitySpecimen(false);
+    setRouteSpecimen(true);
+    setManualLegId(null);
+    setSelected(null);
+  };
+
+  const showVisibilitySpecimen = () => {
+    setVisibilityPlan(makeVisibilityPlan("visibility-plan"));
+    setVisibilityMoment("before");
+    setVisibilitySpecimen(true);
+    setRouteSpecimen(true);
+    setManualLegId(null);
+    setSelected(null);
+  };
 
   return (
     <main>
@@ -489,11 +952,21 @@ export default function MapsHarness() {
       <button
         type="button"
         style={{ position: "fixed", zIndex: 1000, top: 40, left: 8 }}
-        onClick={() => setRouteSpecimen((value) => !value)}
+        onClick={() => {
+          if (routeSpecimen && !visibilitySpecimen) {
+            setRouteSpecimen(false);
+            setManualLegId(null);
+            setSelected(null);
+          } else {
+            showRouteSpecimen();
+          }
+        }}
       >
-        {routeSpecimen ? "Show fallback specimen" : "Show route specimen"}
+        {routeSpecimen && !visibilitySpecimen
+          ? "Show fallback specimen"
+          : "Show route specimen"}
       </button>
-      {routeSpecimen && (
+      {routeSpecimen && !visibilitySpecimen && (
         <button
           type="button"
           style={{ position: "fixed", zIndex: 1000, top: 72, left: 8 }}
@@ -508,36 +981,127 @@ export default function MapsHarness() {
         type="button"
         style={{ position: "fixed", zIndex: 1000, top: 104, left: 8 }}
         onClick={() => {
-          setRouteSpecimen(true);
-          setVisibilitySpecimen((value) => !value);
-          setManualLegId(null);
+          if (visibilitySpecimen) showRouteSpecimen();
+          else showVisibilitySpecimen();
         }}
       >
         {visibilitySpecimen ? "Show all-leg specimen" : "Show visibility specimen"}
       </button>
+      {visibilitySpecimen && (
+        <div
+          data-testid="visibility-controls"
+          style={{
+            position: "fixed",
+            zIndex: 1000,
+            top: 8,
+            left: 170,
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 4,
+            maxWidth: 1000,
+          }}
+        >
+          <button type="button" onClick={() => setVisibilityMoment("before")}>
+            Before departure
+          </button>
+          <button
+            type="button"
+            onClick={() => setVisibilityMoment("departure")}
+          >
+            Exact home departure
+          </button>
+          <button
+            type="button"
+            onClick={() => setVisibilityMoment("boundary")}
+          >
+            Exact first-stop boundary
+          </button>
+          <button
+            type="button"
+            onClick={() => setVisibilityMoment("second-active")}
+          >
+            Second stop active
+          </button>
+          <button
+            type="button"
+            onClick={() => setVisibilityMoment("later-active")}
+          >
+            Later active stop
+          </button>
+          <button
+            type="button"
+            onClick={() => setVisibilityMoment("completed")}
+          >
+            All stops completed
+          </button>
+          <button
+            type="button"
+            onClick={() => setVisibilityPlan((plan) => cloneVisibilityPlan(plan))}
+          >
+            Rerender visibility plan
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setVisibilityPlan((plan) => cloneVisibilityPlan(plan))
+            }
+          >
+            Reroute clone exact IDs
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setVisibilityPlan((plan) =>
+                replaceVisibilityLeg(
+                  plan,
+                  VISIBILITY_MANUAL_WALK_ID,
+                  `${VISIBILITY_MANUAL_WALK_ID}:rerouted`
+                )
+              )
+            }
+          >
+            Reroute replace manual leg
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setVisibilityPlan(makeVisibilityPlan("visibility-history-plan"))
+            }
+          >
+            Replace plan or history
+          </button>
+          <button type="button" onClick={showVisibilitySpecimen}>
+            Reset visibility plan
+          </button>
+        </div>
+      )}
       {mounted && (
         <ItineraryMap
           stops={stops}
+          home={currentHome}
           selected={selected}
           onSelect={setSelected}
-          visibleTransitLegIds={
-            visibilitySpecimen
-              ? [automaticLegId, manualLegId].filter((id): id is string => id !== null)
-              : []
-          }
-          legacyTransitVisibility={!visibilitySpecimen}
+          visibleTravelLegIds={visibleLegIds}
+          legacyTransitVisibility={legacyTransitVisibility}
         />
       )}
       {routeSpecimen && (
-        <div data-testid="route-strip-specimen">
+        <div
+          data-testid={
+            visibilitySpecimen
+              ? "visibility-strip-specimen"
+              : "route-strip-specimen"
+          }
+        >
           <ItineraryStrip
-            stops={visibilitySpecimen ? visibilityStripStops : ROUTE_STRIP_STOPS}
+            home={currentStripHome}
+            stops={currentStripStops}
             selected={selected}
             onSelect={setSelected}
             now={visibilitySpecimen ? visibilityNow : new Date("2026-07-25T18:00:00-04:00")}
             manualLegId={manualLegId}
             onToggleManualLeg={(legId) =>
-              setManualLegId((current) => (current === legId ? null : legId))
+              setManualLegId((current) => toggleManualLegId(current, legId))
             }
           />
         </div>

@@ -210,14 +210,15 @@ function LegLines({
  *
  * Without usable provider times (a walk leg, an older stored plan, a ride
  * the agency publishes no times for, or times that no longer match this
- * leg's window) the card keeps the single `leave · arrive` line and is not
- * tappable at all — never a blank, never an invented time, and never a
- * control that does nothing.
+ * leg's window) the card keeps the single `leave · arrive` line. Identified
+ * inter-stop walks remain selectable as complete map legs, but never invent
+ * a transit timeline or timeline disclosure state.
  */
 function LegCard({
   leg,
   timeZone,
   now,
+  origin,
   manualLegId,
   onToggleManualLeg,
 }: {
@@ -226,6 +227,7 @@ function LegCard({
   /** the instant the plan is being READ at — the app's one "now", so the
    *  leg that is underway agrees with the stop wearing the "now" pill */
   now: Date;
+  origin: "home" | "interstop";
   manualLegId: string | null;
   onToggleManualLeg: (legId: string) => void;
 }) {
@@ -235,6 +237,7 @@ function LegCard({
   const [legacySelected, setLegacySelected] = useState(false);
   const timelineId = useId();
   const isTransit = leg.mode === "transit";
+  const isWalk = leg.mode === "walk";
   const segments = isTransit ? leg.segments ?? [] : [];
   const timeline = isTransit
     ? buildTransitTimeline({
@@ -244,7 +247,13 @@ function LegCard({
       })
     : null;
   const identified = typeof leg.legId === "string";
-  const manuallySelected = identified ? manualLegId === leg.legId : legacySelected;
+  const routeSelectable =
+    identified && (isTransit || (isWalk && origin === "interstop"));
+  const manuallySelected = routeSelectable
+    ? manualLegId === leg.legId
+    : isTransit && !identified
+      ? legacySelected
+      : false;
   const underway = legUnderway(leg, now.getTime());
   const showTimeline = shouldShowTimeline({
     isTransit,
@@ -297,6 +306,14 @@ function LegCard({
           {leg.arriveISO ? `arrive ${at(leg.arriveISO)}` : null}
         </span>
       )}
+    </>
+  );
+
+  const walkSummary = (
+    <>
+      {glyph}
+      <span className="lstrip__legline">walk</span>
+      <span className="lstrip__legmeta">{leg.totalMinutes} min</span>
     </>
   );
 
@@ -381,9 +398,18 @@ function LegCard({
         </>
       ) : (
         <>
-          {glyph}
-          <div className="lstrip__legline">walk</div>
-          <div className="lstrip__legmeta">{leg.totalMinutes} min</div>
+          {routeSelectable ? (
+            <button
+              type="button"
+              className="lstrip__legselect"
+              aria-pressed={manuallySelected}
+              onClick={() => onToggleManualLeg(leg.legId!)}
+            >
+              {walkSummary}
+            </button>
+          ) : (
+            walkSummary
+          )}
           <div
             className="lstrip__walkwarning"
             role="note"
@@ -778,7 +804,7 @@ export default function ItineraryStrip({
           {home.leaveBy && <div className="lstrip__be">leave by {home.leaveBy}</div>}
         </div>
       )}
-      {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} now={now} manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} />}
+      {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} now={now} origin="home" manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} />}
       {stops.map((s, i) => (
         <Fragment key={s.id}>
           <StopCard
@@ -793,7 +819,7 @@ export default function ItineraryStrip({
             onFocusHandled={onFocusHandled}
           />
           {s.legToNext && (
-            <LegCard leg={s.legToNext} timeZone={timeZone} now={now} manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} />
+            <LegCard leg={s.legToNext} timeZone={timeZone} now={now} origin="interstop" manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} />
           )}
         </Fragment>
       ))}

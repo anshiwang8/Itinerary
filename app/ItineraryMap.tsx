@@ -15,6 +15,7 @@ import type { PathSegment } from "./api/schedule/travel";
 import { createRetryableLoader } from "./lib/retryableLoader";
 import { displayableRouteMode } from "./lib/mapRoutePolicy";
 import { transitRideColor } from "./lib/transitRidePalette";
+import { travelLegVisible } from "./lib/travelLegVisibility";
 
 // Printed-cartography map: pale-blue Google styling (inline JSON, so no
 // Cloud map id), occurrence-coloured transit lines, and an HTML overlay layer
@@ -204,16 +205,16 @@ interface Props {
   /** the selected stop, identified by VENUE ID (two stops can share a
    *  category — see code-audit 2026-07-18 §7.2) */
   onSelect: (stopId: string) => void;
-  visibleTransitLegIds?: readonly string[];
+  visibleTravelLegIds?: readonly string[];
   legacyTransitVisibility?: boolean;
 }
 
-export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTransitLegIds = [], legacyTransitVisibility = true }: Props) {
+export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTravelLegIds = [], legacyTransitVisibility = true }: Props) {
   const mapDivRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const projRef = useRef<google.maps.MapCanvasProjection | null>(null);
   const linesRef = useRef<google.maps.Polyline[]>([]);
-  const visibleTransitKey = visibleTransitLegIds.join("|");
+  const visibleTravelKey = visibleTravelLegIds.join("|");
   const rafRef = useRef<number | null>(null);
   const [, setTick] = useState(0);
   const [mapState, setMapState] = useState<"loading" | "ready" | "failed">("loading");
@@ -280,7 +281,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     if (!map || mapState !== "ready") return;
     let cancelled = false;
     const ownedLines: google.maps.Polyline[] = [];
-    const visibleTransitIds = new Set(visibleTransitKey.split("|").filter(Boolean));
+    const visibleTravelIds = visibleTravelKey.split("|").filter(Boolean);
 
     const removeOwnedLines = () => {
       ownedLines.forEach((line) => line.setMap(null));
@@ -311,6 +312,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
           pathSegments?: PathSegment[] | null;
           changed: boolean;
           legId?: string | null;
+          origin: "home" | "interstop";
         }[] = [];
 
         if (home && stops[0]) {
@@ -322,6 +324,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
             pathSegments: home.pathSegmentsToNext,
             changed: false,
             legId: home.legIdToNext,
+            origin: "home",
           });
         }
         for (let i = 0; i < stops.length - 1; i++) {
@@ -334,6 +337,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
             // A changed destination marks its inbound leg as changed.
             changed: !!stops[i + 1].changed,
             legId: stops[i].legIdToNext,
+            origin: "interstop",
           });
         }
 
@@ -402,11 +406,13 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
         for (const seg of segs) {
           const mode = displayableRouteMode(seg.mode);
           if (!mode) continue;
-          if (
-            mode === "transit" &&
-            !legacyTransitVisibility &&
-            (!seg.legId || !visibleTransitIds.has(seg.legId))
-          ) continue;
+          if (!travelLegVisible({
+            mode,
+            legId: seg.legId,
+            origin: seg.origin,
+            visibleLegIds: visibleTravelIds,
+            legacyTransitVisibility,
+          })) continue;
 
           if (mode === "transit" && Array.isArray(seg.pathSegments)) {
             // This accumulator is deliberately scoped to ONE itinerary leg.
@@ -584,7 +590,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
       cancelled = true;
       removeOwnedLines();
     };
-  }, [stops, home, mapState, visibleTransitKey, legacyTransitVisibility]);
+  }, [stops, home, mapState, visibleTravelKey, legacyTransitVisibility]);
 
   // Fit bounds only when the geography actually changes (initial plan or a
   // reroute swapping a venue) — NOT on every status tick, which would yank
@@ -651,16 +657,26 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     return Math.max(edge, Math.min(width - edge, projected));
   };
 
-  // transit leg labels pinned to each leg's midpoint (home leg + inter-stop)
+  // Complete-leg labels pinned to each leg's midpoint (home leg + inter-stop).
+  // The same exact decision that guarded native construction guards these.
   const legLabels: { key: string; x: number | string; y: number | string; text: string; segs: BubbleSegment[] }[] = [];
-  const transitLegVisible = (mode: MapHome["legModeToNext"], legId?: string | null) =>
-    mode !== "transit" || legacyTransitVisibility || (!!legId && visibleTransitLegIds.includes(legId));
-  if (home && stops[0] && home.legLabel && transitLegVisible(home.legModeToNext, home.legIdToNext)) {
+  const completeLegVisible = (
+    mode: MapHome["legModeToNext"],
+    legId: string | null | undefined,
+    origin: "home" | "interstop"
+  ) => travelLegVisible({
+    mode,
+    legId,
+    origin,
+    visibleLegIds: visibleTravelLegIds,
+    legacyTransitVisibility,
+  });
+  if (home && stops[0] && home.legLabel && completeLegVisible(home.legModeToNext, home.legIdToNext, "home")) {
     const p = midPx(home, stops[0]);
     if (p) legLabels.push({ key: "home", x: p.x, y: p.y, text: home.legLabel, segs: home.legSegments ?? [] });
   }
   for (let i = 0; i < stops.length - 1; i++) {
-    if (stops[i].legLabel && transitLegVisible(stops[i].legModeToNext, stops[i].legIdToNext)) {
+    if (stops[i].legLabel && completeLegVisible(stops[i].legModeToNext, stops[i].legIdToNext, "interstop")) {
       const p = midPx(stops[i], stops[i + 1]);
       if (p) legLabels.push({ key: stops[i].id, x: p.x, y: p.y, text: stops[i].legLabel!, segs: stops[i].legSegments ?? [] });
     }
@@ -691,9 +707,9 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
       });
     }
   };
-  if (home && transitLegVisible(home.legModeToNext, home.legIdToNext)) addTransfers("home", home.legSegments);
+  if (home && completeLegVisible(home.legModeToNext, home.legIdToNext, "home")) addTransfers("home", home.legSegments);
   for (const stop of stops) {
-    if (transitLegVisible(stop.legModeToNext, stop.legIdToNext)) addTransfers(stop.id, stop.legSegments);
+    if (completeLegVisible(stop.legModeToNext, stop.legIdToNext, "interstop")) addTransfers(stop.id, stop.legSegments);
   }
 
   return (

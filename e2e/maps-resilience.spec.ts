@@ -20,7 +20,23 @@ const MAPS_STUB = String.raw`
   }
 
   class LatLngBounds {
-    extend() { return this; }
+    constructor() {
+      this.points = [];
+    }
+    extend(point) {
+      const value = coordinate(point);
+      if (value) this.points.push(value);
+      return this;
+    }
+    getCenter() {
+      if (this.points.length === 0) return new LatLng({ lat: 0, lng: 0 });
+      const lats = this.points.map((point) => point.lat);
+      const lngs = this.points.map((point) => point.lng);
+      return new LatLng({
+        lat: (Math.min(...lats) + Math.max(...lats)) / 2,
+        lng: (Math.min(...lngs) + Math.max(...lngs)) / 2,
+      });
+    }
   }
 
   class Map {
@@ -28,9 +44,20 @@ const MAPS_STUB = String.raw`
       this.element = element;
       element.dataset.providerMap = "ready";
     }
-    setCenter() {}
-    setZoom() {}
-    fitBounds() {}
+    setCenter(point) {
+      window.__mapsSetCenters = window.__mapsSetCenters || [];
+      window.__mapsSetCenters.push(coordinate(point));
+    }
+    setZoom(zoom) {
+      window.__mapsSetZooms = window.__mapsSetZooms || [];
+      window.__mapsSetZooms.push(zoom);
+    }
+    fitBounds(bounds) {
+      window.__mapsFitBoundsCalls = window.__mapsFitBoundsCalls || [];
+      window.__mapsFitBoundsCalls.push(
+        (bounds.points || []).map((point) => [point.lat, point.lng])
+      );
+    }
   }
 
   class OverlayView {
@@ -158,6 +185,13 @@ const MAPS_STUB = String.raw`
       "whole-transit-two": [[43.6512, -79.4148], [43.6542, -79.4098]],
       "plain-walk": [[43.6542, -79.4098], [43.656, -79.405]],
       "ordinary-walk-step": [[43.6542, -79.4098], [43.655, -79.407]],
+      "visibility-home-walk": [[43.648, -79.421], [43.6482, -79.4208]],
+      "visibility-home-ride-local": [[43.6482, -79.4208], [43.6485, -79.4205]],
+      "visibility-home-transfer-walk": [[43.6485, -79.4205], [43.6487, -79.4203]],
+      "visibility-home-ride-crosstown": [[43.6487, -79.4203], [43.649, -79.42]],
+      "visibility-walk-decoded": [[43.649, -79.42], [43.6495, -79.4195], [43.65, -79.419]],
+      "visibility-walk-manual": [[43.651, -79.418], [43.6515, -79.4175], [43.652, -79.417]],
+      "visibility-transit-changed": [[43.652, -79.417], [43.6525, -79.4165], [43.653, -79.416]],
     };
     const path = paths[encoded];
     if (!path) return [];
@@ -170,10 +204,12 @@ const MAPS_STUB = String.raw`
   namespace.importLibrary = async (name) => {
     if (name === "maps") return { Map, OverlayView, Polyline };
     if (name === "geometry") {
-      return {
+      const geometry = {
         encoding: { decodePath },
         spherical: { computeDistanceBetween, computeLength },
       };
+      namespace.geometry = geometry;
+      return geometry;
     }
     return {};
   };
@@ -334,6 +370,42 @@ async function polylineSnapshots(page: Page): Promise<PolylineSnapshot[]> {
   });
 }
 
+async function activePolylines(page: Page): Promise<PolylineSnapshot[]> {
+  return (await polylineSnapshots(page)).filter((line) => line.active);
+}
+
+async function decodeCalls(page: Page): Promise<string[]> {
+  return page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __mapsDecodeCalls?: string[];
+        }
+      ).__mapsDecodeCalls ?? []
+  );
+}
+
+async function resetDecodeCalls(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (
+      window as Window & {
+        __mapsDecodeCalls?: string[];
+      }
+    ).__mapsDecodeCalls = [];
+  });
+}
+
+async function fitBoundsCalls(page: Page): Promise<Array<Array<[number, number]>>> {
+  return page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __mapsFitBoundsCalls?: Array<Array<[number, number]>>;
+        }
+      ).__mapsFitBoundsCalls ?? []
+  );
+}
+
 function overlaySignature(
   line: PolylineSnapshot
 ): Omit<PolylineSnapshot, "id" | "active"> {
@@ -378,6 +450,59 @@ const LATER_SHARED_RIDE_PATH: Array<[number, number]> = [
   [43.6497, -79.419],
   [43.65, -79.418],
 ];
+
+const VISIBILITY_PATHS = {
+  homeWalk: [
+    [43.648, -79.421],
+    [43.6482, -79.4208],
+  ],
+  homeLocal: [
+    [43.6482, -79.4208],
+    [43.6485, -79.4205],
+  ],
+  homeTransferWalk: [
+    [43.6485, -79.4205],
+    [43.6487, -79.4203],
+  ],
+  homeCrosstown: [
+    [43.6487, -79.4203],
+    [43.649, -79.42],
+  ],
+  decodedWalk: [
+    [43.649, -79.42],
+    [43.6495, -79.4195],
+    [43.65, -79.419],
+  ],
+  fallbackWalk: [
+    [43.65, -79.419],
+    [43.651, -79.418],
+  ],
+  manualWalk: [
+    [43.651, -79.418],
+    [43.6515, -79.4175],
+    [43.652, -79.417],
+  ],
+  changedTransit: [
+    [43.652, -79.417],
+    [43.6525, -79.4165],
+    [43.653, -79.416],
+  ],
+} satisfies Record<string, Array<[number, number]>>;
+
+const HOME_DECODE_SIGNATURES = [
+  "visibility-home-walk",
+  "visibility-home-ride-local",
+  "visibility-home-transfer-walk",
+  "visibility-home-ride-crosstown",
+];
+
+function linesForPath(
+  lines: PolylineSnapshot[],
+  path: Array<[number, number]>
+): PolylineSnapshot[] {
+  const signature = JSON.stringify(path);
+  return lines.filter((line) => JSON.stringify(line.path) === signature);
+}
 
 const WALK_PATHS = {
   exact: [
@@ -454,59 +579,427 @@ async function openRouteSpecimen(page: Page): Promise<PolylineSnapshot[]> {
   return (await polylineSnapshots(page)).filter((line) => line.active);
 }
 
-test("@mock complete-leg visibility couples manual strip selection to every native and HTML map visual", async ({ page }) => {
+async function openVisibilitySpecimen(page: Page): Promise<void> {
   await serveMaps(page);
   await page.goto("/test-harness/maps");
-  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+  await expect(page.locator(".mapwrap")).toHaveAttribute(
+    "data-map-state",
+    "ready"
+  );
   await page.getByRole("button", { name: "Show visibility specimen" }).click();
+  await expect(page.getByTestId("visibility-strip-specimen")).toHaveCount(1);
+  await expect(page.getByTestId("visibility-strip-specimen").locator(".lstrip")).toBeVisible();
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.homeLocal).length)
+    .toBe(1);
+}
 
-  const firstLeg = page.locator(".lstrip__leg").filter({ hasText: "501 Shared" });
-  const secondLeg = page.locator(".lstrip__leg").filter({ hasText: "77 Overflow Green" });
-  const firstControl = firstLeg.getByRole("button");
-  const secondControl = secondLeg.getByRole("button");
+test("@mock screenshot regression hides the future first-to-second identified WALK before the first event", async ({
+  page,
+}, testInfo) => {
+  await openVisibilitySpecimen(page);
 
-  await expect(firstControl).toHaveAttribute("aria-pressed", "false");
-  await expect(secondControl).toHaveAttribute("aria-pressed", "false");
-  await expect(page.locator(".leglab").filter({ hasText: "2 transfers" })).toHaveCount(0);
+  expect(linesForPath(await polylineSnapshots(page), VISIBILITY_PATHS.decodedWalk)).toEqual([]);
+  await expect(
+    page.locator(".leglab").filter({ hasText: "Decoded walk · 15 min" })
+  ).toHaveCount(0);
+  expect(await decodeCalls(page)).toEqual(HOME_DECODE_SIGNATURES);
+  expect(await decodeCalls(page)).not.toContain("visibility-walk-decoded");
+
+  const opaqueIds = [
+    "leg:visibility-home",
+    "leg:visibility-walk-decoded",
+    "leg:visibility-walk-fallback",
+    "leg:visibility-walk-manual",
+    "leg:visibility-transit-changed",
+    "ride:visibility-home-local",
+    "ride:visibility-home-crosstown",
+    "ride:visibility-changed",
+  ];
+  const bodyText = await page.locator("body").innerText();
+  expect(opaqueIds.some((id) => bodyText.includes(id))).toBe(false);
+  expect(
+    await page.evaluate((ids) => {
+      const leaks: string[] = [];
+      for (const element of document.querySelectorAll("*")) {
+        for (const attribute of element.attributes) {
+          if (ids.some((id) => attribute.value.includes(id))) {
+            leaks.push(`${attribute.name}=${attribute.value}`);
+          }
+        }
+      }
+      return leaks;
+    }, opaqueIds)
+  ).toEqual([]);
+
+  await testInfo.attach("future-walk-hidden-before-first-event", {
+    body: await page.locator(".mapwrap").screenshot(),
+    contentType: "image/png",
+  });
+});
+
+test("@mock home transit is visible before departure and clears exactly at the first-stop boundary", async ({
+  page,
+}) => {
+  await openVisibilitySpecimen(page);
+
+  const homeLabel = page
+    .locator(".leglab")
+    .filter({ hasText: "10 Home Local → 20 Crosstown · 60 min" });
+  await expect(homeLabel).toHaveCount(1);
+  await expect(homeLabel.locator(".leglab__bubble")).toHaveCount(2);
+  await expect(page.locator(".mk--transfer")).toHaveCount(1);
+  const homePaths = [
+    VISIBILITY_PATHS.homeWalk,
+    VISIBILITY_PATHS.homeLocal,
+    VISIBILITY_PATHS.homeTransferWalk,
+    VISIBILITY_PATHS.homeCrosstown,
+  ];
+  for (const path of homePaths) {
+    expect(linesForPath(await activePolylines(page), path)).toHaveLength(1);
+  }
+  // Home is not a changed leg: no solid or dotted underlay is allowed.
+  expect(
+    (await activePolylines(page)).filter(
+      (line) =>
+        homePaths.some((path) =>
+          linesForPath([line], path).length === 1
+        ) &&
+        (line.strokeOpacity === 0.22 || line.iconFillOpacity === 0.24)
+    )
+  ).toEqual([]);
+
+  const fitBeforeStatusChange = await fitBoundsCalls(page);
+  expect(fitBeforeStatusChange.at(-1)).toEqual([
+    [43.649, -79.42],
+    [43.65, -79.419],
+    [43.651, -79.418],
+    [43.652, -79.417],
+    [43.653, -79.416],
+    [43.648, -79.421],
+  ]);
+  await expect(page.locator(".mk--home")).toHaveAttribute(
+    "style",
+    /left: 310px; top: 260px/
+  );
+
+  await page.getByRole("button", { name: "Exact home departure" }).click();
+  await expect(homeLabel).toHaveCount(1);
+  expect(linesForPath(await activePolylines(page), VISIBILITY_PATHS.homeLocal)).toHaveLength(1);
+
+  await resetDecodeCalls(page);
+  await page
+    .getByRole("button", { name: "Exact first-stop boundary" })
+    .click();
+  await expect(homeLabel).toHaveCount(0);
   await expect(page.locator(".mk--transfer")).toHaveCount(0);
-  await expect(page.locator(".leglab").filter({ hasText: "77 Overflow Green" })).toHaveCount(1);
-  await expect.poll(async () =>
-    (await polylineSnapshots(page)).filter((line) => line.active && line.strokeColor === "#005A9C").length
-  ).toBe(0);
-  await expect.poll(async () =>
-    (await polylineSnapshots(page)).filter((line) => line.active && line.strokeColor === "#00843D").length
-  ).toBe(1);
+  for (const path of homePaths) {
+    await expect
+      .poll(async () => linesForPath(await activePolylines(page), path).length)
+      .toBe(0);
+  }
+  const outboundLabel = page
+    .locator(".leglab")
+    .filter({ hasText: "Decoded walk · 15 min" });
+  await expect(outboundLabel).toHaveCount(1);
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.decodedWalk))
+    .toEqual([
+      expect.objectContaining({
+        strokeColor: "#2E6F8A",
+        strokeOpacity: 0.92,
+        strokeWeight: 2.5,
+      }),
+    ]);
+  const boundaryDecodeCalls = await decodeCalls(page);
+  expect(boundaryDecodeCalls).toContain("visibility-walk-decoded");
+  for (const homeDecode of HOME_DECODE_SIGNATURES) {
+    expect(boundaryDecodeCalls).not.toContain(homeDecode);
+  }
 
-  await firstControl.press("Enter");
-  await expect(firstControl).toHaveAttribute("aria-pressed", "true");
-  await expect(firstControl).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator(".leglab").filter({ hasText: "2 transfers" })).toHaveCount(1);
-  await expect(page.locator(".mk--transfer")).toHaveCount(2);
-  await expect.poll(async () =>
-    (await polylineSnapshots(page)).filter((line) => line.active && line.iconFillColor === "#4F6F7E").length
-  ).toBeGreaterThan(0);
+  // Status-only movement does not change fit inputs or marker geography.
+  expect(await fitBoundsCalls(page)).toHaveLength(fitBeforeStatusChange.length);
+  await expect(page.locator(".mk--live")).toHaveCount(1);
+  await expect(page.locator(".mk--live")).toHaveAttribute(
+    "style",
+    /left: 320px; top: 250px/
+  );
+  await expect(page.locator(".mk--changed")).toHaveCount(1);
+  await expect(page.locator(".mk--live.mk--changed")).toHaveCount(0);
+  await expect(page.locator(".chip--live")).toHaveCount(1);
+});
 
-  const noTimelineControl = page
-    .locator(".lstrip__leg")
-    .filter({ hasText: "transit" })
-    .last()
+test("@mock active and manual WALK routes keep exact decoded and endpoint-fallback geometry", async ({
+  page,
+}) => {
+  await openVisibilitySpecimen(page);
+  const strip = page.getByTestId("visibility-strip-specimen");
+  const walkLegs = strip.locator('.lstrip__leg[aria-label="walking leg"]');
+  const decodedControl = walkLegs.filter({ hasText: "15 min" }).getByRole("button");
+  const fallbackControl = walkLegs.filter({ hasText: "12 min" }).getByRole("button");
+  const manualControl = walkLegs.filter({ hasText: "18 min" }).getByRole("button");
+
+  for (const control of [decodedControl, fallbackControl, manualControl]) {
+    await expect(control).toHaveAttribute("aria-pressed", "false");
+    await expect(control).not.toHaveAttribute("aria-expanded", /.+/);
+    await expect(control).not.toHaveAttribute("aria-controls", /.+/);
+  }
+
+  await page.getByRole("button", { name: "Second stop active" }).click();
+  await resetDecodeCalls(page);
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.fallbackWalk))
+    .toEqual([
+      expect.objectContaining({
+        strokeColor: "#2E6F8A",
+        strokeOpacity: 0.92,
+        strokeWeight: 2.5,
+      }),
+    ]);
+  await expect(
+    page.locator(".leglab").filter({ hasText: "Endpoint fallback walk · 12 min" })
+  ).toHaveCount(1);
+  expect(await decodeCalls(page)).toEqual([]);
+
+  await page.getByRole("button", { name: "All stops completed" }).click();
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.fallbackWalk).length)
+    .toBe(0);
+  await resetDecodeCalls(page);
+  await decodedControl.press("Enter");
+  await expect(decodedControl).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.decodedWalk))
+    .toEqual([
+      expect.objectContaining({
+        path: VISIBILITY_PATHS.decodedWalk,
+        strokeColor: "#2E6F8A",
+        strokeOpacity: 0.92,
+        strokeWeight: 2.5,
+      }),
+    ]);
+  expect(await decodeCalls(page)).toEqual(["visibility-walk-decoded"]);
+
+  await resetDecodeCalls(page);
+  await fallbackControl.press("Space");
+  await expect(decodedControl).toHaveAttribute("aria-pressed", "false");
+  await expect(fallbackControl).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(async () => ({
+      decoded: linesForPath(await activePolylines(page), VISIBILITY_PATHS.decodedWalk).length,
+      fallback: linesForPath(await activePolylines(page), VISIBILITY_PATHS.fallbackWalk).length,
+    }))
+    .toEqual({ decoded: 0, fallback: 1 });
+  expect(await decodeCalls(page)).toEqual([]);
+
+  await manualControl.click();
+  await expect(fallbackControl).toHaveAttribute("aria-pressed", "false");
+  await expect(manualControl).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk))
+    .toEqual([
+      expect.objectContaining({
+        path: VISIBILITY_PATHS.manualWalk,
+        strokeColor: "#2E6F8A",
+        strokeOpacity: 0.92,
+        strokeWeight: 2.5,
+      }),
+    ]);
+  await manualControl.click();
+  await expect(manualControl).toHaveAttribute("aria-pressed", "false");
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk).length)
+    .toBe(0);
+});
+
+test("@mock automatic and manual selection of the same WALK leg deduplicate exactly", async ({
+  page,
+}) => {
+  await openVisibilitySpecimen(page);
+  await page
+    .getByRole("button", { name: "Exact first-stop boundary" })
+    .click();
+  const decodedControl = page
+    .getByTestId("visibility-strip-specimen")
+    .locator('.lstrip__leg[aria-label="walking leg"]')
+    .filter({ hasText: "15 min" })
     .getByRole("button");
-  await expect(noTimelineControl).toHaveAttribute("aria-pressed", "false");
-  await expect(noTimelineControl).not.toHaveAttribute("aria-expanded", /.+/);
-  await expect(noTimelineControl).not.toHaveAttribute("aria-controls", /.+/);
-  await noTimelineControl.click();
-  await expect(noTimelineControl).toHaveAttribute("aria-pressed", "true");
-  await expect(firstControl).toHaveAttribute("aria-pressed", "false");
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.decodedWalk).length)
+    .toBe(1);
+  await decodedControl.click();
+  await expect(decodedControl).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.decodedWalk).length)
+    .toBe(1);
+});
 
-  await secondControl.press("Space");
-  await expect(firstControl).toHaveAttribute("aria-pressed", "false");
-  await expect(secondControl).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator(".leglab").filter({ hasText: "2 transfers" })).toHaveCount(0);
-  await expect(page.locator(".mk--transfer")).toHaveCount(0);
+test("@mock later active and completed WALK states hand automatic visibility to manual selection", async ({
+  page,
+}) => {
+  await openVisibilitySpecimen(page);
+  const manualControl = page
+    .getByTestId("visibility-strip-specimen")
+    .locator('.lstrip__leg[aria-label="walking leg"]')
+    .filter({ hasText: "18 min" })
+    .getByRole("button");
 
-  await secondControl.click();
-  await expect(secondControl).toHaveAttribute("aria-pressed", "false");
-  await expect(page.locator(".leglab").filter({ hasText: "77 Overflow Green" })).toHaveCount(1);
+  await page.getByRole("button", { name: "Later active stop" }).click();
+  await expect(manualControl).toHaveAttribute("aria-pressed", "false");
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk).length)
+    .toBe(1);
+
+  await page.getByRole("button", { name: "All stops completed" }).click();
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk).length)
+    .toBe(0);
+  await manualControl.click();
+  await expect(manualControl).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk).length)
+    .toBe(1);
+});
+
+test("@mock manual WALK lifecycle replaces overlays and retains only a surviving exact leg ID", async ({
+  page,
+}) => {
+  await openVisibilitySpecimen(page);
+  await page.getByRole("button", { name: "All stops completed" }).click();
+  const strip = page.getByTestId("visibility-strip-specimen");
+  const manualControl = strip
+    .locator('.lstrip__leg[aria-label="walking leg"]')
+    .filter({ hasText: "18 min" })
+    .getByRole("button");
+  await manualControl.click();
+  await expect(manualControl).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk).length)
+    .toBe(1);
+  const first = linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk);
+  const firstIds = first.map((line) => line.id);
+  const exactSignatures = first.map(overlaySignature);
+
+  await page.getByRole("button", { name: "Rerender visibility plan" }).click();
+  await expect
+    .poll(async () => {
+      const current = linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk);
+      return {
+        signatures: current.map(overlaySignature),
+        oldStillActive: current.filter((line) => firstIds.includes(line.id)).length,
+      };
+    })
+    .toEqual({ signatures: exactSignatures, oldStillActive: 0 });
+
+  await page.getByRole("button", { name: "Unmount map" }).click();
+  await expect(page.locator(".mapwrap")).toHaveCount(0);
+  await expect.poll(async () => (await activePolylines(page)).length).toBe(0);
+  await page.getByRole("button", { name: "Remount map" }).click();
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+  await expect
+    .poll(async () =>
+      linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk).map(
+        overlaySignature
+      )
+    )
+    .toEqual(exactSignatures);
+
+  await page.getByRole("button", { name: "Reroute clone exact IDs" }).click();
+  await expect(manualControl).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(async () =>
+      linesForPath(await activePolylines(page), VISIBILITY_PATHS.manualWalk).map(
+        overlaySignature
+      )
+    )
+    .toEqual(exactSignatures);
+
+  await page
+    .getByRole("button", { name: "Reroute replace manual leg" })
+    .click();
+  await expect(manualControl).toHaveAttribute("aria-pressed", "false");
+  await expect.poll(async () => (await activePolylines(page)).length).toBe(0);
+
+  await page.getByRole("button", { name: "Reset visibility plan" }).click();
+  await page.getByRole("button", { name: "All stops completed" }).click();
+  const resetManualControl = page
+    .getByTestId("visibility-strip-specimen")
+    .locator('.lstrip__leg[aria-label="walking leg"]')
+    .filter({ hasText: "18 min" })
+    .getByRole("button");
+  await resetManualControl.click();
+  await expect(resetManualControl).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Replace plan or history" }).click();
+  const replacementControl = page
+    .getByTestId("visibility-strip-specimen")
+    .locator('.lstrip__leg[aria-label="walking leg"]')
+    .filter({ hasText: "18 min" })
+    .getByRole("button");
+  await expect(replacementControl).toHaveAttribute("aria-pressed", "false");
+  await expect.poll(async () => (await activePolylines(page)).length).toBe(0);
+});
+
+test("@mock changed identified transit keeps one same-colour halo while legacy WALK and transit controls remain unchanged", async ({
+  page,
+}) => {
+  await openVisibilitySpecimen(page);
+  await page.getByRole("button", { name: "All stops completed" }).click();
+  const changedControl = page
+    .getByTestId("visibility-strip-specimen")
+    .locator('.lstrip__leg[aria-label="transit leg"]')
+    .filter({ hasText: "40 Changed Line" })
+    .getByRole("button");
+  await changedControl.click();
+  await expect(changedControl).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.changedTransit))
+    .toEqual([
+      expect.objectContaining({
+        strokeColor: "#1B7A67",
+        strokeOpacity: 0.22,
+        strokeWeight: 8.5,
+        zIndex: 1,
+      }),
+      expect.objectContaining({
+        strokeColor: "#1B7A67",
+        strokeOpacity: 0.92,
+        strokeWeight: 3.5,
+        zIndex: 2,
+      }),
+    ]);
+  const changedLines = linesForPath(
+    await activePolylines(page),
+    VISIBILITY_PATHS.changedTransit
+  );
+  expect(changedLines[0].id).toBeLessThan(changedLines[1].id);
+  expect(changedLines.every((line) => line.strokeColor !== "#C8F000")).toBe(true);
+  await expect(
+    page.locator(".leglab").filter({ hasText: "40 Changed Line · 25 min" })
+  ).toHaveCount(1);
+  await expect(page.locator(".mk--changed")).toHaveCount(1);
+  await expect(page.locator(".mk--live")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Show all-leg specimen" }).click();
+  await expect(page.getByTestId("route-strip-specimen")).toHaveCount(1);
+  await expect(page.getByTestId("route-strip-specimen").locator(".lstrip")).toBeVisible();
+  await expect
+    .poll(async () => ({
+      legacyWalk: linesForPath(await activePolylines(page), [
+        [43.6542, -79.4098],
+        [43.656, -79.405],
+      ]).length,
+      legacyTransit: linesForPath(await activePolylines(page), [
+        [43.656, -79.405],
+        [43.6575, -79.402],
+      ]).length,
+    }))
+    // The legacy transit destination is the existing changed stop, so its
+    // unchanged contract is one provider-blue halo plus one provider-blue
+    // primary. The identity-absent WALK remains one solid ink route.
+    .toEqual({ legacyWalk: 1, legacyTransit: 2 });
+  await expect(
+    page.locator(".leglab").filter({ hasText: "900 Legacy Blue · 1 stop · 15 min" })
+  ).toHaveCount(1);
 });
 
 test("@mock invalid Maps key auth failure keeps fallback pins usable", async ({

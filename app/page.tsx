@@ -93,11 +93,11 @@ import ItineraryStrip, {
   StripStop,
 } from "./ItineraryStrip";
 import {
-  automaticTransitLegId,
+  automaticTravelLegId,
   hasLegacyTransitLeg,
   retainManualLegId,
   toggleManualLegId,
-  visibleTransitLegIds as deriveVisibleTransitLegIds,
+  visibleTravelLegIds as deriveVisibleTravelLegIds,
 } from "./lib/travelLegVisibility";
 
 const SHOW_DEV_CONTROLS = shouldShowDevControls(
@@ -2491,7 +2491,7 @@ export default function Home() {
   );
   const automaticLegId = useMemo(
     () =>
-      automaticTransitLegId({
+      automaticTravelLegId({
         nowMs: displayNowMs,
         home: stripHome?.leg,
         stops: stripStops.map((stop) => ({
@@ -2501,8 +2501,8 @@ export default function Home() {
       }),
     [displayNowMs, stripHome, stripStops]
   );
-  const visibleTransitLegIds = useMemo(
-    () => deriveVisibleTransitLegIds(automaticLegId, manualLegId),
+  const visibleTravelLegIds = useMemo(
+    () => deriveVisibleTravelLegIds(automaticLegId, manualLegId),
     [automaticLegId, manualLegId]
   );
   const displayedItineraryId = useRef<string | null>(null);
@@ -2948,7 +2948,7 @@ export default function Home() {
         home={mapHome}
         selected={selected}
         timeZone={displayZone}
-        visibleTransitLegIds={visibleTransitLegIds}
+        visibleTravelLegIds={visibleTravelLegIds}
         legacyTransitVisibility={legacyTransitVisibility}
         onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))}
       />
