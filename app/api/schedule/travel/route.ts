@@ -14,10 +14,12 @@ import {
 import {
   parseDwellMinutes,
   parseOptionalInstant,
+  parseOptionalTravelMode,
   parsePoints,
 } from "../../_shared/schemas";
 
-// POST { points: LatLng[], departureTime?: string, dwellMinutes?: number[] }
+// POST { points: LatLng[], departureTime?: string, dwellMinutes?: number[],
+//        travelMode?: "transit" | "driving" }
 //   → { legs: TravelLeg[] }
 // dwellMinutes[i] = how long the traveller stays at points[i] (index 0 is
 // home, no dwell) so each leg can be routed at its own departure instant.
@@ -32,16 +34,28 @@ export async function POST(request: NextRequest) {
     const points: LatLng[] = parsePoints(body.points);
     const departureTime = parseOptionalInstant(body.departureTime, "departureTime");
     const dwellMinutes = parseDwellMinutes(body.dwellMinutes, points.length);
+    // The PLAN's travel mode decides which route the provider is asked for.
+    // Absent = transit, so a caller that predates drive mode is unchanged.
+    const travelMode = parseOptionalTravelMode(body.travelMode) ?? "transit";
 
     // fixture seam: deterministic distance-derived legs, no Routes call.
     // The departure instant and dwells go in for the same reason the live
     // call gets them — each leg is priced (and its board/alight times
     // published) at its OWN departure, not the outing's start.
     if (isMockMode()) {
-      return apiJson(ctx, { legs: mockTravelLegs(points, departureTime, dwellMinutes) });
+      return apiJson(ctx, {
+        legs: mockTravelLegs(points, departureTime, dwellMinutes, travelMode),
+      });
     }
     const apiKey = requireServiceKey(process.env.GOOGLE_ROUTES_API_KEY);
-    const legs = await getTravelLegs(apiKey, points, departureTime, dwellMinutes);
+    const legs = await getTravelLegs(
+      apiKey,
+      points,
+      departureTime,
+      dwellMinutes,
+      undefined,
+      travelMode
+    );
     return apiJson(ctx, { legs });
   } catch (err) {
     return apiError(ctx, err);

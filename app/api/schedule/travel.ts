@@ -17,6 +17,51 @@ export const TRANSIT_MARGIN_MIN = 5;
 // label and no margin.
 export const SHORT_LEG_WALK_METERS = 400;
 
+/**
+ * How the WHOLE PLAN gets around. A plan-level INTENT, not a per-leg
+ * guarantee: a driving plan still contains WALK legs wherever driving is
+ * the wrong answer (see DRIVING_SHORT_LEG_WALK_METERS). Absent on every
+ * stored plan means "transit", which is why nothing needed a migration.
+ */
+export type PlanTravelMode = "transit" | "driving";
+
+export const PLAN_TRAVEL_MODES: readonly PlanTravelMode[] = ["transit", "driving"];
+
+export function isPlanTravelMode(value: unknown): value is PlanTravelMode {
+  return value === "transit" || value === "driving";
+}
+
+/**
+ * POLICY, NOT A MEASUREMENT — and deliberately so.
+ *
+ * A driving leg costs more than the provider's door-to-door drive time:
+ * roughly five minutes to get out of the building and moving, and roughly
+ * five more to find parking and walk in at the far end. Google gives us the
+ * DRIVE duration as a fact; it does not tell us how long parking takes, and
+ * nothing here pretends to know. This number is a deliberate estimate that
+ * bounds the schedule conservatively, exactly the way TRANSIT_MARGIN_MIN is
+ * a buffer rather than a published wait.
+ *
+ * When a real parking/arrival data source exists, it replaces this constant
+ * — the same shape as the `isUsableAt` reservation seam. Until then: do not
+ * "source" it from anywhere, and do not present it to the user as measured.
+ */
+export const DRIVING_MARGIN_MIN = 10;
+
+/**
+ * Below this distance a DRIVE is the wrong answer and the leg relabels to
+ * WALK. The threshold is HIGHER than transit's because the costs differ in
+ * kind: transit's 400 m exists because Google is already walking the hop
+ * internally, while a short drive is a real drive whose park-and-approach
+ * overhead (DRIVING_MARGIN_MIN) swamps the driving itself. Also policy, not
+ * a measurement.
+ *
+ * The consequence is an INVARIANT, not an edge case: a driving plan
+ * legitimately contains walk legs. `travelMode` is the plan's intent; the
+ * leg's own `mode` is what actually happens on it.
+ */
+export const DRIVING_SHORT_LEG_WALK_METERS = 700;
+
 // A crow-flies hop must be comfortably below the route-based walk
 // threshold before we omit TRANSIT. That lower bound leaves room for an
 // ordinary street-grid detour while avoiding a provider call whose result
@@ -262,7 +307,10 @@ export interface TravelLeg {
   legId?: string;
   /** leg from timed stop i to timed stop i+1 */
   fromIndex: number;
-  mode: "transit" | "walk" | "unknown";
+  /** What actually happens on THIS leg. On a driving plan most legs are
+   * "driving", but a short hop relabels to "walk" — the plan's travelMode is
+   * an intent, never a per-leg guarantee. */
+  mode: "transit" | "walk" | "driving" | "unknown";
   rawMinutes: number;
   marginMinutes: number;
   totalMinutes: number;
@@ -683,11 +731,94 @@ export function buildLeg(
   };
 }
 
+/**
+ * Pure: build one consecutive leg for a DRIVING plan, from the DRIVE and
+ * WALK responses. Deliberately a SEPARATE function rather than a mode flag
+ * inside `buildLeg` — the transit relabel rules do not transfer, and the
+ * two policies should be readable side by side rather than interleaved.
+ *
+ * The rules, in order:
+ *   - The drive priced and is at least DRIVING_SHORT_LEG_WALK_METERS →
+ *     a driving leg: the provider's DRIVE duration (a FACT) plus
+ *     DRIVING_MARGIN_MIN (a labelled POLICY estimate for leaving and
+ *     parking).
+ *   - The drive priced but the hop is shorter than that → relabel to WALK,
+ *     but ONLY when the WALK route actually priced. This is where driving
+ *     departs from transit: a short "transit" route's duration IS Google
+ *     walking the hop, so borrowing its number is honest, whereas a short
+ *     DRIVE's duration is a car's. Presenting car minutes as walk minutes
+ *     would be inventing a fact, so a short drive with no walk data stays
+ *     a drive.
+ *   - The drive did not price but the walk did → a walk leg, exactly as the
+ *     transit path does.
+ *   - Neither priced → "unknown", and see getSingleLeg for why a driving
+ *     plan gets NO straight-line estimate there.
+ *
+ * Nothing here consults transit: a driving plan never requests it.
+ */
+export function buildDrivingLeg(
+  fromIndex: number,
+  driveRes: ComputeRoutesResponse | null,
+  walkRes: ComputeRoutesResponse | null,
+  identityFactory: TravelIdentityFactory = createTravelIdentity
+): TravelLeg {
+  const legId = nextTravelIdentity(identityFactory, "leg");
+  const d = parseRoute(driveRes, identityFactory);
+  const w = parseRoute(walkRes, identityFactory);
+
+  // Geometry comes from the same route as the numbers, exactly as above.
+  // A DRIVE response carries no transit steps, so `pathSegments` is empty
+  // here in practice — `pathMode` recognises only WALK and TRANSIT, and a
+  // DRIVE step is skipped rather than guessed into one of ours. The
+  // whole-leg `encodedPolyline` is a driving leg's map geometry.
+  const walkLeg = (src: ParsedRoute): TravelLeg => ({
+    legId,
+    fromIndex,
+    mode: "walk",
+    rawMinutes: src.rawMinutes,
+    marginMinutes: 0,
+    totalMinutes: src.rawMinutes,
+    distanceMeters: src.distanceMeters,
+    encodedPolyline: src.encodedPolyline,
+    ...(src.pathSegments.length > 0 ? { pathSegments: src.pathSegments } : {}),
+  });
+
+  if (d.ok) {
+    const shortHop =
+      d.distanceMeters !== null &&
+      d.distanceMeters < DRIVING_SHORT_LEG_WALK_METERS;
+    if (shortHop && w.ok) return walkLeg(w);
+    return {
+      legId,
+      fromIndex,
+      mode: "driving",
+      rawMinutes: d.rawMinutes,
+      marginMinutes: DRIVING_MARGIN_MIN,
+      totalMinutes: d.rawMinutes + DRIVING_MARGIN_MIN,
+      distanceMeters: d.distanceMeters,
+      encodedPolyline: d.encodedPolyline,
+    };
+  }
+
+  if (w.ok) return walkLeg(w);
+
+  return {
+    legId,
+    fromIndex,
+    mode: "unknown",
+    rawMinutes: 0,
+    marginMinutes: 0,
+    totalMinutes: 0,
+    distanceMeters: null,
+    encodedPolyline: null,
+  };
+}
+
 async function computeRoute(
   apiKey: string,
   origin: LatLng,
   destination: LatLng,
-  travelMode: "TRANSIT" | "WALK",
+  travelMode: "TRANSIT" | "WALK" | "DRIVE",
   departureTime?: string
 ): Promise<ComputeRoutesResponse | null> {
   const body: Record<string, unknown> = {
@@ -743,6 +874,17 @@ async function computeRoute(
  * Fetch a single leg between two points. `excludeTransit` is the
  * reroute engine's disruption handling: a cancelled transit leg is
  * re-fetched walk-only so the dead route can't be re-proposed.
+ *
+ * `planMode` is the PLAN's travel mode, bound once where the engines build
+ * their deps rather than passed at each `deps.getSingleLeg(...)` call site.
+ * A driving plan requests DRIVE + WALK (the walk so a short hop can still
+ * relabel — see DRIVING_SHORT_LEG_WALK_METERS); a transit plan is
+ * byte-identical to before this parameter existed.
+ *
+ * NOTE: `excludeTransit` has no driving meaning. It is the reroute engine's
+ * `transit_cancelled` handling, and a driving plan has no transit to
+ * cancel — Stage 1 leaves it inert there rather than inventing a driving
+ * disruption. Stated, not fixed.
  */
 export async function getSingleLeg(
   apiKey: string,
@@ -751,9 +893,26 @@ export async function getSingleLeg(
   fromIndex: number,
   departureTime?: string,
   excludeTransit = false,
-  identityFactory: TravelIdentityFactory = createTravelIdentity
+  identityFactory: TravelIdentityFactory = createTravelIdentity,
+  planMode: PlanTravelMode = "transit"
 ): Promise<TravelLeg> {
   const straightLineMeters = haversineMeters(origin, destination);
+  if (planMode === "driving") {
+    const [driveRes, driveWalkRes] = await Promise.all([
+      computeRoute(apiKey, origin, destination, "DRIVE", departureTime),
+      computeRoute(apiKey, origin, destination, "WALK", departureTime),
+    ]);
+    // No walk-speed fallback here, deliberately. The shared estimate below
+    // is crow-flies distance at FALLBACK_WALK_SPEED_KMH, which is 3-6x a
+    // car's time — a number that would be wrong in the direction that
+    // matters, and one nothing measured. When BOTH modes fail we know
+    // nothing about this pair of points, and this plan says so rather than
+    // guessing. The cost is real and worth naming: an unknown leg carries
+    // zero minutes, so the schedule does not pad for it (the §6.2 hazard
+    // the transit fallback exists to close). It requires the provider to
+    // fail on DRIVE *and* WALK for the same hop.
+    return buildDrivingLeg(fromIndex, driveRes, driveWalkRes, identityFactory);
+  }
   const skipTransit =
     excludeTransit ||
     straightLineMeters < TRANSIT_SKIP_HAVERSINE_METERS;
@@ -797,15 +956,17 @@ export async function getSingleLeg(
 
 /**
  * Fetch consecutive-pair travel legs for the ordered stop coordinates.
- * Most legs use TRANSIT + WALK; defensibly short crow-flies hops request
- * WALK only because transit would be discarded by the short-leg rule.
+ * On a transit plan most legs use TRANSIT + WALK; defensibly short
+ * crow-flies hops request WALK only because transit would be discarded by
+ * the short-leg rule. On a driving plan every leg requests DRIVE + WALK.
  */
 export async function getTravelLegs(
   apiKey: string,
   points: LatLng[],
   departureTime?: string,
   dwellMinutes: number[] = [],
-  identityFactory: TravelIdentityFactory = createTravelIdentity
+  identityFactory: TravelIdentityFactory = createTravelIdentity,
+  planMode: PlanTravelMode = "transit"
 ): Promise<TravelLeg[]> {
   if (points.length < 2) return [];
 
@@ -832,7 +993,8 @@ export async function getTravelLegs(
       i,
       depart,
       false,
-      identityFactory
+      identityFactory,
+      planMode
     );
     legs.push(leg);
     if (Number.isFinite(cursorMs)) {

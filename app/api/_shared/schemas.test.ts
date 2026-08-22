@@ -6,6 +6,7 @@
 // Run with: npx tsx app/api/_shared/schemas.test.ts
 import assert from "node:assert";
 import {
+  parseOptionalTravelMode,
   parseTravelLegs,
   validateTravelIdentityTopology,
 } from "./schemas";
@@ -552,6 +553,52 @@ const cases: Array<[string, () => void]> = [
           },
         ])
       );
+    },
+  ],
+  [
+    "the plan's travel mode: driving is valid, absent means transit, junk is refused",
+    () => {
+      assert.strictEqual(parseOptionalTravelMode("driving"), "driving");
+      assert.strictEqual(parseOptionalTravelMode("transit"), "transit");
+      // ABSENT is the whole no-migration story: every plan stored before
+      // drive mode omits this field and must still validate.
+      assert.strictEqual(parseOptionalTravelMode(undefined), undefined);
+      for (const bad of ["walk", "DRIVE", "car", "", null, 1, {}]) {
+        assert.throws(
+          () => parseOptionalTravelMode(bad),
+          `an unrecognised mode is refused, not coerced: ${String(bad)}`
+        );
+      }
+    },
+  ],
+  [
+    "a DRIVING leg passes the leg validator, alongside a walk leg in the same plan",
+    () => {
+      const legs = parseTravelLegs([
+        {
+          fromIndex: 0,
+          mode: "driving",
+          rawMinutes: 12,
+          marginMinutes: 10,
+          totalMinutes: 22,
+          distanceMeters: 5_400,
+          encodedPolyline: "enc_drive",
+        },
+        {
+          fromIndex: 1,
+          mode: "walk",
+          rawMinutes: 6,
+          marginMinutes: 0,
+          totalMinutes: 6,
+          distanceMeters: 480,
+          encodedPolyline: "enc_walk",
+        },
+      ]);
+      assert.strictEqual(legs.length, 2);
+      assert.strictEqual(legs[0].mode, "driving");
+      // The invariant, at the validator: a driving plan legitimately stores
+      // walk legs, so the two must be able to coexist.
+      assert.strictEqual(legs[1].mode, "walk");
     },
   ],
   [

@@ -509,8 +509,11 @@ function isTravelLegShape(value: unknown): value is TravelLeg {
   return (
     (leg.legId === undefined || validTravelId(leg.legId)) &&
     validLegIndex(leg.fromIndex) &&
+    // Mirrors the server's leg-mode allowlist. "driving" is a LEG mode, and
+    // it appears alongside walk legs inside one driving plan.
     (leg.mode === "walk" ||
       leg.mode === "transit" ||
+      leg.mode === "driving" ||
       leg.mode === "unknown") &&
     nonNegativeInteger(leg.rawMinutes, 1_440) &&
     nonNegativeInteger(leg.marginMinutes, 1_440) &&
@@ -851,7 +854,14 @@ export function parseItineraryPayload(value: unknown): Itinerary {
       data.status !== "completed") ||
     (data.homeLeg !== undefined && !isTravelLeg(data.homeLeg)) ||
     (data.home !== undefined && !isHomePoint(data.home)) ||
-    (data.timeZone !== undefined && !isIanaTimeZone(data.timeZone))
+    (data.timeZone !== undefined && !isIanaTimeZone(data.timeZone)) ||
+    // The plan's travel mode, mirroring the server. UNDEFINED is valid and
+    // means "transit" — every plan stored before drive mode omits it. The
+    // duplication is the standing posture here: this file cannot import
+    // server modules.
+    (data.travelMode !== undefined &&
+      data.travelMode !== "transit" &&
+      data.travelMode !== "driving")
   ) {
     throw new Error("invalid itinerary");
   }

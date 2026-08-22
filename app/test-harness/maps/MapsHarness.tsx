@@ -177,6 +177,137 @@ const STOPS: MapStop[] = [
   },
 ];
 
+// ── DRIVING specimen (drive-vs-transit mode, Stage 1) ──
+// Three legs on purpose, because a driving PLAN is not three drives:
+//   1. an identified DRIVE with real provider geometry — the automatic leg,
+//      so it is the one selectable card and the one solid road line;
+//   2. a DRIVE with NO geometry — it must draw NOTHING. The walk branch's
+//      straight-line endpoint fallback would put a fake road across the map;
+//   3. a short WALK inside the same driving plan — the invariant that
+//      `travelMode: "driving"` is a plan-level INTENT, not a per-leg promise.
+// Legs 2 and 3 are deliberately identity-absent so they stay visible without
+// competing for the one automatic/manual slot.
+const DRIVING_LEG_ID = "leg:harness-drive";
+const DRIVE_NOW = "2026-07-25T19:30:00-04:00";
+
+const DRIVING_STOPS: MapStop[] = [
+  {
+    id: "maps-drive-one",
+    category: "dinner",
+    name: "Drive Specimen One",
+    lat: 43.648,
+    lng: -79.4214,
+    startTime: "2026-07-25T19:00:00-04:00",
+    endTime: "2026-07-25T20:00:00-04:00",
+    status: "active",
+    legModeToNext: "driving",
+    legIdToNext: DRIVING_LEG_ID,
+    polylineToNext: "drive-road",
+    legLabel: "Drive · 22 min",
+    legSegments: [],
+  },
+  {
+    id: "maps-drive-two",
+    category: "gallery",
+    name: "Drive Specimen Two",
+    lat: 43.656,
+    lng: -79.405,
+    startTime: "2026-07-25T20:22:00-04:00",
+    endTime: "2026-07-25T21:22:00-04:00",
+    status: "upcoming",
+    legModeToNext: "driving",
+    legIdToNext: null,
+    polylineToNext: null,
+  },
+  {
+    id: "maps-drive-three",
+    category: "drinks",
+    name: "Drive Specimen Three",
+    lat: 43.66,
+    lng: -79.398,
+    startTime: "2026-07-25T21:40:00-04:00",
+    endTime: "2026-07-25T22:40:00-04:00",
+    status: "upcoming",
+    legModeToNext: "walk",
+    legIdToNext: null,
+    polylineToNext: null,
+  },
+  {
+    id: "maps-drive-four",
+    category: "dessert",
+    name: "Drive Specimen Four",
+    lat: 43.662,
+    lng: -79.395,
+    startTime: "2026-07-25T22:48:00-04:00",
+    endTime: "2026-07-25T23:18:00-04:00",
+    status: "upcoming",
+  },
+];
+
+const DRIVING_STRIP_STOPS: StripStop[] = [
+  {
+    id: "maps-drive-one",
+    category: "dinner",
+    name: "Drive Specimen One",
+    start: "2026-07-25T19:00:00-04:00",
+    end: "2026-07-25T20:00:00-04:00",
+    status: "active",
+    legToNext: {
+      legId: DRIVING_LEG_ID,
+      mode: "driving",
+      totalMinutes: 22,
+      marginMinutes: 10,
+      lineName: null,
+      leaveISO: "2026-07-25T20:00:00-04:00",
+      arriveISO: "2026-07-25T20:22:00-04:00",
+      segments: [],
+    },
+  },
+  {
+    id: "maps-drive-two",
+    category: "gallery",
+    name: "Drive Specimen Two",
+    start: "2026-07-25T20:22:00-04:00",
+    end: "2026-07-25T21:22:00-04:00",
+    status: "upcoming",
+    legToNext: {
+      mode: "driving",
+      totalMinutes: 18,
+      marginMinutes: 10,
+      lineName: null,
+      leaveISO: "2026-07-25T21:22:00-04:00",
+      arriveISO: "2026-07-25T21:40:00-04:00",
+      segments: [],
+    },
+  },
+  {
+    id: "maps-drive-three",
+    category: "drinks",
+    name: "Drive Specimen Three",
+    start: "2026-07-25T21:40:00-04:00",
+    end: "2026-07-25T22:40:00-04:00",
+    status: "upcoming",
+    legToNext: {
+      mode: "walk",
+      totalMinutes: 8,
+      marginMinutes: 0,
+      lineName: null,
+      leaveISO: "2026-07-25T22:40:00-04:00",
+      arriveISO: "2026-07-25T22:48:00-04:00",
+      segments: [],
+    },
+  },
+  {
+    id: "maps-drive-four",
+    category: "dessert",
+    name: "Drive Specimen Four",
+    start: "2026-07-25T22:48:00-04:00",
+    end: "2026-07-25T23:18:00-04:00",
+    status: "upcoming",
+    legToNext: null,
+  },
+];
+
 const ROUTE_STOPS: MapStop[] = [
   {
     id: "maps-route-one",
@@ -829,6 +960,7 @@ export default function MapsHarness() {
   const [selected, setSelected] = useState<string | null>(null);
   const [routeSpecimen, setRouteSpecimen] = useState(false);
   const [visibilitySpecimen, setVisibilitySpecimen] = useState(false);
+  const [drivingSpecimen, setDrivingSpecimen] = useState(false);
   const [manualLegId, setManualLegId] = useState<string | null>(null);
   const [routeStops, setRouteStops] = useState(ROUTE_STOPS);
   const [visibilityPlan, setVisibilityPlan] = useState(() =>
@@ -863,18 +995,22 @@ export default function MapsHarness() {
     : undefined;
   const currentStripStops = useMemo(
     () =>
-      visibilitySpecimen
-        ? visibilityStripStops
-        : routeSpecimen
-          ? ROUTE_STRIP_STOPS
-          : [],
-    [routeSpecimen, visibilitySpecimen, visibilityStripStops]
+      drivingSpecimen
+        ? DRIVING_STRIP_STOPS
+        : visibilitySpecimen
+          ? visibilityStripStops
+          : routeSpecimen
+            ? ROUTE_STRIP_STOPS
+            : [],
+    [drivingSpecimen, routeSpecimen, visibilitySpecimen, visibilityStripStops]
   );
-  const stops = visibilitySpecimen
-    ? visibilityMapStops
-    : routeSpecimen
-      ? routeStops
-      : STOPS;
+  const stops = drivingSpecimen
+    ? DRIVING_STOPS
+    : visibilitySpecimen
+      ? visibilityMapStops
+      : routeSpecimen
+        ? routeStops
+        : STOPS;
   const projectedTravelLegs = useMemo(
     () => [
       currentStripHome?.leg,
@@ -885,16 +1021,24 @@ export default function MapsHarness() {
   const automaticLegId = useMemo(
     () =>
       automaticTravelLegId({
-        nowMs: visibilitySpecimen
-          ? visibilityNow.getTime()
-          : new Date("2026-07-25T18:00:00-04:00").getTime(),
+        nowMs: drivingSpecimen
+          ? new Date(DRIVE_NOW).getTime()
+          : visibilitySpecimen
+            ? visibilityNow.getTime()
+            : new Date("2026-07-25T18:00:00-04:00").getTime(),
         home: currentStripHome?.leg,
         stops: currentStripStops.map((stop) => ({
           status: stop.status,
           outbound: stop.legToNext,
         })),
       }),
-    [currentStripHome, currentStripStops, visibilityNow, visibilitySpecimen]
+    [
+      currentStripHome,
+      currentStripStops,
+      drivingSpecimen,
+      visibilityNow,
+      visibilitySpecimen,
+    ]
   );
   const visibleLegIds = useMemo(
     () => visibleTravelLegIds(automaticLegId, manualLegId),
@@ -926,6 +1070,15 @@ export default function MapsHarness() {
 
   const showRouteSpecimen = () => {
     setVisibilitySpecimen(false);
+    setDrivingSpecimen(false);
+    setRouteSpecimen(true);
+    setManualLegId(null);
+    setSelected(null);
+  };
+
+  const showDrivingSpecimen = () => {
+    setVisibilitySpecimen(false);
+    setDrivingSpecimen(true);
     setRouteSpecimen(true);
     setManualLegId(null);
     setSelected(null);
@@ -934,6 +1087,7 @@ export default function MapsHarness() {
   const showVisibilitySpecimen = () => {
     setVisibilityPlan(makeVisibilityPlan("visibility-plan"));
     setVisibilityMoment("before");
+    setDrivingSpecimen(false);
     setVisibilitySpecimen(true);
     setRouteSpecimen(true);
     setManualLegId(null);
@@ -953,7 +1107,7 @@ export default function MapsHarness() {
         type="button"
         style={{ position: "fixed", zIndex: 1000, top: 40, left: 8 }}
         onClick={() => {
-          if (routeSpecimen && !visibilitySpecimen) {
+          if (routeSpecimen && !visibilitySpecimen && !drivingSpecimen) {
             setRouteSpecimen(false);
             setManualLegId(null);
             setSelected(null);
@@ -962,11 +1116,11 @@ export default function MapsHarness() {
           }
         }}
       >
-        {routeSpecimen && !visibilitySpecimen
+        {routeSpecimen && !visibilitySpecimen && !drivingSpecimen
           ? "Show fallback specimen"
           : "Show route specimen"}
       </button>
-      {routeSpecimen && !visibilitySpecimen && (
+      {routeSpecimen && !visibilitySpecimen && !drivingSpecimen && (
         <button
           type="button"
           style={{ position: "fixed", zIndex: 1000, top: 72, left: 8 }}
@@ -977,6 +1131,16 @@ export default function MapsHarness() {
           Rerender routes
         </button>
       )}
+      <button
+        type="button"
+        style={{ position: "fixed", zIndex: 1000, top: 136, left: 8 }}
+        onClick={() => {
+          if (drivingSpecimen) showRouteSpecimen();
+          else showDrivingSpecimen();
+        }}
+      >
+        {drivingSpecimen ? "Show all-leg specimen" : "Show driving specimen"}
+      </button>
       <button
         type="button"
         style={{ position: "fixed", zIndex: 1000, top: 104, left: 8 }}
@@ -1088,9 +1252,11 @@ export default function MapsHarness() {
       {routeSpecimen && (
         <div
           data-testid={
-            visibilitySpecimen
-              ? "visibility-strip-specimen"
-              : "route-strip-specimen"
+            drivingSpecimen
+              ? "driving-strip-specimen"
+              : visibilitySpecimen
+                ? "visibility-strip-specimen"
+                : "route-strip-specimen"
           }
         >
           <ItineraryStrip
@@ -1098,7 +1264,13 @@ export default function MapsHarness() {
             stops={currentStripStops}
             selected={selected}
             onSelect={setSelected}
-            now={visibilitySpecimen ? visibilityNow : new Date("2026-07-25T18:00:00-04:00")}
+            now={
+              drivingSpecimen
+                ? new Date(DRIVE_NOW)
+                : visibilitySpecimen
+                  ? visibilityNow
+                  : new Date("2026-07-25T18:00:00-04:00")
+            }
             manualLegId={manualLegId}
             onToggleManualLeg={(legId) =>
               setManualLegId((current) => toggleManualLegId(current, legId))

@@ -17,8 +17,10 @@ import type { GeocodeRequest } from "../geocode/geocode";
 // only the hours TYPE is needed now — the fixture layer no longer does any
 // openness reasoning of its own (see the availability-seam note below)
 import type { CurrentOpeningHours } from "../places/search/hours";
-import type { LatLng, TravelLeg } from "../schedule/travel";
+import type { LatLng, PlanTravelMode, TravelLeg } from "../schedule/travel";
 import {
+  DRIVING_MARGIN_MIN,
+  DRIVING_SHORT_LEG_WALK_METERS,
   assignTransitPaletteSlots,
   createTravelIdentity,
   extractTravelStepRecords,
@@ -1045,12 +1047,43 @@ export function mockLeg(
   from: LatLng,
   to: LatLng,
   excludeTransit = false,
-  departureISO?: string | null
+  departureISO?: string | null,
+  planMode: PlanTravelMode = "transit"
 ): TravelLeg {
   const legId = createTravelIdentity("leg");
   const km = haversineKm(from, to);
   const distanceMeters = Math.round(km * 1000);
   const walkMin = Math.max(3, Math.round(km * 13));
+  // A DRIVING plan's fixture legs must be DRIVING legs, or mock e2e proves
+  // the toggle plumbing while silently routing every leg as transit — the
+  // one failure this seam exists to make impossible. The relabel threshold
+  // is the production constant, not a fixture number, so a fixture hop the
+  // real rule would walk is walked here too.
+  if (planMode === "driving") {
+    if (distanceMeters < DRIVING_SHORT_LEG_WALK_METERS) {
+      return {
+        legId,
+        fromIndex,
+        mode: "walk",
+        rawMinutes: walkMin,
+        marginMinutes: 0,
+        totalMinutes: walkMin,
+        distanceMeters,
+        encodedPolyline: null,
+      };
+    }
+    const driveRaw = Math.max(3, Math.round(km * 2.5));
+    return {
+      legId,
+      fromIndex,
+      mode: "driving",
+      rawMinutes: driveRaw,
+      marginMinutes: DRIVING_MARGIN_MIN,
+      totalMinutes: driveRaw + DRIVING_MARGIN_MIN,
+      distanceMeters,
+      encodedPolyline: null,
+    };
+  }
   if (excludeTransit || km < 1.0) {
     return {
       legId,
@@ -1142,7 +1175,8 @@ export function mockLeg(
 export function mockTravelLegs(
   points: LatLng[],
   departureTime?: string,
-  dwellMinutes: number[] = []
+  dwellMinutes: number[] = [],
+  planMode: PlanTravelMode = "transit"
 ): TravelLeg[] {
   if (points.length < 2) return [];
   let cursorMs = departureTime ? Date.parse(departureTime) : NaN;
@@ -1151,7 +1185,7 @@ export function mockTravelLegs(
     const depart = Number.isFinite(cursorMs)
       ? new Date(cursorMs).toISOString()
       : undefined;
-    const leg = mockLeg(i, points[i], points[i + 1], false, depart);
+    const leg = mockLeg(i, points[i], points[i + 1], false, depart, planMode);
     legs.push(leg);
     if (Number.isFinite(cursorMs)) {
       cursorMs += (leg.totalMinutes + (dwellMinutes[i + 1] ?? 0)) * 60_000;
@@ -1275,7 +1309,11 @@ export function mockSwapDeps(
   /** the REAL availability default from swap.ts — injected rather than
    *  re-implemented, so mock and production can no longer disagree about
    *  what "open then" means (injection, not import, avoids a cycle) */
-  isUsableAt: SwapDeps["isUsableAt"]
+  isUsableAt: SwapDeps["isUsableAt"],
+  /** the PLAN's travel mode, bound where the deps are built exactly as
+   *  production binds it. Without this a driving plan's mock swap would
+   *  hand back transit legs and the e2e would pass on a lie. */
+  planMode: PlanTravelMode = "transit"
 ): SwapDeps {
   return {
     interpret: async (parsed, category, _startISO, refinement) => {
@@ -1338,18 +1376,18 @@ export function mockSwapDeps(
     searchPools: async (_parsed, categories) => mockPools(categories),
     selectVenues: async (parsed, pools) => mockSelect(parsed, pools),
     getSingleLeg: async (origin, destination, fromIndex, departureTime, excludeTransit) =>
-      mockLeg(fromIndex, origin, destination, excludeTransit, departureTime),
+      mockLeg(fromIndex, origin, destination, excludeTransit, departureTime, planMode),
     isUsableAt,
     getWeather: async () => mockWeather(),
   };
 }
 
-export function mockRerouteDeps(): RerouteDeps {
+export function mockRerouteDeps(planMode: PlanTravelMode = "transit"): RerouteDeps {
   return {
     searchPools: async (_parsed, categories) => mockPools(categories),
     selectVenues: async (parsed, pools, slots) => mockSelect(parsed, pools, slots),
     getSingleLeg: async (origin, destination, fromIndex, departureTime, excludeTransit) =>
-      mockLeg(fromIndex, origin, destination, excludeTransit, departureTime),
+      mockLeg(fromIndex, origin, destination, excludeTransit, departureTime, planMode),
     getWeather: async () => mockWeather(),
   };
 }

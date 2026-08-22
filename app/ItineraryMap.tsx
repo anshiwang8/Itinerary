@@ -31,7 +31,7 @@ export interface MapStop {
   startTime: string | null;
   endTime: string | null;
   reason?: string;
-  legModeToNext?: "transit" | "walk" | "unknown";
+  legModeToNext?: "transit" | "walk" | "driving" | "unknown";
   legIdToNext?: string | null;
   polylineToNext?: string | null;
   /** the same leg step by step, in travel order — the provider's own
@@ -55,7 +55,7 @@ export interface MapHome {
   label: string;
   lat: number;
   lng: number;
-  legModeToNext?: "transit" | "walk" | "unknown";
+  legModeToNext?: "transit" | "walk" | "driving" | "unknown";
   legIdToNext?: string | null;
   polylineToNext?: string | null;
   pathSegmentsToNext?: PathSegment[] | null;
@@ -307,7 +307,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
         const segs: {
           from: google.maps.LatLngLiteral;
           to: google.maps.LatLngLiteral;
-          mode?: "transit" | "walk" | "unknown";
+          mode?: "transit" | "walk" | "driving" | "unknown";
           encoded?: string | null;
           pathSegments?: PathSegment[] | null;
           changed: boolean;
@@ -538,6 +538,11 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
           } else {
             // A transit leg without provider geometry has no honest route
             // shape. Never connect its endpoints with a fabricated ride.
+            //
+            // A DRIVING leg lands here for the same reason and must be
+            // treated the same way, NOT like the walk branch above: a
+            // straight line between two venues is not a road, and drawn on a
+            // street map it reads as one. No geometry, no line.
             continue;
           }
           if (!path) continue;
@@ -547,7 +552,19 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
           const strokeWeight = 2.5;
           const changedPrimaryLayer = seg.changed ? { zIndex: 2 } : {};
           if (seg.changed) addHalo(path, INK, strokeWeight);
-          if (mode === "transit") {
+          if (mode === "driving") {
+            // The third styling case: a solid ink road line, the same
+            // language as a whole-leg walk (this IS real provider geometry),
+            // reached only because `seg.encoded` decoded above.
+            addLine({
+              map,
+              path,
+              strokeColor: INK,
+              strokeOpacity: 0.92,
+              strokeWeight,
+              ...changedPrimaryLayer,
+            });
+          } else if (mode === "transit") {
             addLine({
               map,
               path,

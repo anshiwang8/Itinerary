@@ -3,6 +3,7 @@
 import { ScheduledStop } from "../schedule/schedule";
 import {
   assignTransitPaletteSlots,
+  type PlanTravelMode,
   type TravelLeg,
 } from "../schedule/travel";
 import { HomePoint } from "../schedule/home";
@@ -65,6 +66,24 @@ export interface Itinerary {
    * `ownerIsAnonymous` is recorded at creation rather than looked up later.
    */
   plannedEndISO?: string;
+  /**
+   * How this plan gets around — chosen once at creation from the landing
+   * toggle, never detected from the prompt and never changed by an engine.
+   *
+   * OPTIONAL, exactly like `timeZone` and `plannedEndISO`, and ABSENT MEANS
+   * "transit": every plan stored before this field existed stays valid with
+   * no migration, and reads as the behaviour it was actually built with.
+   *
+   * It is a PLAN-LEVEL INTENT, not a per-leg guarantee. A driving plan
+   * legitimately contains WALK legs wherever a drive is the wrong answer
+   * (`DRIVING_SHORT_LEG_WALK_METERS`), so never infer a leg's mode from it,
+   * and never assume `travelMode === "driving"` means every leg is a drive.
+   *
+   * It is persisted because it outlives the request that knew it — a swap,
+   * a removal or a reroute hours later has to re-price its legs the same
+   * way the plan was built, or the day silently changes how it travels.
+   */
+  travelMode?: PlanTravelMode;
   /** original parse output — the reroute engine re-runs the pipeline with it */
   parsed?: ParsedPrompt;
   /**
@@ -442,7 +461,8 @@ export function createItinerary(
   homeLeg?: TravelLeg | null,
   home?: HomePoint | null,
   timeZone?: string | null,
-  plannedEndISO?: string | null
+  plannedEndISO?: string | null,
+  travelMode?: PlanTravelMode | null
 ): Itinerary {
   const itinerary: Itinerary = {
     id: crypto.randomUUID(),
@@ -460,6 +480,9 @@ export function createItinerary(
     ...(home ? { home } : {}),
     ...(timeZone ? { timeZone } : {}),
     ...(plannedEndISO ? { plannedEndISO } : {}),
+    // "transit" is the ABSENT meaning, so it is never written out — a
+    // transit plan stays byte-identical to a pre-drive-mode one.
+    ...(travelMode === "driving" ? { travelMode } : {}),
     ...(parsed ? { parsed } : {}),
   };
   return itinerary;

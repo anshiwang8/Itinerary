@@ -192,6 +192,9 @@ const MAPS_STUB = String.raw`
       "visibility-walk-decoded": [[43.649, -79.42], [43.6495, -79.4195], [43.65, -79.419]],
       "visibility-walk-manual": [[43.651, -79.418], [43.6515, -79.4175], [43.652, -79.417]],
       "visibility-transit-changed": [[43.652, -79.417], [43.6525, -79.4165], [43.653, -79.416]],
+      // a driving leg's real road shape: three points that do NOT match the
+      // straight line between its two venues
+      "drive-road": [[43.648, -79.4214], [43.6505, -79.4155], [43.656, -79.405]],
     };
     const path = paths[encoded];
     if (!path) return [];
@@ -1515,6 +1518,107 @@ test("@mock embedded walk styling stays neutral and changed emphasis remains dot
         rideColors.has(line.iconFillColor)
     )
   ).toBe(false);
+});
+
+// ── drive-vs-transit mode, Stage 1: the driving display ──
+// The strip's leg card is a ternary whose final ELSE is the WALK arm, so a
+// mode with no branch of its own renders as a walk with a walking-safety
+// caution under a BUS glyph — and TypeScript cannot catch it, because the
+// else makes the ternary total. These are the tests that bite when the
+// explicit driving branch is removed.
+test("@mock a driving leg renders as Drive, not as a walk, and stays selectable", async ({
+  page,
+}) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+  await page.getByRole("button", { name: "Show driving specimen" }).click();
+
+  const strip = page.getByTestId("driving-strip-specimen");
+  const driving = strip.locator('[role="listitem"][aria-label="driving leg"]');
+  await expect(driving).toHaveCount(2);
+
+  const first = driving.first();
+  await expect(first.locator(".lstrip__legline")).toHaveText("Drive");
+  await expect(first.locator(".lstrip__legmeta")).toHaveText("22 min");
+  // leave · arrive, the scheduler's own two instants
+  await expect(first.locator(".lstrip__legtimes")).toContainText("leave");
+  await expect(first.locator(".lstrip__legtimes")).toContainText("arrive");
+
+  // NOT the walk arm: no pedestrian caution anywhere on a driving leg.
+  await expect(driving.locator(".lstrip__walkwarning")).toHaveCount(0);
+  // NOT the transit arm either: no route badges, no board/alight timeline.
+  await expect(driving.locator(".lstrip__bubble")).toHaveCount(0);
+  await expect(driving.locator(".lstrip__timeline")).toHaveCount(0);
+
+  // The CAR glyph, not the bus fallback every non-walk mode used to get.
+  await expect(first.locator(".lstrip__legicon svg path")).toHaveAttribute(
+    "d",
+    /^M18\.9/
+  );
+
+  // Selectable: an identified driving leg is a native button that reports
+  // its pressed state, even though there is nothing to expand.
+  const button = first.locator("button.lstrip__legselect");
+  await expect(button).toHaveCount(1);
+  await expect(button).toHaveAttribute("aria-pressed", "false");
+  // and no timeline disclosure state is invented for it
+  await expect(button).not.toHaveAttribute("aria-expanded", /.*/);
+  await button.click();
+  await expect(button).toHaveAttribute("aria-pressed", "true");
+
+  // The invariant on screen: a driving PLAN legitimately contains a WALK leg.
+  await expect(
+    strip.locator('[role="listitem"][aria-label="walking leg"]')
+  ).toHaveCount(1);
+});
+
+test("@mock a driving leg draws its real road line, and none at all without geometry", async ({
+  page,
+}) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+  await page.getByRole("button", { name: "Show driving specimen" }).click();
+
+  const road: Array<[number, number]> = [
+    [43.648, -79.4214],
+    [43.6505, -79.4155],
+    [43.656, -79.405],
+  ];
+  await expect
+    .poll(async () =>
+      (await polylineSnapshots(page))
+        .filter((line) => line.active)
+        .map((line) => JSON.stringify(line.path))
+    )
+    .toContain(JSON.stringify(road));
+
+  const active = (await polylineSnapshots(page)).filter((line) => line.active);
+  const drive = active.find((line) => JSON.stringify(line.path) === JSON.stringify(road))!;
+  // Solid ink, the same language as a whole-leg walk — this IS real provider
+  // geometry — and never a dotted or symbol-icon line.
+  expect(drive.strokeColor).toBe("#2E6F8A");
+  expect(drive.strokeOpacity).toBe(0.92);
+  expect(drive.strokeWeight).toBe(2.5);
+  expect(drive.hasIcons).toBe(false);
+
+  // THE GEOMETRY RULE: the second driving leg has no provider polyline, so it
+  // draws NOTHING. A straight line between two venues is not a road, and the
+  // walk branch's endpoint fallback must never be inherited here.
+  const fakeRoad = JSON.stringify([
+    [43.656, -79.405],
+    [43.66, -79.398],
+  ]);
+  expect(active.map((line) => JSON.stringify(line.path))).not.toContain(fakeRoad);
+
+  // The plain WALK leg in the same driving plan keeps its own existing
+  // endpoint fallback — that behaviour is deliberately untouched.
+  const walkFallback = JSON.stringify([
+    [43.66, -79.398],
+    [43.662, -79.395],
+  ]);
+  expect(active.map((line) => JSON.stringify(line.path))).toContain(walkFallback);
 });
 
 test("@mock route overlays are replaced on rerender and detached on unmount", async ({

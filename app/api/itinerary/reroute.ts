@@ -31,6 +31,7 @@ import { DEFAULT_ZONE } from "../../lib/zoneTime";
 import {
   getSingleLeg as realGetSingleLeg,
   LatLng,
+  PlanTravelMode,
   TravelLeg,
 } from "../schedule/travel";
 import { isMockMode, mockRerouteDeps } from "../_mock/fixtures";
@@ -87,8 +88,11 @@ const INCOMPLETE_REASON =
 const UNSTABLE_REASON =
   "Couldn't find a complete reroute that stays valid at the recalculated arrival times — the original plan is unchanged.";
 
-function realDeps(): RerouteDeps {
-  if (isMockMode()) return mockRerouteDeps();
+/** Bound once per reroute, exactly as `swap.ts`'s `realDeps` binds it: the
+ *  whole tail this engine replans belongs to one plan, and one plan travels
+ *  one way. Absent = transit, the meaning of an absent stored `travelMode`. */
+function realDeps(planMode: PlanTravelMode = "transit"): RerouteDeps {
+  if (isMockMode()) return mockRerouteDeps(planMode);
   return {
     searchPools: (parsed, categories) =>
       realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories),
@@ -109,7 +113,12 @@ function realDeps(): RerouteDeps {
         destination,
         fromIndex,
         departureTime,
-        excludeTransit
+        // `excludeTransit` is the transit_cancelled disruption, which has no
+        // driving meaning; on a driving plan it is inert. Stage 1 leaves it
+        // that way rather than inventing a driving disruption.
+        excludeTransit,
+        undefined,
+        planMode
       ),
     getWeather: (lat, lng) =>
       fetchWeatherHours(process.env.GOOGLE_WEATHER_API_KEY, lat, lng),
@@ -222,7 +231,7 @@ export async function rerouteItinerary(
   now: Date,
   depsIn: Partial<RerouteDeps> = {}
 ): Promise<RerouteResult> {
-  const deps = { ...realDeps(), ...depsIn };
+  const deps = { ...realDeps(itinerary.travelMode), ...depsIn };
   const work = cloneItinerary(itinerary);
   const timeZone = work.timeZone ?? DEFAULT_ZONE;
 

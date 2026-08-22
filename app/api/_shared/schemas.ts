@@ -1,12 +1,13 @@
 import type { ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
 import type { LatLng } from "../schedule/travel";
-import type { PathSegment, TravelLeg } from "../schedule/travel";
+import type { PathSegment, PlanTravelMode, TravelLeg } from "../schedule/travel";
 import {
   MAX_TRAVEL_ID_CHARS,
   MAX_PATH_POLYLINE_CHARS,
   MAX_PATH_SEGMENTS_PER_LEG,
   TRANSIT_PALETTE_CAPACITY,
   TRAVEL_ID_PATTERN,
+  isPlanTravelMode,
 } from "../schedule/travel";
 import type { ScheduledStop } from "../schedule/schedule";
 import type { HomePoint } from "../schedule/home";
@@ -301,6 +302,21 @@ export function parseOptionalInstant(value: unknown, field: string): string | un
 export function parseOptionalTimeZone(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (!validIanaTimeZone(value)) badRequest("`timeZone` must be a valid IANA timezone.");
+  return value;
+}
+
+/**
+ * The plan's travel mode, mirroring `parseOptionalTimeZone`. UNDEFINED is a
+ * valid answer and means "transit" downstream — every plan stored before
+ * this field existed, and every transit plan since, simply omits it. An
+ * unrecognised string is rejected rather than coerced: a mode we do not
+ * know how to route is not a mode.
+ */
+export function parseOptionalTravelMode(value: unknown): PlanTravelMode | undefined {
+  if (value === undefined) return undefined;
+  if (!isPlanTravelMode(value)) {
+    badRequest("`travelMode` must be \"transit\" or \"driving\".");
+  }
   return value;
 }
 
@@ -702,7 +718,10 @@ export function parseTravelLegs(value: unknown, field = "legs"): TravelLeg[] {
     ) {
       badRequest(`\`${field}[${index}].fromIndex\` is invalid.`);
     }
-    if (!["transit", "walk", "unknown"].includes(String(entry.mode))) {
+    // "driving" joins the leg modes here rather than at the plan level: a
+    // leg's mode is what actually happened on it, and a driving PLAN
+    // legitimately stores walk legs alongside its drives.
+    if (!["transit", "walk", "driving", "unknown"].includes(String(entry.mode))) {
       badRequest(`\`${field}[${index}].mode\` is invalid.`);
     }
     for (const key of ["rawMinutes", "marginMinutes", "totalMinutes"] as const) {

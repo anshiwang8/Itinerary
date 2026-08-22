@@ -397,7 +397,9 @@ export async function removeStop(
   now: Date,
   depsIn: Partial<SwapDeps> = {}
 ): Promise<RemoveResult> {
-  const deps = { ...realDeps(), ...depsIn };
+  // Removal re-prices the bridging leg and everything after it, so it has
+  // to travel the way the plan does. Same one-line binding as swap/reroute.
+  const deps = { ...realDeps(itinerary.travelMode), ...depsIn };
   const work = cloneProposal(itinerary);
   withStatuses(work, now);
   const floor = floorTime(work, now);

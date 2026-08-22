@@ -27,6 +27,7 @@ import {
   parseHomePoint,
   parseOptionalInstant,
   parseOptionalTimeZone,
+  parseOptionalTravelMode,
   parseParsedPrompt,
   parseScheduledStops,
   parseTravelLegs,
@@ -60,6 +61,9 @@ export async function POST(request: NextRequest) {
     // prompts name no finish, and absent means "no ceiling" downstream rather
     // than a default anyone invented.
     const plannedEndISO = parseOptionalInstant(body.plannedEndISO, "plannedEndISO");
+    // How the plan travels, chosen at the landing toggle. Absent = transit,
+    // which is what every plan created before drive mode sends.
+    const travelMode = parseOptionalTravelMode(body.travelMode);
 
     // WHO is creating this, verified from the token — never from the body.
     // Null (mock e2e, no Admin credentials, guest before anonymous sign-in
@@ -67,7 +71,16 @@ export async function POST(request: NextRequest) {
     // did before this slice.
     const caller = await verifyCaller(request);
     const itinerary = stampOwner(
-      createItinerary(stops, legs, parsed, homeLeg, home, timeZone, plannedEndISO),
+      createItinerary(
+        stops,
+        legs,
+        parsed,
+        homeLeg,
+        home,
+        timeZone,
+        plannedEndISO,
+        travelMode
+      ),
       caller
     );
     const stored = await saveItinerary(itinerary);

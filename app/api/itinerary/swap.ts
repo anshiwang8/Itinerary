@@ -48,6 +48,7 @@ import {
   getSingleLeg as realGetSingleLeg,
   haversineMeters,
   LatLng,
+  PlanTravelMode,
   TravelLeg,
 } from "../schedule/travel";
 import { HOME, HOME_LEG_INDEX } from "../schedule/home";
@@ -621,9 +622,18 @@ export async function interpretRefinement(
   }
 }
 
-export function realDeps(): SwapDeps {
+/**
+ * `planMode` is bound HERE, once, rather than threaded through the six
+ * `deps.getSingleLeg(...)` call sites inside the engine: every leg this
+ * mutation re-prices belongs to one plan, and one plan travels one way.
+ * A caller that omits it gets transit, which is what an absent stored
+ * `travelMode` means.
+ */
+export function realDeps(planMode: PlanTravelMode = "transit"): SwapDeps {
   // e2e fixture seam — deterministic interpret/search/select/legs/hours
-  if (isMockMode()) return mockSwapDeps(parseTimeExpr, parseDurationExpr, usableByHours);
+  if (isMockMode()) {
+    return mockSwapDeps(parseTimeExpr, parseDurationExpr, usableByHours, planMode);
+  }
   return {
     interpret: (parsed, category, currentStartISO, refinement) =>
       interpretRefinement(process.env.OPENROUTER_API_KEY ?? "", parsed, category, currentStartISO, refinement),
@@ -640,7 +650,16 @@ export function realDeps(): SwapDeps {
         )
       ),
     getSingleLeg: (origin, destination, fromIndex, departureTime, excludeTransit) =>
-      realGetSingleLeg(process.env.GOOGLE_ROUTES_API_KEY ?? "", origin, destination, fromIndex, departureTime, excludeTransit),
+      realGetSingleLeg(
+        process.env.GOOGLE_ROUTES_API_KEY ?? "",
+        origin,
+        destination,
+        fromIndex,
+        departureTime,
+        excludeTransit,
+        undefined,
+        planMode
+      ),
     isUsableAt: usableByHours,
     getWeather: (lat, lng) => fetchWeatherHours(process.env.GOOGLE_WEATHER_API_KEY, lat, lng),
   };
@@ -1165,7 +1184,7 @@ export async function swapStop(
    *  the swap is re-run from scratch rather than replaying a cached plan. */
   endTimeAccepted = false
 ): Promise<SwapResult> {
-  const deps = { ...realDeps(), ...depsIn };
+  const deps = { ...realDeps(itinerary.travelMode), ...depsIn };
   const work = cloneProposal(itinerary);
   withStatuses(work, now);
   const floor = floorTime(work, now);

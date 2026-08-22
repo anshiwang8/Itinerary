@@ -24,7 +24,7 @@ import { originDisplayLabel } from "./lib/locationLabels";
 
 export interface StripLeg {
   legId?: string | null;
-  mode: "transit" | "walk" | "unknown";
+  mode: "transit" | "walk" | "driving" | "unknown";
   totalMinutes: number;
   marginMinutes: number;
   lineName?: string | null;
@@ -101,6 +101,16 @@ const PRICE_LABEL: Record<string, string> = {
 };
 
 function TransitIcon({ mode }: { mode: StripLeg["mode"] }) {
+  if (mode === "driving") {
+    // A car. It exists because the mode ternary below used to have no
+    // driving branch: a drive leg fell through to the WALK arm and was
+    // rendered with the walking safety caution under a BUS glyph.
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M18.9 6.6A1.5 1.5 0 0 0 17.5 5.5h-11A1.5 1.5 0 0 0 5.1 6.6L3 12.7V20a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1.5h12V20a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-7.3zM6.8 7.5h10.4l1.4 4.1H5.4zM6.5 16.5a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5zm11 0a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5z" />
+      </svg>
+    );
+  }
   if (mode === "walk") {
     return (
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -246,9 +256,13 @@ function LegCard({
         rides: segments,
       })
     : null;
+  const isDriving = leg.mode === "driving";
   const identified = typeof leg.legId === "string";
+  // A driving leg is selectable even though it has no timeline to expand:
+  // selecting it is what focuses the map on that leg and shows its duration
+  // pointer, the way a maps app puts the time on the route you tapped.
   const routeSelectable =
-    identified && (isTransit || (isWalk && origin === "interstop"));
+    identified && (isTransit || isDriving || (isWalk && origin === "interstop"));
   const manuallySelected = routeSelectable
     ? manualLegId === leg.legId
     : isTransit && !identified
@@ -266,7 +280,9 @@ function LegCard({
       ? "transit leg"
       : leg.mode === "walk"
         ? "walking leg"
-        : "travel estimate";
+        : leg.mode === "driving"
+          ? "driving leg"
+          : "travel estimate";
   const at = (iso: string) => formatStopTime(iso, new Date(), timeZone);
 
   // The leg's rides as badge + place, in riding order. Empty on a walk, on
@@ -314,6 +330,31 @@ function LegCard({
       {glyph}
       <span className="lstrip__legline">walk</span>
       <span className="lstrip__legmeta">{leg.totalMinutes} min</span>
+    </>
+  );
+
+  // A DRIVING leg says what it is, how long it takes, and when you leave and
+  // arrive — and nothing else. No route badges (there is no route), no
+  // board/alight timeline (nothing is published), no transfer rows, and NO
+  // walking caution: that caution is a provider requirement about pedestrian
+  // paths and is a lie on a leg nobody walks.
+  //
+  // The transit decorations degrade on their own — `legDetail`/`legSegments`
+  // return null off transit, `shouldShowTimeline` refuses on `!isTransit`,
+  // and the palette only mints slots from transit steps — so this branch adds
+  // the base row rather than suppressing anything.
+  const driveSummary = (
+    <>
+      {glyph}
+      <span className="lstrip__legline">Drive</span>
+      <span className="lstrip__legmeta">{leg.totalMinutes} min</span>
+      {(leg.leaveISO || leg.arriveISO) && (
+        <span className="lstrip__legtimes">
+          {leg.leaveISO ? `leave ${at(leg.leaveISO)}` : null}
+          {leg.leaveISO && leg.arriveISO ? " · " : null}
+          {leg.arriveISO ? `arrive ${at(leg.arriveISO)}` : null}
+        </span>
+      )}
     </>
   );
 
@@ -396,6 +437,22 @@ function LegCard({
           <div className="lstrip__legline">travel time unavailable</div>
           <div className="lstrip__legmeta">~{leg.totalMinutes} min (estimated)</div>
         </>
+      ) : isDriving ? (
+        // EXPLICIT, and it has to be: the final `else` below is the WALK arm,
+        // so a mode with no branch of its own is silently rendered as a walk.
+        // TypeScript cannot catch that — the else makes the ternary total.
+        routeSelectable ? (
+          <button
+            type="button"
+            className="lstrip__legselect"
+            aria-pressed={manuallySelected}
+            onClick={() => onToggleManualLeg(leg.legId!)}
+          >
+            {driveSummary}
+          </button>
+        ) : (
+          driveSummary
+        )
       ) : (
         <>
           {routeSelectable ? (

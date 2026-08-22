@@ -173,6 +173,11 @@ button { font-family: var(--grot); cursor: pointer; }
   font-family: var(--grot); font-size: 10px; font-weight: 600;
   letter-spacing: 0.13em; text-transform: uppercase; color: var(--label);
   margin-bottom: 3px;
+  /* One line, always. These labels are two words at most, and a wrapped one
+     is taller than its neighbours — which pushes its own input below theirs
+     and breaks the tablet row's alignment. It first bit when the travel-mode
+     section narrowed the others enough for "Starting location" to wrap. */
+  white-space: nowrap;
 }
 /* the three fields share one look inside the pill. `.prompt__input` stays
    on the SEARCH field only — the e2e helpers locate it strictly, and it is
@@ -186,6 +191,30 @@ button { font-family: var(--grot); cursor: pointer; }
 .prompt__input::placeholder,
 .prompt__sec .where__input::placeholder { color: var(--ink-faint); }
 .prompt__sec .where__input:focus { border-color: transparent; }
+
+/* ── travel-mode toggle (Transit / Drive) ──
+   A fourth section of the same pill, so it inherits `.prompt__sec`'s
+   divider, padding and label. Two segmented options inside one rounded
+   track: the selected one is the accent, the other is quiet. */
+.prompt__sec--mode { flex: 0 0 auto; }
+.modetoggle {
+  display: inline-flex; align-items: stretch; align-self: flex-start;
+  background: var(--paper); border-radius: 999px; padding: 3px;
+  min-height: 44px;
+}
+.modetoggle__opt {
+  border: none; background: transparent; border-radius: 999px;
+  padding: 0 14px; min-height: 38px;
+  font-family: var(--grot); font-size: 13px; font-weight: 500;
+  letter-spacing: 0.01em; color: var(--ink-soft); cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.modetoggle__opt:hover:not(.modetoggle__opt--on):not([disabled]) { color: var(--ink); }
+.modetoggle__opt--on {
+  background: var(--accent); color: #FFFFFF;
+  box-shadow: 0 1px 4px rgba(42, 120, 144, 0.28);
+}
+.modetoggle__opt[disabled] { opacity: 0.5; cursor: default; }
 
 /* pipeline status, surfaced under the pill now that the go button is an
    icon rather than a text button */
@@ -1512,9 +1541,14 @@ button { font-family: var(--grot); cursor: pointer; }
     border-radius: 24px; padding: 6px 6px 64px; margin-top: 22px;
   }
   .prompt__sec,
-  .prompt__sec--search {
+  .prompt__sec--search,
+  .prompt__sec--mode {
     flex: none; width: 100%; padding: 10px 18px;
   }
+  /* stacked, the toggle spans the row like every other field; both options
+     keep the 44px target the primary controls hold to */
+  .modetoggle { align-self: stretch; }
+  .modetoggle__opt { flex: 1 1 0; min-height: 38px; }
   .prompt__sec + .prompt__sec::before {
     left: 18px; right: 18px; top: 0; bottom: auto;
     width: auto; height: 1px;

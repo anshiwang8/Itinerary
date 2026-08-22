@@ -7,7 +7,7 @@ import {
   ScheduledStop,
   WINDOW_UNDERFILL_LOG_MINUTES,
 } from "./api/schedule/schedule";
-import { TravelLeg } from "./api/schedule/travel";
+import { PlanTravelMode, TravelLeg } from "./api/schedule/travel";
 import { HOME, splitHomeLeg } from "./api/schedule/home";
 import { Itinerary } from "./api/itinerary/store";
 import { formatStopTime } from "./lib/timeLabels";
@@ -240,8 +240,10 @@ function WeatherIcon({ condition, precip }: { condition: string | null; precip: 
 // transit-leg detail line, e.g. "505 Dundas · 11 stops · 22 min" — or,
 // on a multi-ride leg, "1 transfer · 47 min": the first ride's line name
 // and stop count would misread as the whole journey's (the bubbles carry
-// the line identities)
+// the line identities). A DRIVING leg has no route to name, so its label is
+// the duration pointer a maps app puts on the road it drew.
 function legDetail(leg?: TravelLeg | null): string | null {
+  if (leg?.mode === "driving") return `Drive · ${leg.totalMinutes} min`;
   if (!leg || leg.mode !== "transit" || !leg.transit) return null;
   const n = leg.transitSegments?.length ?? 1;
   if (n > 1) return `${n - 1} transfer${n > 2 ? "s" : ""} · ${leg.totalMinutes} min`;
@@ -548,6 +550,11 @@ export default function Home() {
   // defaulting to the city centre.
   const [city, setCity] = useState("Toronto");
   const [startAddress, setStartAddress] = useState("");
+  // How this plan gets around. A plain STORED CHOICE, made once at creation:
+  // no LLM is asked, nothing is inferred from the prompt, and the day is
+  // built, re-priced and mutated in whichever mode was chosen here. The
+  // default is transit, matching the absent-means-transit stored contract.
+  const [travelMode, setTravelMode] = useState<PlanTravelMode>("transit");
   const [homePoint, setHomePoint] = useState<{ label: string; location: { latitude: number; longitude: number } } | null>(null);
   // the plan's resolved IANA zone — all scheduling + labels use it
   const [planZone, setPlanZone] = useState("America/Toronto");
@@ -1167,6 +1174,7 @@ export default function Home() {
               points: [hp.location, ...points],
               departureTime: startISO,
               dwellMinutes,
+              travelMode,
             }),
             parse: parseTravelPayload,
           });
@@ -1796,6 +1804,10 @@ export default function Home() {
           ...(home ? { home } : {}),
           ...(timeZone ? { timeZone } : {}),
           ...(plannedEndISO ? { plannedEndISO } : {}),
+          // The plan's mode has to OUTLIVE this request: a swap or removal
+          // hours later re-prices legs and must travel the same way.
+          // Omitted for transit, which is the absent meaning.
+          ...(travelMode === "driving" ? { travelMode } : {}),
         }),
         parse: parseCreatePayload,
       });
@@ -2908,6 +2920,37 @@ export default function Home() {
               placeholder="optional — city centre"
               aria-label="Starting address"
             />
+          </div>
+          {/* A fourth labelled section in the same pill, not a new UI system:
+              two segmented buttons with the same small-caps label the other
+              three carry. A radiogroup rather than a checkbox, because the
+              choice is between two named modes, not on/off. */}
+          <div className="prompt__sec prompt__sec--mode">
+            <span className="prompt__label" id="q-mode-label">
+              Getting around
+            </span>
+            <div
+              className="modetoggle"
+              role="radiogroup"
+              aria-labelledby="q-mode-label"
+            >
+              {(["transit", "driving"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  role="radio"
+                  className={
+                    "modetoggle__opt" +
+                    (travelMode === mode ? " modetoggle__opt--on" : "")
+                  }
+                  aria-checked={travelMode === mode}
+                  disabled={busy}
+                  onClick={() => setTravelMode(mode)}
+                >
+                  {mode === "transit" ? "Transit" : "Drive"}
+                </button>
+              ))}
+            </div>
           </div>
           <button
             type="submit"

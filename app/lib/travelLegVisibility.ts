@@ -2,7 +2,7 @@ import { legUnderway } from "./transitDetail";
 
 export interface VisibilityLeg {
   legId?: string | null;
-  mode?: "transit" | "walk" | "unknown";
+  mode?: "transit" | "walk" | "driving" | "unknown";
   leaveISO?: string | null;
   arriveISO?: string | null;
 }
@@ -12,13 +12,17 @@ export interface VisibilityStop {
   outbound?: VisibilityLeg | null;
 }
 
+/** The modes that have a complete leg to show: provider-backed geometry and
+ *  a real window. "driving" joins transit and walk on the same terms —
+ *  "unknown" is an estimate and still shows nothing. */
+function displayableLegMode(mode: VisibilityLeg["mode"]): boolean {
+  return mode === "transit" || mode === "walk" || mode === "driving";
+}
+
 function identifiedDisplayableLeg(
   leg: VisibilityLeg | null | undefined
-): leg is VisibilityLeg & { legId: string; mode: "transit" | "walk" } {
-  return (
-    (leg?.mode === "transit" || leg?.mode === "walk") &&
-    typeof leg.legId === "string"
-  );
+): leg is VisibilityLeg & { legId: string; mode: "transit" | "walk" | "driving" } {
+  return displayableLegMode(leg?.mode) && typeof leg?.legId === "string";
 }
 
 function instantMs(value: unknown): number | null {
@@ -38,9 +42,14 @@ export function automaticTravelLegId(input: {
   );
   if (underway && typeof underway.legId === "string") return underway.legId;
 
+  // The pre-start home exception. It covers the VEHICULAR home leg —
+  // transit or driving — because both describe a journey the traveller has
+  // not begun yet and both are what the map should be showing from plan
+  // creation. Home WALK is deliberately not here: it has its own
+  // always-visible compatibility rule in `travelLegVisible`.
   const firstStopStartMs = instantMs(input.home?.arriveISO);
   if (
-    input.home?.mode === "transit" &&
+    (input.home?.mode === "transit" || input.home?.mode === "driving") &&
     typeof input.home.legId === "string" &&
     Number.isFinite(input.nowMs) &&
     firstStopStartMs !== null &&
@@ -93,7 +102,7 @@ export function travelLegVisible(input: {
   visibleLegIds: readonly string[];
   legacyTransitVisibility: boolean;
 }): boolean {
-  if (input.mode !== "transit" && input.mode !== "walk") return false;
+  if (!displayableLegMode(input.mode)) return false;
   if (typeof input.legId !== "string") return true;
   if (input.mode === "transit" && input.legacyTransitVisibility) return true;
   if (input.origin === "home" && input.mode === "walk") return true;

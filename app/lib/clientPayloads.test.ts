@@ -652,6 +652,51 @@ const cases: Array<[string, () => void]> = [
         },
       };
       assert.strictEqual(parseItineraryPayload(valid).id, "plan-1");
+      // ── the plan's travel mode (browser half of the mode gates) ──
+      // ABSENT is valid and means transit: `valid` above omits it, which is
+      // every plan stored before drive mode.
+      assert.strictEqual(parseItineraryPayload(valid).travelMode, undefined);
+      assert.strictEqual(
+        parseItineraryPayload({ ...valid, travelMode: "driving" }).travelMode,
+        "driving"
+      );
+      assert.strictEqual(
+        parseItineraryPayload({ ...valid, travelMode: "transit" }).travelMode,
+        "transit"
+      );
+      for (const bad of ["walk", "DRIVE", "car", "", null, 1, {}]) {
+        assert.throws(
+          () => parseItineraryPayload({ ...valid, travelMode: bad }),
+          `an unknown plan mode is refused on read: ${String(bad)}`
+        );
+      }
+      // A DRIVING leg reads back, and it coexists with a walk leg in the
+      // same plan — mode is plan-level intent, not a per-leg guarantee.
+      const drivingLeg = {
+        fromIndex: 0,
+        mode: "driving",
+        rawMinutes: 12,
+        marginMinutes: 10,
+        totalMinutes: 22,
+        distanceMeters: 5_400,
+        encodedPolyline: "enc_drive",
+      };
+      const drivingPlan = parseItineraryPayload({
+        ...valid,
+        travelMode: "driving",
+        legs: [drivingLeg],
+        homeLeg: { ...walkLeg, fromIndex: -1 },
+      });
+      assert.strictEqual(drivingPlan.legs[0].mode, "driving");
+      assert.strictEqual(drivingPlan.homeLeg?.mode, "walk");
+      assert.strictEqual(
+        parseTravelPayload({ legs: [drivingLeg] }).legs[0].mode,
+        "driving"
+      );
+      assert.throws(
+        () => parseTravelPayload({ legs: [{ ...drivingLeg, mode: "teleport" }] }),
+        "the leg-mode allowlist is still closed"
+      );
       assert.throws(() =>
         parseItineraryPayload({
           ...valid,

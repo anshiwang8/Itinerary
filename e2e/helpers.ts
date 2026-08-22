@@ -12,9 +12,20 @@ import { expect, Locator, Page } from "@playwright/test";
  * to render (strip + map pins). Live pipeline — allow up to ~90s.
  * Throws with the interface's own message if the pipeline fails loud.
  */
-export async function planEvening(page: Page, prompt: string): Promise<void> {
+export async function planEvening(
+  page: Page,
+  prompt: string,
+  /** The landing travel-mode toggle. Omitted = leave it on its default,
+   *  which is Transit — so every existing spec is byte-identical. */
+  travelMode?: "transit" | "driving"
+): Promise<void> {
   await page.goto("/");
   await page.locator(".prompt__input").fill(prompt);
+  if (travelMode) {
+    await page
+      .getByRole("radio", { name: travelMode === "driving" ? "Drive" : "Transit" })
+      .click();
+  }
   await page.locator(".prompt__go").click();
 
   // a thin prompt may surface the clarify step first — skipping runs the
