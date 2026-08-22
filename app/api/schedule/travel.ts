@@ -1,5 +1,10 @@
 import { finiteNumber, isRecord, logEvent } from "../_shared/http";
-import { fetchProvider, readProviderJson, requireProviderRecord } from "../_shared/provider";
+import {
+  ProviderError,
+  fetchProvider,
+  readProviderJson,
+  requireProviderRecord,
+} from "../_shared/provider";
 
 // Real travel legs between consecutive stops via Routes API
 // computeRoutes — real geometry (encoded polylines) and transit details
@@ -830,6 +835,23 @@ async function computeRoute(
   // it's in the future.
   if (departureTime && new Date(departureTime).getTime() > Date.now()) {
     body.departureTime = departureTime;
+    // DRIVE ONLY — and gated in BOTH directions, because the provider
+    // rejects the wrong pairing on either side. Routes v2 defaults a DRIVE
+    // to TRAFFIC_UNAWARE, under which a departureTime is ILLEGAL: the call
+    // 400s ("Timestamp cannot be set for TRAFFIC_UNAWARE routing mode"),
+    // the catch below swallows it, the DRIVE leg comes back null, and
+    // `buildDrivingLeg` falls through to its WALK arm — which is how a
+    // 30 km drive was being scheduled as a 371-minute walk. The reverse is
+    // just as hard a rejection: a live probe had WALK answer "Routing
+    // preference cannot be set for WALK or BICYCLE" and TRANSIT answer the
+    // same for TRANSIT, so the transit and walk bodies must stay
+    // byte-identical to what they were before drive mode existed.
+    //
+    // TRAFFIC_AWARE, deliberately NOT TRAFFIC_AWARE_OPTIMAL: both accept a
+    // departureTime and both fix the 400, but OPTIMAL escalates the call to
+    // the Routes Preferred SKU. This is the traffic-aware setting that
+    // stays on the standard one.
+    if (travelMode === "DRIVE") body.routingPreference = "TRAFFIC_AWARE";
   }
   try {
     const res = await fetchProvider("routes", COMPUTE_ROUTES_URL, {
@@ -862,10 +884,22 @@ async function computeRoute(
       }
     }
     return data as ComputeRoutesResponse;
-  } catch {
+  } catch (err) {
     // Per-mode failure is absorbed by the other mode or the explicit
-    // unknown fallback. Never log the upstream body or thrown message.
-    logEvent("error", "routes_mode_unavailable", { travelMode });
+    // unknown fallback. Still never log the upstream body or thrown message
+    // — but DO log the status, which `ProviderFailure` already models and
+    // which is safe. Discarding it is what made this event unreadable: a
+    // 400 (our own request is malformed) looked exactly like a provider
+    // outage, so the DRIVE leg simply went quiet and every driving plan
+    // walked instead. A 4xx here means fix the REQUEST; a 5xx means the
+    // provider is having a bad day. Absent means the call never reached
+    // them (timeout or transport), since `fetchProvider` throws with no
+    // `failure` — and JSON.stringify drops the key rather than printing null.
+    logEvent("error", "routes_mode_unavailable", {
+      travelMode,
+      upstreamStatus:
+        err instanceof ProviderError ? err.failure?.upstreamStatus : undefined,
+    });
     return null;
   }
 }
