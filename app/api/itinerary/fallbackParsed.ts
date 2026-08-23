@@ -10,7 +10,7 @@ import type { Itinerary } from "./store";
 
 /** The refusal shown when a re-search can't know where to look. */
 export const UNKNOWN_LOCATION_MESSAGE =
-  "This plan is missing the details I'd need to search again — try planning it fresh.";
+  "This plan is missing the details I'd need to search again, try planning it fresh.";
 
 /**
  * A minimal ParsedPrompt for an itinerary that has none, or null when we

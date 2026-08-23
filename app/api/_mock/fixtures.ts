@@ -190,7 +190,7 @@ const DUMPLING_CLOSED: Place = {
   rating: 4.6,
   priceLevel: "PRICE_LEVEL_INEXPENSIVE",
   businessStatus: "CLOSED_PERMANENTLY",
-  editorialSummary: { text: "Beloved dumpling counter — now permanently closed." },
+  editorialSummary: { text: "Beloved dumpling counter, now permanently closed." },
 };
 // no currentOpeningHours → keep-on-missing (never dropped on hours), so the
 // widen path recovers deterministically regardless of the e2e's run-hour
@@ -214,7 +214,7 @@ const BAO_CLOSED: Place = {
   rating: 4.7,
   priceLevel: "PRICE_LEVEL_INEXPENSIVE",
   businessStatus: "CLOSED_PERMANENTLY",
-  editorialSummary: { text: "Steamed-bun counter — now permanently closed." },
+  editorialSummary: { text: "Steamed-bun counter, now permanently closed." },
 };
 const BAO_OPEN: Place = {
   id: "fx_bao_open",
@@ -279,7 +279,7 @@ const RIVERSIDE_BAR: Place[] = [
     "PRICE_LEVEL_MODERATE",
     16,
     2,
-    "A long bar clear across the city — getting there is most of the trip."
+    "A long bar clear across the city, getting there is most of the trip."
   ),
 ];
 

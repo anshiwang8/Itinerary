@@ -1080,7 +1080,7 @@ const cases: Array<[string, () => Promise<void>]> = [
       const it = mkItinerary();
       const res = await swapStop(it, 1, "somewhere closer", new Date(T(18, 0)), mkDeps({ pool: [far] }));
       assert.strictEqual(res.swapped, false);
-      if (!res.swapped) assert.match(res.reason, /closer than Bar Spot — it's already the closest/);
+      if (!res.swapped) assert.match(res.reason, /closer than Bar Spot, it's already the closest/);
       assert.strictEqual(it.stops[1].id, "b1"); // untouched
     },
   ],
@@ -1110,7 +1110,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         mkDeps({ pool: [mkVenue("b1", "Bar Spot")] })
       );
       assert.strictEqual(res.swapped, false);
-      if (!res.swapped) assert.match(res.reason, /Couldn't find another bar that fits — keeping Bar Spot/);
+      if (!res.swapped) assert.match(res.reason, /Couldn't find another bar that fits, keeping Bar Spot/);
       // original bar untouched
       assert.strictEqual(it.stops[1].id, "b1");
       assert.strictEqual(it.stops[1].start_time, T(21, 0));

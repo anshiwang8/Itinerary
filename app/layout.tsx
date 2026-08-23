@@ -4,7 +4,7 @@ import "@fontsource-variable/space-grotesk";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Itinerary — life moves simpler.",
+  title: "Itinerary: time to leave.",
   description: "Plan your day, weather included.",
 };
 

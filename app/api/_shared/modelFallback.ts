@@ -30,8 +30,8 @@ export class AllModelsRateLimitedError extends ApiError {
       503,
       "model_capacity_exhausted",
       retryAfterSeconds !== undefined
-        ? `Busy right now — try again in about ${retryAfterSeconds} seconds.`
-        : "Busy right now — try again in a moment.",
+        ? `Busy right now, try again in about ${retryAfterSeconds} seconds.`
+        : "Busy right now, try again in a moment.",
       retryAfterSeconds !== undefined
         ? { "Retry-After": String(retryAfterSeconds) }
         : undefined

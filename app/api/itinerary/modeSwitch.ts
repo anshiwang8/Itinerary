@@ -246,7 +246,7 @@ export async function switchTravelMode(
     return {
       switched: false,
       reason:
-        "There's nothing left to re-route — every stop is already underway or done.",
+        "There's nothing left to re-route, every stop is already underway or done.",
     };
   }
 
@@ -443,8 +443,8 @@ export async function switchTravelMode(
     to: target,
     reason:
       target === "driving"
-        ? `Now driving${shifted.length > 0 ? " — the times moved to match" : ""}.`
-        : `Now taking transit${shifted.length > 0 ? " — the times moved to match" : ""}.`,
+        ? `Now driving${shifted.length > 0 ? ", the times moved to match" : ""}.`
+        : `Now taking transit${shifted.length > 0 ? ", the times moved to match" : ""}.`,
     shifted,
     ...(endNote ? { endNote } : {}),
   };

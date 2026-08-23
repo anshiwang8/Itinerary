@@ -94,7 +94,7 @@ export default function LoginScreen({
             Welcome
           </h2>
           <p className="auth__sub" id="auth-sub">
-            Sign in to keep your plans with you — or carry on without an account.
+            Sign in to keep your plans with you, or carry on without an account.
           </p>
         </div>
 

@@ -208,6 +208,7 @@ Rules:
 - "constraints" are provable venue FEATURES (patio, vegetarian, live music, wheelchair accessible, dog friendly) — never a kind of place, never a price word.
 - Put budget words into "budget"; vibe/feature words into "constraints".
 - Preserve still-relevant original constraints; drop ones the complaint overrides.
+- In every string value you write, never use an em dash (—) or en dash as punctuation; use a comma, or write two sentences.
 
 Respond with ONLY this JSON, no prose:
 { "intent": "venue"|"time"|"constraint"|"duration", "path": "refilter"|"research", "category": string, "aesthetic": string, "budget": string|null, "constraints": string[], "time": { "mode": "relative"|"absolute", "deltaMinutes": number, "targetTime": string } | null, "duration": { "mode": "relative"|"absolute", "deltaMinutes": number, "targetMinutes": number } | null }`;
@@ -1197,7 +1198,7 @@ export async function swapStop(
   if (target.locked || new Date(target.start_time).getTime() <= floor.getTime()) {
     return {
       swapped: false,
-      reason: `You can only swap an upcoming stop — “${target.name}” is already underway or done.`,
+      reason: `You can only swap an upcoming stop, “${target.name}” is already underway or done.`,
     };
   }
 
@@ -1291,12 +1292,12 @@ function resolveNewTotal(
   const MAX = 360;
   const categoryMin = Math.max(15, Math.round(defaultTotal * 0.4));
   if (total > MAX) {
-    return { ok: false, reason: `${durLabel(total)} is longer than a single stop makes sense — keep it under 6 hours.` };
+    return { ok: false, reason: `${durLabel(total)} is longer than a single stop makes sense, keep it under 6 hours.` };
   }
   if (total < categoryMin) {
     return {
       ok: false,
-      reason: `A ${durLabel(total)} ${category} isn't enough time — give it at least ${durLabel(categoryMin)}.`,
+      reason: `A ${durLabel(total)} ${category} isn't enough time, give it at least ${durLabel(categoryMin)}.`,
     };
   }
   return { ok: true, total, currentTotal };
@@ -1320,7 +1321,7 @@ async function durationChange(
   const category = target.category;
   const dur = interp.duration;
   if (!dur) {
-    return { swapped: false, reason: "Couldn't tell how long you meant — try “stay 2 hours” or “a bit longer”." };
+    return { swapped: false, reason: "Couldn't tell how long you meant, try “stay 2 hours” or “a bit longer”." };
   }
 
   const resolved = resolveNewTotal(category, target, dur);
@@ -1399,7 +1400,7 @@ async function durationChange(
 
   const grew = newTotal >= currentTotal;
   let reason = `${grew ? "Extended" : "Shortened"} ${category} to ${durLabel(newTotal)}`;
-  if (settle.changes.length) reason += ` — everything after shifted ${grew ? "later" : "earlier"}`;
+  if (settle.changes.length) reason += `, everything after shifted ${grew ? "later" : "earlier"}`;
   if (settle.changes.some((c) => c.venue)) reason += ` (moved a later stop to a spot that's still open)`;
   reason += ".";
 
@@ -1460,7 +1461,7 @@ async function venueSwap(
   // there was never a first one.
   const noneFound = `Couldn't find ${
     changesCategory ? "a" : "another"
-  } ${poolKey} that fits — keeping ${target.name}.`;
+  } ${poolKey} that fits, keeping ${target.name}.`;
 
   // A "fancier"/"cheaper" refinement is a PRICE request, read from the RAW
   // text for exactly the reason the distance and time parsers are: price is a
@@ -1602,7 +1603,7 @@ async function venueSwap(
     if (closer.length === 0) {
       return {
         swapped: false,
-        reason: `Couldn't find a ${poolKey} closer than ${target.name} — it's already the closest option I can find.`,
+        reason: `Couldn't find a ${poolKey} closer than ${target.name}, it's already the closest option I can find.`,
       };
     }
     candidates = closer;
@@ -1664,10 +1665,10 @@ async function venueSwap(
         // against, "it's already the priciest" would be an assertion about
         // data we never had — and it reads as an outright lie on a $ venue.
         reason: !comparable
-          ? `Can't compare prices for this ${poolKey} — none of the nearby options have a price listed, so I can't show you a ${wanted} one. Keeping ${target.name}.`
+          ? `Can't compare prices for this ${poolKey}, none of the nearby options have a price listed, so I can't show you a ${wanted} one. Keeping ${target.name}.`
           : priceDirection === "up"
-          ? `Couldn't find a ${poolKey} pricier than ${target.name} — it's already the priciest one I can find nearby.`
-          : `Couldn't find a ${poolKey} cheaper than ${target.name} — it's already the cheapest one I can find nearby.`,
+          ? `Couldn't find a ${poolKey} pricier than ${target.name}, it's already the priciest one I can find nearby.`
+          : `Couldn't find a ${poolKey} cheaper than ${target.name}, it's already the cheapest one I can find nearby.`,
       };
     }
     candidates = ranked;
@@ -1682,7 +1683,7 @@ async function venueSwap(
     return {
       swapped: false,
       reason: unmet
-        ? `Couldn't find a ${poolKey} that's really ${unmet} — keeping ${target.name}.`
+        ? `Couldn't find a ${poolKey} that's really ${unmet}, keeping ${target.name}.`
         : noneFound,
     };
   }
@@ -1724,7 +1725,7 @@ async function timeChange(
   const category = target.category;
   const shift = interp.time;
   if (!shift) {
-    return { swapped: false, reason: "Couldn't tell what time you meant — try “after 8” or “an hour earlier”." };
+    return { swapped: false, reason: "Couldn't tell what time you meant, try “after 8” or “an hour earlier”." };
   }
 
   let nd = new Date(target.start_time!);
@@ -1753,7 +1754,7 @@ async function timeChange(
   const tp = timedIdx.indexOf(stopIndex);
   const prevStop = tp > 0 ? itinerary.stops[timedIdx[tp - 1]] : null;
   if (prevStop?.end_time && newStartMs < new Date(prevStop.end_time).getTime()) {
-    return { swapped: false, reason: `That's too early — it runs into ${prevStop.name}.` };
+    return { swapped: false, reason: `That's too early, it runs into ${prevStop.name}.` };
   }
 
   const used = new Set<string>(itinerary.stops.map((s) => s.id).filter((id): id is string => !!id));
@@ -2468,7 +2469,7 @@ async function finalize(
         pushedMinutes > 0
           ? `Moving the later stops back to fit ${
               pick.displayName?.text ?? "that spot"
-            } doesn't work — ${lowerFirst(settle.reason)}`
+            } doesn't work, ${lowerFirst(settle.reason)}`
           : settle.reason,
     };
   }
@@ -2533,7 +2534,7 @@ async function finalize(
       pushedMinutes > 0
         ? `${reason} Moved to ${clockLabel(start, tz)}${
             downstreamShifted.length > 0 ? " and pushed the later stops back" : ""
-          } — it can't be reached any earlier.`
+          }, it can't be reached any earlier.`
         : reason,
     downstreamShifted,
   };

@@ -161,16 +161,16 @@ const cases: Array<[string, () => void]> = [
           category_signals: ["steakhouse", "vegan"],
           constraints: ["vegan options"],
         }),
-        "That's a bit contradictory — vegan and steakhouse pull opposite ways."
+        "That's a bit contradictory, vegan and steakhouse pull opposite ways."
       );
       // other obvious clashes (message names the actual words)
       assert.strictEqual(
         contradictionReason("vegetarian bbq", base),
-        "That's a bit contradictory — vegetarian and bbq pull opposite ways."
+        "That's a bit contradictory, vegetarian and bbq pull opposite ways."
       );
       assert.strictEqual(
         contradictionReason("kosher pork joint", base),
-        "That's a bit contradictory — kosher and pork pull opposite ways."
+        "That's a bit contradictory, kosher and pork pull opposite ways."
       );
       assert.match(contradictionReason("vegan butcher", base) ?? "", /vegan and butcher pull opposite ways/);
       assert.match(contradictionReason("halal bacon spot", base) ?? "", /halal and bacon pull opposite ways/);
@@ -208,16 +208,16 @@ const cases: Array<[string, () => void]> = [
     () => {
       assert.strictEqual(
         noVenuesReason(["dinner", "drinks"], "11:00 PM"),
-        "Couldn't find any dinner or drinks spots open around 11:00 PM — everything nearby got filtered out. Try a different time?"
+        "Couldn't find any dinner or drinks spots open around 11:00 PM, everything nearby got filtered out. Try a different time?"
       );
-      assert.match(noVenuesReason(["general"], null), /Couldn't find any places —/);
+      assert.match(noVenuesReason(["general"], null), /Couldn't find any places,/);
       assert.strictEqual(
         weatherBlockedReason([{ category: "park walk", reason: "rain likely at 8pm" }]),
-        "Couldn't plan this one — park walk: rain likely at 8pm. Try an indoor plan?"
+        "Couldn't plan this one, park walk: rain likely at 8pm. Try an indoor plan?"
       );
       assert.strictEqual(
         unmetConstraintReason("steakhouse", "vegan"),
-        "Couldn't find a steakhouse that's really vegan — want to drop a constraint, or try a different kind of place?"
+        "Couldn't find a steakhouse that's really vegan, want to drop a constraint, or try a different kind of place?"
       );
     },
   ],
@@ -269,12 +269,12 @@ const cases: Array<[string, () => void]> = [
       // the exact Scenario-1 case: only nearby match permanently closed
       assert.strictEqual(
         emptyCategoryReason("ramen", [drop("ramen", "businessStatus", "CLOSED_PERMANENTLY")], "Ossington"),
-        "Couldn't find any ramen open near Ossington — the only one nearby is permanently closed."
+        "Couldn't find any ramen open near Ossington, the only one nearby is permanently closed."
       );
       // multiple, closed-at-hour
       assert.strictEqual(
         emptyCategoryReason("bar", [drop("bar", "hours"), drop("bar", "hours")], "Ossington"),
-        "Couldn't find any bar open near Ossington — the ones nearby are closed at that hour."
+        "Couldn't find any bar open near Ossington, the ones nearby are closed at that hour."
       );
       // rating + price phrasings
       assert.match(emptyCategoryReason("cafe", [drop("cafe", "rating")], "Ossington"), /too poorly rated/);
@@ -395,11 +395,11 @@ const HONEST_EMPTY_CASES: Array<[string, () => void]> = [
     () => {
       assert.strictEqual(
         noVenuesReason(["beach"], "3:00 PM"),
-        "Couldn't find any beach spots open around 3:00 PM — everything nearby got filtered out. Try a different time?"
+        "Couldn't find any beach spots open around 3:00 PM, everything nearby got filtered out. Try a different time?"
       );
       assert.strictEqual(
         noVenuesReason(["beach"], "3:00 PM", []),
-        "Couldn't find any beach spots open around 3:00 PM — everything nearby got filtered out. Try a different time?"
+        "Couldn't find any beach spots open around 3:00 PM, everything nearby got filtered out. Try a different time?"
       );
     },
   ],
@@ -411,7 +411,7 @@ const HONEST_EMPTY_CASES: Array<[string, () => void]> = [
       ];
       assert.strictEqual(
         emptyCategoryReason("ramen", drops, "Ossington"),
-        "Couldn't find any ramen open near Ossington — the only one nearby is permanently closed."
+        "Couldn't find any ramen open near Ossington, the only one nearby is permanently closed."
       );
       const hoursDrops: DropEntry[] = [
         { category: "bar", name: "A", id: "a", rule: "hours", detail: "closed" },
@@ -419,7 +419,7 @@ const HONEST_EMPTY_CASES: Array<[string, () => void]> = [
       ];
       assert.strictEqual(
         emptyCategoryReason("bar", hoursDrops, null),
-        "Couldn't find any bar open nearby — the ones nearby are closed at that hour."
+        "Couldn't find any bar open nearby, the ones nearby are closed at that hour."
       );
     },
   ],

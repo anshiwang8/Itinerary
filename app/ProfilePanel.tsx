@@ -246,7 +246,7 @@ export default function ProfilePanel({
             // stored, and the save would replace all of it.
             <p className="prof__err" role="alert">
               Couldn&apos;t load your preferences just now. Nothing has been
-              changed — close this and try again in a moment.
+              changed, close this and try again in a moment.
             </p>
           )}
           {state.phase === "ready" && (
@@ -301,7 +301,7 @@ export default function ProfilePanel({
                 >
                   {saveState === "saving" && "Saving…"}
                   {saveState === "saved" && "Saved"}
-                  {saveState === "failed" && "Couldn't save — try again"}
+                  {saveState === "failed" && "Couldn't save, try again"}
                 </p>
                 <button type="button" className="prof__cancel" onClick={requestClose}>
                   Cancel

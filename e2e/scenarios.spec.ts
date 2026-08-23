@@ -564,7 +564,7 @@ test("'right away' plans TONIGHT's next full hour, never tomorrow @mock", async 
   const clarify = page.locator(".clarify");
   await expect(clarify).toBeVisible({ timeout: 30_000 });
   await expect(clarify).not.toContainText("When?");
-  await page.getByRole("button", { name: "Skip — just plan it" }).click();
+  await page.getByRole("button", { name: "Skip, just plan it" }).click();
 
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
   const be = page.locator(".lstrip__stop .lstrip__be").first();

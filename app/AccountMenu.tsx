@@ -148,7 +148,7 @@ export default function AccountMenu({
         aria-expanded={open}
         // The accessible name CONTAINS the visible label, so speaking it still
         // matches what is on screen.
-        aria-label={`${label} — account menu`}
+        aria-label={`${label}: account menu`}
         onClick={onToggle}
         onKeyDown={(event) => {
           // Down-arrow opens and lands on the first item, the standard way

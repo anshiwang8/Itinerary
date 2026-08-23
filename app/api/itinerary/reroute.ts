@@ -84,9 +84,9 @@ export interface RerouteDeps {
 
 const MAX_STABILIZATION_PASSES = 5;
 const INCOMPLETE_REASON =
-  "Couldn't build a complete reroute for every remaining stop — the original plan is unchanged.";
+  "Couldn't build a complete reroute for every remaining stop, the original plan is unchanged.";
 const UNSTABLE_REASON =
-  "Couldn't find a complete reroute that stays valid at the recalculated arrival times — the original plan is unchanged.";
+  "Couldn't find a complete reroute that stays valid at the recalculated arrival times, the original plan is unchanged.";
 
 /** Bound once per reroute, exactly as `swap.ts`'s `realDeps` binds it: the
  *  whole tail this engine replans belongs to one plan, and one plan travels

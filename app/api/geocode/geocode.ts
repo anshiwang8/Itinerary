@@ -618,7 +618,7 @@ export function resolveGeocodeResponse(
     throw new ApiError(
       422,
       "geocode_far_from_city",
-      `That address is very far from ${context.locality} — check the city or the address.`
+      `That address is very far from ${context.locality}, check the city or the address.`
     );
   }
   if (wrongRegion) {

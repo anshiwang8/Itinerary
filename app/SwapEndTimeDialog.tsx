@@ -81,7 +81,7 @@ export default function SwapEndTimeDialog({
             disabled={busy}
             onClick={() => onDecide(true)}
           >
-            {busy ? "…" : `Continue — end at ${confirm.proposedEndLabel}`}
+            {busy ? "…" : `Continue and end at ${confirm.proposedEndLabel}`}
           </button>
           <button
             type="button"

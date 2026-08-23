@@ -339,7 +339,7 @@ test.describe("@mock weather-gate", () => {
     const recover = page.locator(".recover");
     await expect(recover).toBeVisible({ timeout: 30_000 });
     // the weather reason travels onto the replace row; widen stays gone
-    await expect(recover).toContainText(/Rain likely at 3pm — pick something else for this stop/i);
+    await expect(recover).toContainText(/Rain likely at 3pm, pick something else for this stop/i);
     await expect(page.locator(".recover__widen")).toHaveCount(0);
     // dinner survived, so "Plan without it" is a real third option here
     await expect(page.locator(".recover__skip")).toBeVisible();

@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
         new ApiError(
           502,
           "selection_invalid_response",
-          "Couldn't pick venues for that just now — try again?"
+          "Couldn't pick venues for that just now, try again?"
         )
       );
     }

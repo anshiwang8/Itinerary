@@ -47,14 +47,14 @@ export async function planEvening(
   await expect(page.locator(".chip").first()).toBeVisible({ timeout: 30_000 });
 }
 
-/** If the clarify QUESTIONS appear, click "Skip — just plan it" so the
+/** If the clarify QUESTIONS appear, click "Skip, just plan it" so the
  *  pipeline continues. Targeted by accessible name, not by class: the
  *  recovery panel's "Plan without it" shares .clarify__skip, and clicking
  *  THAT here would silently drop a stop mid-test. */
 export async function dismissClarifyIfShown(page: Page): Promise<void> {
   const outcome = page.locator(".clarify, .lstrip, .empty__err, .stage__err").first();
   await expect(outcome).toBeVisible({ timeout: 90_000 });
-  const skip = page.getByRole("button", { name: "Skip — just plan it" });
+  const skip = page.getByRole("button", { name: "Skip, just plan it" });
   if (await skip.isVisible()) await skip.click();
 }
 

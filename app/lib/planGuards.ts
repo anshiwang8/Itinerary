@@ -8,10 +8,10 @@ import { ParsedPrompt, DropEntry, DropRule } from "../api/places/search/filter";
 import type { Selection } from "../api/select/selectVenues";
 
 export const UNPARSEABLE_MESSAGE =
-  "I couldn't make sense of that — try describing your evening, like “dinner and drinks in Ossington”.";
+  "I couldn't make sense of that. Try describing your evening, like “dinner and drinks in Ossington”.";
 
 export const CONTRADICTION_MESSAGE =
-  "That's a bit contradictory — cheap and fancy pull opposite ways.";
+  "That's a bit contradictory, cheap and fancy pull opposite ways.";
 
 // keyboard rows for the mash check ("asdfghjkl" is literally the home row)
 const KEY_ROWS = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
@@ -165,7 +165,7 @@ export function contradictionReason(
     const d = dietText.match(diet);
     const v = raw.match(venue);
     if (d && v) {
-      return `That's a bit contradictory — ${d[0].toLowerCase()} and ${v[0].toLowerCase()} pull opposite ways.`;
+      return `That's a bit contradictory, ${d[0].toLowerCase()} and ${v[0].toLowerCase()} pull opposite ways.`;
     }
   }
 
@@ -194,15 +194,15 @@ export function noVenuesReason(
   if (d?.rule === "hours") {
     // hours-dominant: the venues exist, the HOUR is the problem — say so,
     // and point at the two moves that actually help
-    return `Couldn't find any ${what} still open${whenLabel ? ` around ${whenLabel}` : ""} — everything nearby is closed at that hour. Try a different time, or a different kind of place?`;
+    return `Couldn't find any ${what} still open${whenLabel ? ` around ${whenLabel}` : ""}, everything nearby is closed at that hour. Try a different time, or a different kind of place?`;
   }
   if (d) {
     const phrase = phraseForRule(d.rule, d.one);
     if (phrase) {
-      return `Couldn't find any ${what}${when} — ${phrase}. Try a different kind of place?`;
+      return `Couldn't find any ${what}${when}, ${phrase}. Try a different kind of place?`;
     }
   }
-  return `Couldn't find any ${what}${when} — everything nearby got filtered out. Try a different time?`;
+  return `Couldn't find any ${what}${when}, everything nearby got filtered out. Try a different time?`;
 }
 
 /** Every category was weather-blocked — name the weather, suggest indoors. */
@@ -210,12 +210,12 @@ export function weatherBlockedReason(
   blocks: Array<{ category: string; reason: string }>
 ): string {
   const detail = blocks.map((b) => `${b.category}: ${b.reason}`).join("; ");
-  return `Couldn't plan this one — ${detail}. Try an indoor plan?`;
+  return `Couldn't plan this one, ${detail}. Try an indoor plan?`;
 }
 
 /** A hard constraint no candidate actually meets — fail loud, never hedge. */
 export function unmetConstraintReason(category: string, constraint: string): string {
-  return `Couldn't find a ${category} that's really ${constraint} — want to drop a constraint, or try a different kind of place?`;
+  return `Couldn't find a ${category} that's really ${constraint}, want to drop a constraint, or try a different kind of place?`;
 }
 
 // ── partial-failure recovery ──────────────────────────────────────────
@@ -261,7 +261,7 @@ export function partialEmptyCategories(selections: Selection[]): string[] {
 export function narrowedSlotReason(category: string, locationLabel?: string | null): string {
   const loc = meaningfulLocation(locationLabel);
   const where = loc ? ` near ${loc}` : " nearby";
-  return `You asked for more than one ${category}, but I could only find one${where} — want to look further out, or try something different for the second stop?`;
+  return `You asked for more than one ${category}, but I could only find one${where}, want to look further out, or try something different for the second stop?`;
 }
 
 const meaningfulLocation = (label?: string | null): string | null =>
@@ -294,7 +294,7 @@ function phraseForRule(rule: DropRule, one: boolean): string | null {
       return "the only match is already elsewhere in your plan";
     case "searchFailed":
       // not a verdict about any venue — the lookup itself didn't come back
-      return "the venue search didn't come back for this one — worth trying again";
+      return "the venue search didn't come back for this one, worth trying again";
     default:
       return null;
   }
@@ -319,7 +319,7 @@ export function emptyCategoryReason(
   const where = loc ? ` near ${loc}` : " nearby";
   const why = reasonFromDrops(category, drops);
   return why
-    ? `Couldn't find any ${category} open${where} — ${why}.`
+    ? `Couldn't find any ${category} open${where}, ${why}.`
     : `Couldn't find any ${category}${where}.`;
 }
 
@@ -336,7 +336,7 @@ export function closedOnArrivalReason(
   arrivalLabel: string
 ): string {
   const who = venueName ? `${venueName}` : `the ${category}`;
-  return `${who} is closed by the time you'd get there (${arrivalLabel}) — want to look further out, or try something else for this stop?`;
+  return `${who} is closed by the time you'd get there (${arrivalLabel}), want to look further out, or try something else for this stop?`;
 }
 
 // ── stated-window outcomes ────────────────────────────────────────────────
@@ -360,14 +360,14 @@ export function windowOverrunMessage(
       : dropped.length === 1
       ? dropped[0]
       : `${dropped.slice(0, -1).join(", ")} and ${dropped[dropped.length - 1]}`;
-  return `${where} fits ${kept} of these ${total} once travel is counted — dropped ${names}.`;
+  return `${where} fits ${kept} of these ${total} once travel is counted, dropped ${names}.`;
 }
 
 /** Not even the FIRST stop fits. Nothing can be dropped to rescue this, so
  *  it's a hard, honest refusal with the two moves that actually help. */
 export function windowTooTightReason(windowLabel: string | null): string {
   const where = windowLabel ? `your ${windowLabel} window` : "that window";
-  return `Couldn't fit anything into ${where} once travel time is counted — want to widen it, or ask for something shorter?`;
+  return `Couldn't fit anything into ${where} once travel time is counted, want to widen it, or ask for something shorter?`;
 }
 
 /** The widen-offer label, scoped to the plan's neighborhood/location. */

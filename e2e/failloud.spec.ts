@@ -7,7 +7,7 @@ import { test, expect } from "./test";
 import { planEvening, planExpectingProblem, stripCard, expectStripMatchesPin } from "./helpers";
 
 const UNPARSEABLE =
-  "I couldn't make sense of that — try describing your evening, like “dinner and drinks in Ossington”.";
+  "I couldn't make sense of that. Try describing your evening, like “dinner and drinks in Ossington”.";
 
 // prompt → the exact message it must produce
 // DELETED 2026-07-27: "brunch at 3am" and "dinner at 4am" used to be
@@ -20,7 +20,7 @@ const UNPARSEABLE =
 const FAIL_LOUD_CASES: Array<[string, string]> = [
   [
     "cheap fancy dinner",
-    "That's a bit contradictory — cheap and fancy pull opposite ways.",
+    "That's a bit contradictory, cheap and fancy pull opposite ways.",
   ],
   ["asdfghjkl", UNPARSEABLE],
   // non-row gibberish (vowel-less noise) — used to slip past the mash check
@@ -39,7 +39,7 @@ test("empty-pool net: rained-out outdoor plan fails loud, not an empty map @mock
   // category "at 3pm" is weather-blocked whether it resolves today or
   // rolls forward to tomorrow, so every pool comes back empty.
   expect(await planExpectingProblem(page, "a walk in the park at 3pm")).toBe(
-    "Couldn't plan this one — park walk: rain likely at 3pm. Try an indoor plan?"
+    "Couldn't plan this one, park walk: rain likely at 3pm. Try an indoor plan?"
   );
 });
 
@@ -49,7 +49,7 @@ test("constraints: 'vegan steakhouse' is caught as a contradiction, up front @mo
   // treat "steakhouse" as a mere category and plan a vegan spot under that
   // label. Named-pair message, same voice as "cheap fancy".
   expect(await planExpectingProblem(page, "vegan steakhouse")).toBe(
-    "That's a bit contradictory — vegan and steakhouse pull opposite ways."
+    "That's a bit contradictory, vegan and steakhouse pull opposite ways."
   );
 });
 
@@ -61,7 +61,7 @@ test("constraints: 'dessert with a patio' hits the unmet-constraint fail-loud @m
   // contradiction patterns — so it flows past the guard, through select's
   // id:null + unmetConstraint, into the page-level unmetConstraintReason.
   expect(await planExpectingProblem(page, "dessert with a patio at 8pm")).toBe(
-    "Couldn't find a dessert that's really patio — want to drop a constraint, or try a different kind of place?"
+    "Couldn't find a dessert that's really patio, want to drop a constraint, or try a different kind of place?"
   );
   // and it must NOT surface as the partial-empty recovery panel — an unmet
   // constraint is a different failure from an empty pool

@@ -1342,7 +1342,7 @@ export default function Home() {
               // Pre-existing and not remove-specific — the swap engine's tail
               // reflow reads the same field for the same purpose.
               currentOpeningHours: replacement.currentOpeningHours,
-              reason: `Open when you get there — the earlier pick had closed.`,
+              reason: `Open when you get there, the earlier pick had closed.`,
             };
           });
 
@@ -1401,7 +1401,7 @@ export default function Home() {
       if (adaptedNames.length > 0) {
         setBannerFlat(true);
         setBanner(
-          `Swapped in ${adaptedNames.join(" and ")} — the first pick would have been closed by the time you got there.`
+          `Swapped in ${adaptedNames.join(" and ")}, the first pick would have been closed by the time you got there.`
         );
       }
 
@@ -1594,9 +1594,9 @@ export default function Home() {
             text: onlyUsed
               ? `${narrowedSlotReason(searchCategory, opts.dropLocation ? null : ctx.parseData.location)} Try a different kind of stop?`
               : weatherReason
-                ? `${weatherReason.charAt(0).toUpperCase()}${weatherReason.slice(1)} — ${searchCategory} does not fit this slot right now. Try another?`
+                ? `${weatherReason.charAt(0).toUpperCase()}${weatherReason.slice(1)}, ${searchCategory} does not fit this slot right now. Try another?`
                 : opts.dropLocation
-                  ? `Still no ${searchCategory} city-wide — tell me what you'd like there instead?`
+                  ? `Still no ${searchCategory} city-wide, tell me what you'd like there instead?`
                   : `${stillReason} Try another?`,
           },
         });
@@ -1766,7 +1766,7 @@ export default function Home() {
         ...gate.blocks.map((b) => ({
           category: b.category,
           slot: b.slot,
-          reason: `${b.reason.charAt(0).toUpperCase()}${b.reason.slice(1)} — pick something else for this stop?`,
+          reason: `${b.reason.charAt(0).toUpperCase()}${b.reason.slice(1)}, pick something else for this stop?`,
           noWiden: true,
         })),
         ...gate.pendingEmpties,
@@ -1826,7 +1826,7 @@ export default function Home() {
       // there is no swapping or rerouting it — say so rather than leaving a
       // map whose controls quietly do nothing (§6.4)
       throw new Error(
-        `${clientErrorMessage(err)} — the plan is shown but can't be swapped or rerouted; try planning again.`
+        `${clientErrorMessage(err)}, the plan is shown but can't be swapped or rerouted; try planning again.`
       );
     }
   }
@@ -1855,7 +1855,7 @@ export default function Home() {
       // longer agrees with — including right after a swap or reroute that
       // actually succeeded server-side (code-audit 2026-07-18 §6.4)
       setError(
-        `Couldn't refresh the plan — what you see may be out of date. (${clientErrorMessage(err)})`
+        `Couldn't refresh the plan, what you see may be out of date. (${clientErrorMessage(err)})`
       );
       return null;
     }
@@ -2034,7 +2034,7 @@ export default function Home() {
       );
       if (!data.rerouted) {
         setBannerFlat(true);
-        setBanner(`${legName} cancelled — ${data.reason}.`);
+        setBanner(`${legName} cancelled, ${data.reason}.`);
         setChangedIds(new Set());
         return;
       }
@@ -2076,7 +2076,7 @@ export default function Home() {
       setBannerFlat(false);
       setBanner(
         `${legName} cancelled. Replanned from ${floorLabel}` +
-          (kept ? ` — your ${kept.category}'s unchanged.` : ".")
+          (kept ? `, your ${kept.category}'s unchanged.` : ".")
       );
     } catch (err) {
       const detail = clientErrorMessage(err);
@@ -2102,7 +2102,7 @@ export default function Home() {
       }
       setError(
         mutationApplied
-          ? `Couldn't refresh the replanned itinerary — what you see may be out of date. (${detail})`
+          ? `Couldn't refresh the replanned itinerary, what you see may be out of date. (${detail})`
           : detail
       );
     } finally {
@@ -2218,7 +2218,7 @@ export default function Home() {
       setBanner(
         data.path === "time" || data.path === "duration"
           ? data.reason
-          : `Swapped ${data.before.category} — ${data.reason}`
+          : `Swapped ${data.before.category}, ${data.reason}`
       );
     } catch (err) {
       const detail = clientErrorMessage(err);
@@ -2710,7 +2710,7 @@ export default function Home() {
           disabled={busy}
           onClick={() => submitClarify(true)}
         >
-          Skip — just plan it
+          Skip, just plan it
         </button>
       </div>
     </div>
@@ -2765,7 +2765,7 @@ export default function Home() {
         {recovery.blocks.map((b) => (
           <div key={rowKey(b)} className="clarify__q">
             <div className="clarify__label recover__reason">
-              {b.reason.charAt(0).toUpperCase() + b.reason.slice(1)} — {b.category} might not be
+              {b.reason.charAt(0).toUpperCase() + b.reason.slice(1)}, {b.category} might not be
               great right now. Still want it, or something else?
             </div>
           </div>
@@ -2977,7 +2977,7 @@ export default function Home() {
           />
         )}
         <h1 className="empty__title">Itinerary</h1>
-        <div className="empty__sub">life moves simpler.</div>
+        <div className="empty__sub">time to leave.</div>
         {/* ONE pill, three labelled sections. Exactly the same three inputs,
             state, validation and submit trigger as before — only the
             presentation changed from three separate controls to one. */}
@@ -3027,7 +3027,7 @@ export default function Home() {
               disabled={busy}
               value={startAddress}
               onChange={(e) => setStartAddress(e.target.value)}
-              placeholder="optional — city centre"
+              placeholder="optional (city centre)"
               aria-label="Starting address"
             />
           </div>
@@ -3107,9 +3107,9 @@ export default function Home() {
       />
 
       {wxNow && (
-        <div className="weather" aria-label={`Current weather — ${city.trim() || "Toronto"}`}>
+        <div className="weather" aria-label={`Current weather for ${city.trim() || "Toronto"}`}>
           <WeatherIcon condition={wxNow.condition} precip={wxNow.precipProbability} />
-          <span className="weather__temp">{wxNow.tempC != null ? `${Math.round(wxNow.tempC)}°` : "—"}</span>
+          <span className="weather__temp">{wxNow.tempC != null ? `${Math.round(wxNow.tempC)}°` : "N/A"}</span>
           {wxNow.condition && <span className="weather__cond">{wxNow.condition}</span>}
         </div>
       )}
@@ -3204,7 +3204,7 @@ export default function Home() {
                 title={
                   current
                     ? `This plan gets around by ${mode === "driving" ? "driving" : "transit"}`
-                    : `Switch this plan to ${mode === "driving" ? "driving" : "transit"} — every stop stays, the times re-route`
+                    : `Switch this plan to ${mode === "driving" ? "driving" : "transit"}: every stop stays, the times re-route`
                 }
                 onClick={() => void doModeSwitch(mode)}
               >
@@ -3267,7 +3267,7 @@ export default function Home() {
               setSwapConfirm(null);
               setBannerFlat(true);
               setBanner(
-                `Kept your plan as it is — it still ends by ${swapConfirm.statedEndLabel}.`
+                `Kept your plan as it is, it still ends by ${swapConfirm.statedEndLabel}.`
               );
               return;
             }
@@ -3313,7 +3313,7 @@ export default function Home() {
                 color: "var(--ink-soft)",
               }}
             >
-              Skipped the {b.category} — {b.reason}.
+              Skipped the {b.category}, {b.reason}.
             </div>
           ))}
         </div>

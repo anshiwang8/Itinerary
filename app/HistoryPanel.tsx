@@ -167,7 +167,7 @@ function GuestNudge({
       <p className="hist__emptyTitle">Sign in to save your plans</p>
       <p className="hist__emptyText">
         Plans you finish while signed in are kept here, so you can look back at
-        where you went. Guests keep the whole app — an account only keeps the
+        where you went. Guests keep the whole app. An account only keeps the
         record.
       </p>
       {canSignIn ? (
@@ -203,7 +203,7 @@ function PlanList({
   if (state.phase === "error" || state.readFailed) {
     return (
       <p className="hist__err" role="alert">
-        Couldn&apos;t load your history just now. Nothing has been lost — try
+        Couldn&apos;t load your history just now. Nothing has been lost, try
         again in a moment.
       </p>
     );
@@ -233,7 +233,7 @@ function PlanList({
             {/* The stop names ARE the summary — there is no title in the
                 record, and this is the most a row can honestly say. */}
             <span className="hist__rowStops">
-              {entry.stops.map((stop) => stop.title).join(" → ") || "—"}
+              {entry.stops.map((stop) => stop.title).join(" → ") || "No stops"}
             </span>
           </button>
         </li>

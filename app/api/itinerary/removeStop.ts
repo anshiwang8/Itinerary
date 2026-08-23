@@ -421,7 +421,7 @@ export async function removeStop(
   if (target.locked || new Date(target.start_time).getTime() <= floor.getTime()) {
     return {
       removed: false,
-      reason: `You can only remove an upcoming stop — “${nameOf(target)}” is already underway or done.`,
+      reason: `You can only remove an upcoming stop, “${nameOf(target)}” is already underway or done.`,
     };
   }
   if (!leavesAPlan(work, stopIndex)) {
