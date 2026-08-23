@@ -422,6 +422,49 @@ button { font-family: var(--grot); cursor: pointer; }
 .topbar__go:hover { background: var(--accent-deep); }
 .topbar__go[disabled] { opacity: 0.5; cursor: default; }
 
+/* ── How this plan travels, switchable in place ──
+   The landing pill's `.modetoggle` in the stage's own chrome: same segmented
+   track, same accent-on-selected language, sized to the topbar's 44px targets
+   rather than the pill's roomier 38px inner buttons, because the mobile suite
+   holds every `.topbar button` to 44. Nothing here borrows --live: a stored
+   travel mode is a setting, not a live event. */
+.topbar__mode {
+  flex: none; display: inline-flex; align-items: stretch;
+  background: var(--paper); border-radius: 999px;
+}
+/* 44px, not the landing pill's 38: the mobile suite holds every
+   `.topbar button` to a 44px target, and the pill's inner buttons are not
+   covered by that rule. The track therefore carries no padding of its own,
+   so the whole control stays exactly as tall as Replan and End beside it. */
+.topbar__modeopt {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: none; background: transparent; border-radius: 999px;
+  min-width: 44px; min-height: 44px; padding: 0 12px;
+  font-family: var(--grot); font-size: 13px; font-weight: 500;
+  letter-spacing: 0.01em; color: var(--ink-soft); cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.topbar__modeopt svg { width: 17px; height: 17px; fill: currentColor; flex: none; }
+.topbar__modeopt:hover:not(.topbar__modeopt--on):not([disabled]) { color: var(--ink); }
+.topbar__modeopt--on {
+  background: var(--accent); color: #FFFFFF;
+  box-shadow: 0 1px 4px rgba(42, 120, 144, 0.28);
+}
+/* Pending is the OTHER half — the one being switched to — so it must read as
+   "working on it" without claiming to be selected yet: the switch can still
+   be refused, and pre-checking it would be a lie the banner then contradicts.
+   A pulse on the target, and both halves disabled by the same flag. */
+.topbar__modeopt--pending {
+  color: var(--accent); animation: modeswitch-pulse 1.1s ease-in-out infinite;
+}
+.topbar__modeopt[disabled] { cursor: default; }
+.topbar__modeopt[disabled]:not(.topbar__modeopt--pending) { opacity: 0.5; }
+@keyframes modeswitch-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 .banner {
   position: absolute; top: 82px; left: 50%; transform: translateX(-50%) translateY(-6px);
   z-index: 20; width: min(560px, 92vw);
@@ -1557,8 +1600,25 @@ button { font-family: var(--grot); cursor: pointer; }
     top: auto; right: 8px; bottom: 8px; transform: none;
   }
   .prompt__go:active { transform: scale(0.96); }
-  .topbar { top: 10px; padding: 7px 7px 7px 12px; }
+  /* A fifth control joined this bar with the live travel-mode toggle, and at
+     320px the row no longer had room for it AND a usable text field: measured
+     at 39.8px against the 44px target the mobile suite holds every
+     `.topbar` control to. The space comes back from the gap and from Replan's
+     and End's side padding — both keep their 44px minimum, so what shrinks is
+     breathing room, not a tap target. */
+  .topbar { top: 10px; padding: 7px 7px 7px 12px; gap: 5px; }
+  .topbar__go { padding: 8px 10px; }
+  .topbar__stop { padding: 8px 10px; }
   .topbar__mark { display: none; }
+  /* Five controls do not fit one narrow line with their words on. The mode
+     glyphs carry the meaning; the labels go VISUALLY hidden rather than
+     `display: none`, so the accessible name of each radio survives — a
+     control you can still hear is not the same as one that is gone. */
+  .topbar__modetext {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0,0,0,0); border: 0;
+  }
+  .topbar__modeopt { padding: 0; gap: 0; }
   .banner, .stage__err, .clarify--stage { top: 76px; }
   .dev:not(.dev__collapsed) { left: 14px; right: 14px; width: auto; }
   .dev__collapsed { left: auto; right: 14px; width: auto; }
@@ -1586,6 +1646,10 @@ button { font-family: var(--grot); cursor: pointer; }
   .acctmenu__item { transition: none !important; }
   .stopdlg, .stopdlg__card { animation: none !important; }
   .stopdlg__btn, .topbar__stop { transition: none !important; }
+  /* The pending state still SAYS what it is doing, through the live region
+     beside it and the disabled controls. Only the pulse goes. */
+  .topbar__modeopt { transition: none !important; }
+  .topbar__modeopt--pending { animation: none !important; opacity: 0.6; }
   .hist, .hist__card { animation: none !important; }
   .hist__row, .hist__cta, .hist__back, .hist__close, .acct__hist {
     transition: none !important;

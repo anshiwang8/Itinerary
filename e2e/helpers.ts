@@ -116,6 +116,37 @@ export async function swapOn(page: Page, venueName: string, refinement: string):
 }
 
 /**
+ * Switch a LIVE plan's travel mode from the topbar and wait for the re-route.
+ *
+ * Waits for the mutation response itself, like `swapOn` and `removeOn`: the
+ * first switch in a fresh Next dev server cold-compiles the route, and a page
+ * assertion racing that can cancel the request mid-compilation.
+ *
+ * The buttons are found by ROLE and accessible name rather than by class,
+ * because the labels go visually-hidden at narrow widths and the name is the
+ * half that has to survive that.
+ */
+export async function switchMode(
+  page: Page,
+  mode: "transit" | "driving"
+): Promise<void> {
+  const option = page.getByRole("radio", {
+    name: mode === "driving" ? "Drive" : "Transit",
+  });
+  await expect(option, `the ${mode} option in the topbar`).toBeVisible();
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        /\/api\/itinerary\/[^/]+\/mode$/.test(response.url()),
+      { timeout: 45_000 }
+    ),
+    option.click(),
+  ]);
+  await expect(option).toHaveAttribute("aria-checked", "true");
+}
+
+/**
  * Select a stop card, and wait for the selection to actually stick.
  *
  * THE RACE THIS CLOSES: the pipeline auto-selects the FIRST stop as one of its

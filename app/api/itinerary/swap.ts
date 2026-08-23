@@ -1935,7 +1935,25 @@ export async function resettleTail(
    * byte-identical to before it existed; `removeStop` is the one caller that
    * turns it on. See `earliestUsableStart` for why it is not optional there.
    */
-  clampEarlierToAvailability = false
+  clampEarlierToAvailability = false,
+  /**
+   * NEVER TRADE A VENUE — refuse instead of substituting one.
+   *
+   * The clamp above protects a stop pulled EARLIER, and that is only half a
+   * direction. A stop pushed LATER past its closing time is still unusable,
+   * and the ladder below still answers that by re-searching the category, so
+   * a caller whose contract is "this must not change WHERE anyone goes"
+   * cannot get that guarantee from the clamp alone. `modeSwitch` is that
+   * caller: switching how you travel may re-time the whole day, but it must
+   * never hand back a different place.
+   *
+   * It refuses BEFORE the loop rather than discarding its result, and that
+   * ordering is the point — `findReplacement` spends a Places search and a
+   * model call, and a mode switch is defined as re-pricing travel without
+   * ever re-selecting a venue. Off by default, so swap and removeStop are
+   * byte-identical to before it existed.
+   */
+  neverReplaceVenue = false
 ): Promise<
   | {
       ok: true;
@@ -2095,6 +2113,18 @@ export async function resettleTail(
         deps
       )
     ) {
+      // ── NEVER TRADE A VENUE ── the refusal comes first, so no search and
+      // no model call is ever spent on a replacement the caller has already
+      // said it will not accept.
+      if (neverReplaceVenue) {
+        return {
+          ok: false,
+          reason: `${stop.name ?? stop.category} isn't open at ${clockLabel(
+            new Date(startMs),
+            tz
+          )}, and this change can't swap it for somewhere else.`,
+        };
+      }
       const attempted = new Set(used);
       let replacementFound = false;
       for (let attempt = 0; attempt < 5; attempt++) {

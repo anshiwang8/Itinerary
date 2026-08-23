@@ -100,7 +100,11 @@ const PRICE_LABEL: Record<string, string> = {
   PRICE_LEVEL_VERY_EXPENSIVE: "$$$$",
 };
 
-function TransitIcon({ mode }: { mode: StripLeg["mode"] }) {
+/** EXPORTED for the topbar's travel-mode control, which shows the plan's
+ *  current mode with the same glyph its legs are drawn with — one visual
+ *  language for "how this gets around", rather than a second set of paths to
+ *  drift from these. */
+export function TransitIcon({ mode }: { mode: StripLeg["mode"] }) {
   if (mode === "driving") {
     // A car. It exists because the mode ternary below used to have no
     // driving branch: a drive leg fell through to the WALK arm and was

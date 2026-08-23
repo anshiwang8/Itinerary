@@ -47,6 +47,7 @@ import {
   parsePlanPayload,
   parseReroutePayload,
   parseSelectionsPayload,
+  parseModePayload,
   parseRemovePayload,
   parseSwapPayload,
   parseTravelPayload,
@@ -91,6 +92,7 @@ import ItineraryStrip, {
   StripFocusRequest,
   StripHome,
   StripStop,
+  TransitIcon,
 } from "./ItineraryStrip";
 import {
   automaticTravelLegId,
@@ -588,6 +590,10 @@ export default function Home() {
   const [swapConfirm, setSwapConfirm] = useState<SwapEndTimeConfirm | null>(null);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  /** The mode a live switch is currently re-routing INTO, or null. Holding the
+   *  target rather than a bare boolean is what lets the toggle show which half
+   *  is being worked on while both are disabled. */
+  const [switchingMode, setSwitchingMode] = useState<PlanTravelMode | null>(null);
   const [weather, setWeather] = useState<WeatherHour[] | null>(null);
 
   // The weather chip renders ONLY the plan's own forecast, fetched with the
@@ -2363,6 +2369,110 @@ export default function Home() {
     }
   }
 
+  // ── Switch how the whole plan travels, on a plan that already exists ──
+  //
+  // Deliberately the same shape as doRemove and doSwap — one operation lock,
+  // the version echo, the ambiguous-outcome refresh, the id-keyed reflow —
+  // because it is the same kind of mutation and the three should differ only
+  // where they really differ.
+  //
+  // What differs: it names no stop. The subject is the whole day, so there is
+  // no selection to preserve, nothing to focus afterwards, and no card to arm.
+  // The reflow still works unchanged, because it is keyed by VENUE ID and a
+  // mode switch is the one mutation guaranteed never to change one.
+  async function doModeSwitch(target: PlanTravelMode) {
+    if (!itinerary) return;
+    // The engine owns this refusal too — this is the cheap half, so the user
+    // never watches a spinner for a request that cannot change anything.
+    if ((itinerary.travelMode ?? "transit") === target) return;
+    const operation = beginOperation();
+    if (!operation) return;
+
+    setSwitchingMode(target);
+    setError(null);
+    setBanner(null);
+    const nowISO = simNow ? new Date(simNow).toISOString() : undefined;
+    let mutationApplied = false;
+    // pre-switch starts by id, so the stops that re-timed can strike through
+    // what they used to say
+    const oldById = Object.fromEntries(
+      itinerary.stops.filter((s) => s.id).map((s) => [s.id as string, s.start_time])
+    );
+    try {
+      const data = await fetchJson(`/api/itinerary/${itinerary.id}/mode`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          travelMode: target,
+          version: itinerary.version,
+          ...(nowISO ? { now: nowISO } : {}),
+        }),
+        parse: parseModePayload,
+      });
+      if (!data.switched) {
+        // An honest refusal — a venue that shuts at the new times, a day
+        // already over, a route the provider wouldn't price. Nothing was
+        // written, so the plan on screen is still the real one.
+        setBannerFlat(true);
+        setBanner(data.reason);
+        return;
+      }
+      mutationApplied = true;
+      const updated = await readItinerary(itinerary.id, nowISO ?? "");
+
+      const ids = new Set<string>();
+      const olds: Record<string, string | null> = {};
+      for (const shifted of data.shifted) {
+        const stop = updated.stops[shifted];
+        if (stop?.id) {
+          ids.add(stop.id);
+          olds[stop.id] = oldById[stop.id] ?? null;
+        }
+      }
+      applyItinerary(updated);
+      // The LANDING toggle follows the plan. It is the state a Replan builds
+      // from, and it is the state the empty screen comes back to after this
+      // plan ends — so leaving it behind would mean switching to driving and
+      // then having the very next plan silently revert to transit, with the
+      // control that decides it still reading "Transit". Only on success:
+      // a refused switch changed nothing to follow.
+      setTravelMode(target);
+      setChangedIds(ids);
+      setOldStarts(olds);
+      setBannerFlat(false);
+      // The stated-end overrun rides in the same banner rather than a dialog:
+      // the user chose the mode, and the new end is that choice's arithmetic
+      // — a fact to be told, not a decision to be re-asked. The clamp's own
+      // consequence needs no note: a stop held at its opening time simply
+      // shows the gap on the strip.
+      setBanner(data.endNote ? `${data.reason} ${data.endNote}` : data.reason);
+    } catch (err) {
+      const detail = clientErrorMessage(err);
+      if (!mutationApplied && mutationOutcomeMayBeAmbiguous(err)) {
+        try {
+          const latest = await readItinerary(itinerary.id, nowISO ?? "");
+          applyItinerary(latest);
+          setError(
+            `The travel-mode response was interrupted, so the latest saved plan was refreshed. Check which mode it's in before retrying. (${detail})`
+          );
+        } catch (refreshErr) {
+          setError(
+            `The travel-mode response was interrupted and the saved plan could not be refreshed; what you see may be out of date. (${clientErrorMessage(refreshErr)})`
+          );
+        }
+        return;
+      }
+      setError(
+        mutationApplied
+          ? `The plan switched travel modes, but the follow-up refresh failed; what you see may be out of date. (${detail})`
+          : detail
+      );
+    } finally {
+      setSwitchingMode(null);
+      endOperation(operation);
+    }
+  }
+
   // merge live status + changed flags (by venue id) onto the base map stops
   const styledStops = useMemo<MapStop[]>(
     () =>
@@ -3061,6 +3171,61 @@ export default function Home() {
           onChange={(e) => setPrompt(e.target.value)}
           aria-label="Describe your evening"
         />
+        {/* HOW THIS PLAN TRAVELS — the same radiogroup the landing pill
+            carries, so the control the user chose the mode with is the
+            control they change it with. It shows the CURRENT mode (the
+            checked half) before it offers the other, because a switch you
+            cannot see the starting point of is a guess.
+
+            type="button" is load-bearing: these sit inside the replan form,
+            where a default submit would replan instead of switch. */}
+        <div
+          className="topbar__mode"
+          role="radiogroup"
+          aria-label="How this plan gets around"
+          aria-busy={switchingMode !== null}
+        >
+          {(["transit", "driving"] as const).map((mode) => {
+            const current = (itinerary.travelMode ?? "transit") === mode;
+            return (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                className={
+                  "topbar__modeopt" +
+                  (current ? " topbar__modeopt--on" : "") +
+                  (switchingMode === mode ? " topbar__modeopt--pending" : "")
+                }
+                aria-checked={current}
+                // Both halves go down together: the request is in flight and
+                // the plan it would act on is the one being rewritten.
+                disabled={busy || switchingMode !== null}
+                title={
+                  current
+                    ? `This plan gets around by ${mode === "driving" ? "driving" : "transit"}`
+                    : `Switch this plan to ${mode === "driving" ? "driving" : "transit"} — every stop stays, the times re-route`
+                }
+                onClick={() => void doModeSwitch(mode)}
+              >
+                {/* The glyph the plan's own legs are drawn with, so the
+                    control and the route say the same thing. It carries the
+                    label alone at narrow widths, where the words do not
+                    fit beside Replan and End — the accessible name comes
+                    from the text span, which stays in the DOM. */}
+                <TransitIcon mode={mode === "driving" ? "driving" : "transit"} />
+                <span className="topbar__modetext">
+                  {mode === "transit" ? "Transit" : "Drive"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {switchingMode
+            ? `Re-routing your plan for ${switchingMode === "driving" ? "driving" : "transit"}…`
+            : ""}
+        </span>
         <button type="submit" className="topbar__go" disabled={busy || !prompt.trim()}>
           {busy ? "…" : "Replan"}
         </button>

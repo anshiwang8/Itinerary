@@ -84,6 +84,24 @@ export type RemovePayload =
       downstreamShifted: number[];
     };
 
+/** What POST /api/itinerary/[id]/mode answers with. Mirrors
+ *  `ModeSwitchResult` in the engine. `switched: false` is always a plain
+ *  refusal — including the no-op of switching to the mode the plan is already
+ *  in — so, as with a removal, there is no `confirm` arm here. `endNote` is a
+ *  NOTE and never a question: the engine states it and the day is already
+ *  written. */
+export type ModeSwitchPayload =
+  | { switched: false; reason: string }
+  | {
+      switched: true;
+      from: "transit" | "driving";
+      to: "transit" | "driving";
+      reason: string;
+      /** indices of stops whose times moved */
+      shifted: number[];
+      endNote?: string;
+    };
+
 type JsonRecord = Record<string, unknown>;
 
 function record(value: unknown): JsonRecord {
@@ -970,4 +988,29 @@ export function parseRemovePayload(value: unknown): RemovePayload {
     throw new Error("invalid remove before");
   }
   return data as unknown as RemovePayload;
+}
+
+function planTravelMode(value: unknown): value is "transit" | "driving" {
+  return value === "transit" || value === "driving";
+}
+
+export function parseModePayload(value: unknown): ModeSwitchPayload {
+  const data = record(value);
+  if (data.switched === false && typeof data.reason === "string") {
+    return { switched: false, reason: data.reason };
+  }
+  if (
+    data.switched !== true ||
+    typeof data.reason !== "string" ||
+    !planTravelMode(data.from) ||
+    !planTravelMode(data.to) ||
+    !Array.isArray(data.shifted) ||
+    !data.shifted.every(
+      (index) => typeof index === "number" && Number.isInteger(index)
+    ) ||
+    (data.endNote !== undefined && typeof data.endNote !== "string")
+  ) {
+    throw new Error("invalid mode switch");
+  }
+  return data as unknown as ModeSwitchPayload;
 }

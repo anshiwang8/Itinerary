@@ -144,8 +144,14 @@ function leavesAPlan(itinerary: Itinerary, stopIndex: number): boolean {
  * final card. `resettleTail` hands back no leg in exactly that case (an empty
  * `changes` and a null `terminalInbound`), which is the signal to delete both
  * fields — the same shape `buildSchedule` gives the last stop of a fresh plan.
+ *
+ * EXPORTED for `modeSwitch`, which composes the same pair and inherits the
+ * same hazard: an anchor whose outbound leg is not re-pointed would keep a
+ * leg priced in the mode the plan just left. The export follows the precedent
+ * `swap.ts` set for this cascade — one keyword, no behaviour change — rather
+ * than a second copy of a rule that would drift.
  */
-function setOutbound(stop: ItineraryStop, leg: TravelLeg | null): void {
+export function setOutbound(stop: ItineraryStop, leg: TravelLeg | null): void {
   if (leg) {
     stop.travelToNext = leg;
     stop.travelMinutesToNext = leg.totalMinutes;
