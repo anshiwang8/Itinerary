@@ -477,6 +477,11 @@ button { font-family: var(--grot); cursor: pointer; }
 }
 .banner--show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
 .banner--flat { border-left-color: var(--ink-soft); }
+/* The auto-dismiss fade-out. Its own shorter transition (not the entrance's
+   0.5s) so a success/info banner fades out over ~300ms; a refusal/error
+   banner never gets this class at all. Declared after `.banner--show` so it
+   wins the opacity tie at equal specificity. */
+.banner--fading { opacity: 0; transition: opacity 0.3s ease; }
 
 .stage__err {
   position: absolute; top: 82px; left: 50%; transform: translateX(-50%);
@@ -1640,6 +1645,10 @@ button { font-family: var(--grot); cursor: pointer; }
 
 @media (prefers-reduced-motion: reduce) {
   .chip, .ecard, .mk__dot, .leglab, .banner { transition: opacity 0.2s ease !important; }
+  /* The auto-dismiss timing stays (same timer, same total wait) — only the
+     fade animation goes. The banner snaps straight to invisible instead of
+     easing there. */
+  .banner--fading { transition: none !important; }
   .auth, .auth__card { animation: none !important; }
   .acct__signin, .auth__google, .auth__guest { transition: none !important; }
   .acctmenu__pop { animation: none !important; }

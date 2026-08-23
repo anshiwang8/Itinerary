@@ -38,6 +38,7 @@ import type { DropEntry, ParsedPrompt } from "./api/places/search/filter";
 import type { GeocodeCandidate } from "./api/geocode/geocode";
 import { isOpenAtInstant, type CurrentOpeningHours } from "./api/places/search/hours";
 import { ClientFetchError, fetchJson } from "./lib/clientFetch";
+import { createBannerDismissController } from "./lib/bannerDismiss";
 import { settlePendingWrite } from "./lib/pendingWrite";
 import {
   parseCreatePayload,
@@ -578,6 +579,52 @@ export default function Home() {
   const [disruptLeg, setDisruptLeg] = useState(0);
   const [banner, setBanner] = useState<string | null>(null);
   const [bannerFlat, setBannerFlat] = useState(false);
+  /** True for a refusal/error banner, which must stay on screen until the
+   *  next action; false for a success/info banner, which auto-dismisses on
+   *  its own timer. Deliberately NOT derived from `bannerFlat` — that flag
+   *  only picks the grey-vs-chartreuse left border, and is also true for a
+   *  couple of "the plan succeeded, but here's what changed" notes (the
+   *  initial-plan window trim, an adapted-venue substitution, a declined
+   *  end-time push) that are informational, not refusals. */
+  const [bannerPersist, setBannerPersist] = useState(false);
+  const [bannerFading, setBannerFading] = useState(false);
+  const bannerDismissRef = useRef<ReturnType<typeof createBannerDismissController> | null>(
+    null
+  );
+  if (!bannerDismissRef.current) {
+    bannerDismissRef.current = createBannerDismissController({
+      onFadeStart: () => setBannerFading(true),
+      onDismiss: () => setBanner(null),
+    });
+  }
+  // Arms (or re-arms) the dismiss countdown whenever a fresh success/info
+  // banner is shown, and cancels it outright for a refusal/error banner or
+  // when the banner is cleared. Cleanup runs on every change AND on unmount,
+  // so a timer armed for one banner can never fire against a later one.
+  useEffect(() => {
+    const controller = bannerDismissRef.current;
+    if (!controller) return;
+    setBannerFading(false);
+    if (banner && !bannerPersist) {
+      controller.arm();
+    } else {
+      controller.cancel();
+    }
+    return () => controller.cancel();
+  }, [banner, bannerPersist]);
+  // Hover/focus pauses the countdown so a banner mid-read never fades out
+  // from under someone; leaving resumes a fresh full interval. A pause that
+  // lands mid-fade rescues the banner back to full opacity rather than
+  // letting it finish disappearing.
+  const pauseBannerDismiss = () => {
+    if (!banner || bannerPersist) return;
+    bannerDismissRef.current?.cancel();
+    setBannerFading(false);
+  };
+  const resumeBannerDismiss = () => {
+    if (!banner || bannerPersist) return;
+    bannerDismissRef.current?.arm();
+  };
   // "changed" is keyed by venue id (a swap can change a stop's category)
   const [changedIds, setChangedIds] = useState<Set<string>>(new Set());
   const [oldStarts, setOldStarts] = useState<Record<string, string | null>>({});
@@ -1269,6 +1316,7 @@ export default function Home() {
         setLoadingText("Fitting your window…");
         const replanned = await planOnce(trimmed);
         setBannerFlat(true);
+        setBannerPersist(false);
         setBanner(
           windowOverrunMessage(
             windowLabel,
@@ -1400,6 +1448,7 @@ export default function Home() {
       // the adapt is a real change to what they asked for — say so
       if (adaptedNames.length > 0) {
         setBannerFlat(true);
+        setBannerPersist(false);
         setBanner(
           `Swapped in ${adaptedNames.join(" and ")}, the first pick would have been closed by the time you got there.`
         );
@@ -2034,6 +2083,7 @@ export default function Home() {
       );
       if (!data.rerouted) {
         setBannerFlat(true);
+        setBannerPersist(true);
         setBanner(`${legName} cancelled, ${data.reason}.`);
         setChangedIds(new Set());
         return;
@@ -2074,6 +2124,7 @@ export default function Home() {
         (stop) => stop.status === "active" || stop.status === "completed"
       );
       setBannerFlat(false);
+      setBannerPersist(false);
       setBanner(
         `${legName} cancelled. Replanned from ${floorLabel}` +
           (kept ? `, your ${kept.category}'s unchanged.` : ".")
@@ -2169,6 +2220,7 @@ export default function Home() {
         }
         // honest refusal — nothing better found, original kept
         setBannerFlat(true);
+        setBannerPersist(true);
         setBanner(data.reason);
         return;
       }
@@ -2212,6 +2264,7 @@ export default function Home() {
       focusTargetId = swapped.id ?? focusTargetId;
       setSwapText("");
       setBannerFlat(false);
+      setBannerPersist(false);
       // time/duration reasons are self-contained ("Moved dinner to 7:29 PM",
       // "Extended dinner to 2 hours"); venue reasons describe the pick, so
       // they get the "Swapped" lead.
@@ -2306,6 +2359,7 @@ export default function Home() {
         // An honest refusal — the last stop, a locked one, a venue the tail
         // can't be re-timed around. Nothing was written.
         setBannerFlat(true);
+        setBannerPersist(true);
         setBanner(data.reason);
         return;
       }
@@ -2335,6 +2389,7 @@ export default function Home() {
       setSelected(nextSelected);
       focusTargetId = nextSelected ?? focusTargetId;
       setBannerFlat(false);
+      setBannerPersist(false);
       setBanner(data.reason);
     } catch (err) {
       const detail = clientErrorMessage(err);
@@ -2414,6 +2469,7 @@ export default function Home() {
         // already over, a route the provider wouldn't price. Nothing was
         // written, so the plan on screen is still the real one.
         setBannerFlat(true);
+        setBannerPersist(true);
         setBanner(data.reason);
         return;
       }
@@ -2440,6 +2496,7 @@ export default function Home() {
       setChangedIds(ids);
       setOldStarts(olds);
       setBannerFlat(false);
+      setBannerPersist(false);
       // The stated-end overrun rides in the same banner rather than a dialog:
       // the user chose the mode, and the new end is that choice's arithmetic
       // — a fact to be told, not a decision to be re-asked. The clamp's own
@@ -3266,6 +3323,7 @@ export default function Home() {
             if (!accepted) {
               setSwapConfirm(null);
               setBannerFlat(true);
+              setBannerPersist(false);
               setBanner(
                 `Kept your plan as it is, it still ends by ${swapConfirm.statedEndLabel}.`
               );
@@ -3287,10 +3345,18 @@ export default function Home() {
 
       {banner && (
         <div
-          className={"banner banner--show" + (bannerFlat ? " banner--flat" : "")}
+          className={
+            "banner banner--show" +
+            (bannerFlat ? " banner--flat" : "") +
+            (bannerFading ? " banner--fading" : "")
+          }
           role="status"
           aria-live="polite"
           aria-atomic="true"
+          onMouseEnter={pauseBannerDismiss}
+          onMouseLeave={resumeBannerDismiss}
+          onFocus={pauseBannerDismiss}
+          onBlur={resumeBannerDismiss}
         >
           {banner}
         </div>
