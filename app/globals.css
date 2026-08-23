@@ -280,6 +280,32 @@ button { font-family: var(--grot); cursor: pointer; }
   background: var(--card); color: var(--ink); font-size: 22px; line-height: 1;
 }
 
+/* "show full itinerary" — reframes to the whole plan. Mid-right and vertically
+   centered rather than a corner: the topbar/strip above and the weather chip/
+   dev panel/swap bar below all anchor to the top or bottom edge and, on a
+   narrow viewport, stretch close enough to it that a corner placement would
+   collide with one of them at some breakpoint or interaction state. The
+   mid-right edge is clear of all of them at every width without a per-control
+   `:has()` override. */
+.mapctl {
+  width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--rule);
+  background: var(--card); color: var(--ink);
+  display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: var(--shadow-card);
+  transition: background 0.16s ease, transform 0.12s ease;
+}
+.mapctl svg {
+  width: 19px; height: 19px; fill: none; stroke: currentColor;
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+.mapctl:hover { background: var(--paper); }
+.mapctl:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mapctl--fit {
+  position: absolute; top: 50%; right: 16px; transform: translateY(-50%);
+  z-index: 16;
+}
+.mapctl--fit:active { transform: translateY(-50%) scale(0.96); }
+
 .ov-layer { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
 
 /* markers */

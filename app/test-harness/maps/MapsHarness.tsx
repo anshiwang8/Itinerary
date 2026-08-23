@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import ItineraryMap, { MapHome, MapStop } from "../../ItineraryMap";
+import ItineraryMap, { MapFocusRequest, MapHome, MapStop } from "../../ItineraryMap";
 import ItineraryStrip, {
   StripHome,
   StripStop,
@@ -958,6 +958,20 @@ const VISIBILITY_MOMENTS: Record<
 export default function MapsHarness() {
   const [mounted, setMounted] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
+  // Mirrors page.tsx's selectAndFocusStop: a real click routes through this,
+  // so the harness proves the same nonce-request wiring the product page
+  // uses. A PROGRAMMATIC setSelected (below, and every other setSelected
+  // call in this file) deliberately does NOT go through this path — that
+  // asymmetry is exactly what "camera never keyed on `selected`" tests.
+  const [focusRequest, setFocusRequest] = useState<MapFocusRequest | null>(
+    null
+  );
+  const focusNonce = useRef(0);
+  const selectAndFocus = (stopId: string) => {
+    setSelected(stopId);
+    focusNonce.current += 1;
+    setFocusRequest({ stopId, nonce: focusNonce.current });
+  };
   const [routeSpecimen, setRouteSpecimen] = useState(false);
   const [visibilitySpecimen, setVisibilitySpecimen] = useState(false);
   const [drivingSpecimen, setDrivingSpecimen] = useState(false);
@@ -1239,14 +1253,22 @@ export default function MapsHarness() {
           </button>
         </div>
       )}
+      <button
+        type="button"
+        style={{ position: "fixed", zIndex: 1000, top: 168, left: 8 }}
+        onClick={() => setSelected(stops[0]?.id ?? null)}
+      >
+        Select first stop programmatically
+      </button>
       {mounted && (
         <ItineraryMap
           stops={stops}
           home={currentHome}
           selected={selected}
-          onSelect={setSelected}
+          onSelect={selectAndFocus}
           visibleTravelLegIds={visibleLegIds}
           legacyTransitVisibility={legacyTransitVisibility}
+          focusRequest={focusRequest}
         />
       )}
       {routeSpecimen && (
@@ -1263,7 +1285,7 @@ export default function MapsHarness() {
             home={currentStripHome}
             stops={currentStripStops}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={selectAndFocus}
             now={
               drivingSpecimen
                 ? new Date(DRIVE_NOW)

@@ -48,6 +48,10 @@ const MAPS_STUB = String.raw`
       window.__mapsSetCenters = window.__mapsSetCenters || [];
       window.__mapsSetCenters.push(coordinate(point));
     }
+    panTo(point) {
+      window.__mapsPanTos = window.__mapsPanTos || [];
+      window.__mapsPanTos.push(coordinate(point));
+    }
     setZoom(zoom) {
       window.__mapsSetZooms = window.__mapsSetZooms || [];
       window.__mapsSetZooms.push(zoom);
@@ -406,6 +410,30 @@ async function fitBoundsCalls(page: Page): Promise<Array<Array<[number, number]>
           __mapsFitBoundsCalls?: Array<Array<[number, number]>>;
         }
       ).__mapsFitBoundsCalls ?? []
+  );
+}
+
+async function panToCalls(
+  page: Page
+): Promise<Array<{ lat: number; lng: number } | null>> {
+  return page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __mapsPanTos?: Array<{ lat: number; lng: number } | null>;
+        }
+      ).__mapsPanTos ?? []
+  );
+}
+
+async function setZoomCalls(page: Page): Promise<number[]> {
+  return page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __mapsSetZooms?: number[];
+        }
+      ).__mapsSetZooms ?? []
   );
 }
 
@@ -1064,6 +1092,69 @@ test("@mock an uncertain travel estimate does not draw a solid map route", async
         ).__mapsPolylineCount ?? 0
     )
   ).toBe(0);
+});
+
+test("@mock clicking a stop chip pans and zooms the camera to that exact stop, and re-clicking it re-centers", async ({ page }) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+
+  const chips = page.locator(".chip");
+  await expect(chips).toHaveCount(2);
+
+  await chips.first().click();
+  await expect(chips.first()).toHaveClass(/chip--selected/);
+  const pans1 = await panToCalls(page);
+  const zooms1 = await setZoomCalls(page);
+  expect(pans1.at(-1)).toEqual({ lat: 43.6479, lng: -79.4214 });
+  expect(zooms1.at(-1)).toBe(17);
+
+  // Re-clicking the SAME stop bumps the nonce and re-centers, even though
+  // `selected` itself does not change value.
+  await chips.first().click();
+  const pans2 = await panToCalls(page);
+  expect(pans2.length).toBe(pans1.length + 1);
+  expect(pans2.at(-1)).toEqual({ lat: 43.6479, lng: -79.4214 });
+
+  // Clicking the OTHER stop focuses its own coordinate.
+  await chips.nth(1).click();
+  await expect(chips.nth(1)).toHaveClass(/chip--selected/);
+  const pans3 = await panToCalls(page);
+  const zooms3 = await setZoomCalls(page);
+  expect(pans3.at(-1)).toEqual({ lat: 43.6512, lng: -79.4148 });
+  expect(zooms3.at(-1)).toBe(17);
+});
+
+test("@mock a programmatic selection change never moves the map camera", async ({ page }) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+
+  const before = await panToCalls(page);
+  await page.getByRole("button", { name: "Select first stop programmatically" }).click();
+  await expect(page.locator(".chip").first()).toHaveClass(/chip--selected/);
+  const after = await panToCalls(page);
+  // `selected` changed (proven by the class above); the camera did not.
+  expect(after.length).toBe(before.length);
+});
+
+test("@mock the show-full-itinerary control reframes through the same fitAllStops path as the initial fit", async ({ page }) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+
+  const initialFits = await fitBoundsCalls(page);
+  expect(initialFits.length).toBeGreaterThan(0);
+
+  // Focus one stop first, so the button's reframe is a real, visible change.
+  await page.locator(".chip").first().click();
+
+  await page.getByRole("button", { name: "Show the whole itinerary" }).click();
+  const afterFits = await fitBoundsCalls(page);
+  expect(afterFits.length).toBe(initialFits.length + 1);
+  // Same bounds math on the same geography: the button's call reproduces
+  // exactly the initial fit's result, because both call fitAllStops().
+  expect(afterFits.at(-1)).toEqual(initialFits.at(-1));
 });
 
 test("@mock transit rides use their own palette slots while fallback and ordinary walk stay intact", async ({

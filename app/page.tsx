@@ -88,7 +88,7 @@ import {
 } from "./lib/profileEdit";
 import { parseHistoryResponse, type HistoryResponseView } from "./lib/historyView";
 import type { StopChoice } from "./api/itinerary/stopPlan";
-import ItineraryMap, { MapHome, MapStop } from "./ItineraryMap";
+import ItineraryMap, { MapFocusRequest, MapHome, MapStop } from "./ItineraryMap";
 import ItineraryStrip, {
   StripFocusRequest,
   StripHome,
@@ -573,6 +573,13 @@ export default function Home() {
   const [stripFocusRequest, setStripFocusRequest] =
     useState<StripFocusRequest | null>(null);
   const stripFocusNonce = useRef(0);
+  // The map's camera-focus request — same nonce-request shape as
+  // stripFocusRequest, for the same reason: the map instance lives inside
+  // ItineraryMap and isn't reachable from here, so a click routes to the
+  // camera declaratively rather than lifting the google.maps.Map object up.
+  const [mapFocusRequest, setMapFocusRequest] =
+    useState<MapFocusRequest | null>(null);
+  const mapFocusNonce = useRef(0);
   const [weatherBlocks, setWeatherBlocks] = useState<WeatherBlock[]>([]);
 
   const [simNow, setSimNow] = useState("");
@@ -740,6 +747,17 @@ export default function Home() {
     stripFocusNonce.current += 1;
     setStripFocusRequest({ stopId, nonce: stripFocusNonce.current });
   };
+  // The one path a real click takes: card and chip both call this, so
+  // selecting a stop and asking the camera to focus it can never drift apart
+  // between the two triggers. Never call setMapFocusRequest from anywhere
+  // that isn't an explicit user click — every programmatic setSelected (the
+  // auto-select-stop-0 after planning, a swap/reroute/remove's own reselect,
+  // …) must leave the camera alone.
+  const selectAndFocusStop = (stopId: string) => {
+    setSelected(stopId);
+    mapFocusNonce.current += 1;
+    setMapFocusRequest({ stopId, nonce: mapFocusNonce.current });
+  };
 
   async function runPipeline() {
     const q = prompt.trim();
@@ -751,6 +769,7 @@ export default function Home() {
     setChangedIds(new Set());
     setOldStarts({});
     setStripFocusRequest(null);
+    setMapFocusRequest(null);
     setSwapError(null);
     setClarify(null);
     setRecovery(null);
@@ -3160,7 +3179,8 @@ export default function Home() {
         timeZone={displayZone}
         visibleTravelLegIds={visibleTravelLegIds}
         legacyTransitVisibility={legacyTransitVisibility}
-        onSelect={(c) => setSelected((cur) => (cur === c ? cur : c))}
+        onSelect={selectAndFocusStop}
+        focusRequest={mapFocusRequest}
       />
 
       {wxNow && (
@@ -3181,7 +3201,7 @@ export default function Home() {
         onToggleManualLeg={(legId) =>
           setManualLegId((current) => toggleManualLegId(current, legId))
         }
-        onSelect={(c) => setSelected(c)}
+        onSelect={selectAndFocusStop}
         focusRequest={stripFocusRequest}
         onFocusHandled={(nonce) =>
           setStripFocusRequest((current) =>

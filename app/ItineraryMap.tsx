@@ -64,6 +64,19 @@ export interface MapHome {
   leaveBy?: string | null;
 }
 
+/**
+ * A nonce-keyed request to pan/zoom the camera onto one stop, mirroring
+ * `StripFocusRequest` (ItineraryStrip.tsx): the map instance is local to this
+ * component and unreachable from page.tsx, so a click routes here declaratively
+ * instead of lifting the `google.maps.Map` object up. The nonce is what makes
+ * clicking the SAME stop twice re-center — an unchanged `stopId` alone would
+ * not re-trigger a memo/effect keyed on it.
+ */
+export interface MapFocusRequest {
+  stopId: string;
+  nonce: number;
+}
+
 // Pale-blue cartography — cool desaturated tones, POIs and transit labels
 // stripped so the cards ARE the points of interest. The stripping rules are
 // unchanged from the original warm-paper theme; only the colours moved.
@@ -173,6 +186,15 @@ const MAX_MAP_RETRIES = 2;
 const HOME_FIT_RADIUS_MULTIPLE = 3;
 const HOME_FIT_MIN_RADIUS_METERS = 1_500;
 
+/**
+ * Zoom level for an explicit stop focus: "see the building and its block" —
+ * street names render and the venue reads unambiguous against the pale
+ * `PAPER_STYLE`, without cropping the surrounding context the way one more
+ * step in (18) does on this style. One step out (16) reads noticeably wider
+ * than street level. Picked by eyeballing this exact map style, not measured.
+ */
+const STOP_FOCUS_ZOOM = 17;
+
 /** Would including home still leave the stops readable? Measured from the
  *  stops' own centre — the thing the frame exists to show. Uses the Maps
  *  geometry library, already loaded here, rather than a second copy of the
@@ -207,9 +229,15 @@ interface Props {
   onSelect: (stopId: string) => void;
   visibleTravelLegIds?: readonly string[];
   legacyTransitVisibility?: boolean;
+  /** an explicit request to pan/zoom onto one stop — fires ONLY on a real
+   *  user click (see MapFocusRequest); never derived from `selected`, which
+   *  also changes on programmatic selection (auto-select-stop-0 on plan
+   *  load, a swap/reroute/remove's own reselect, …) that must not yank the
+   *  camera. */
+  focusRequest?: MapFocusRequest | null;
 }
 
-export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTravelLegIds = [], legacyTransitVisibility = true }: Props) {
+export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTravelLegIds = [], legacyTransitVisibility = true, focusRequest = null }: Props) {
   const mapDivRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const projRef = useRef<google.maps.MapCanvasProjection | null>(null);
@@ -615,7 +643,10 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   const fitKey =
     stops.map((s) => `${s.lat.toFixed(5)},${s.lng.toFixed(5)}`).join("|") +
     (home ? `#${home.lat.toFixed(5)},${home.lng.toFixed(5)}` : "");
-  useEffect(() => {
+  // The whole-plan reframe: the initial/mutation-driven fitKey effect below
+  // and the "show full itinerary" button call this exact same function, so
+  // there is one definition of the bounds math, not two.
+  const fitAllStops = () => {
     const map = mapRef.current;
     if (!map || mapState !== "ready") return;
     const pts: google.maps.LatLngLiteral[] = stops.map((s) => ({ lat: s.lat, lng: s.lng }));
@@ -633,8 +664,29 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
       pts.forEach((p) => bounds.extend(p));
       map.fitBounds(bounds, { top: 130, bottom: 90, left: 80, right: 80 });
     }
+  };
+  useEffect(() => {
+    fitAllStops();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fitKey, mapState]);
+
+  // The explicit per-stop camera focus. Keyed ONLY on the request's nonce —
+  // never on `selected` or on `stops` — so a programmatic selection (plan
+  // load's auto-select-stop-0, a swap/reroute/remove's own reselect) can
+  // never yank the view; only an actual click through `focusRequest` can.
+  // Re-clicking the same stop still moves the camera because the nonce, not
+  // the stopId, is what changed. `stops` is read fresh from this render's
+  // closure without being a dependency, the same pattern `fitAllStops` above
+  // uses for `fitKey`.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || mapState !== "ready" || !focusRequest) return;
+    const target = stops.find((s) => s.id === focusRequest.stopId);
+    if (!target) return;
+    map.panTo({ lat: target.lat, lng: target.lng });
+    map.setZoom(STOP_FOCUS_ZOOM);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest?.nonce, mapState]);
 
   const fallbackPoints = [
     ...(home ? [{ lat: home.lat, lng: home.lng }] : []),
@@ -762,6 +814,20 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
           </button>
         </div>
       )}
+      {/* Reframes to the whole plan — the same fit the effect above runs on
+          load and on every geometry-changing mutation, on demand. Camera/
+          display only: it never touches which leg is visible or any stop's
+          venue/time. */}
+      <button
+        type="button"
+        className="mapctl mapctl--fit"
+        aria-label="Show the whole itinerary"
+        onClick={fitAllStops}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+        </svg>
+      </button>
       <div className="ov-layer">
         {legLabels.map((l) => (
           <div key={l.key} className="leglab" style={{ left: l.x, top: l.y }}>
