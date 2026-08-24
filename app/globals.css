@@ -370,6 +370,13 @@ button { font-family: var(--grot); cursor: pointer; }
 .chip--live { border-color: var(--live); border-width: 1.5px; }
 .chip--done { background: var(--card-2); border-color: var(--rule-strong); }
 .chip--changed { border-color: var(--live); border-width: 1.5px; }
+/* A camera pan/zoom repositions every chip once per animation frame (the
+   projection probe). The chip's own left/top ease then fights that native
+   glide instead of tracking it, reading as lag/jitter behind the map. Drop
+   only the position ease for the camera move's duration so chips track the
+   map 1:1; a data-driven reflow (a swap/reroute moving a venue while the
+   camera sits still) keeps the normal eased catch-up. */
+.ov-layer--camera-moving .chip { transition: opacity 0.45s ease, border-color 0.4s ease; }
 
 /* NOTE: the .ecard* rules below are currently DEAD — the expanded editorial
    card was replaced by the compact chip above and no component renders it

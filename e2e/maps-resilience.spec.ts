@@ -40,27 +40,56 @@ const MAPS_STUB = String.raw`
   }
 
   class Map {
-    constructor(element) {
+    constructor(element, options) {
       this.element = element;
+      this.zoom = (options && typeof options.zoom === "number") ? options.zoom : 14;
+      this._listeners = {};
       element.dataset.providerMap = "ready";
+    }
+    getZoom() {
+      return this.zoom;
+    }
+    // A real MVCObject listener: production code uses map.addListener("idle", ...)
+    // to know when a pan/zoom settles. Fired async (a microtask) so a caller
+    // that issues setZoom() then panTo() in the same synchronous block still
+    // only observes settling once, after both have registered.
+    addListener(name, handler) {
+      (this._listeners[name] = this._listeners[name] || []).push(handler);
+      return {
+        remove: () => {
+          this._listeners[name] = (this._listeners[name] || []).filter(
+            (h) => h !== handler
+          );
+        },
+      };
+    }
+    _fire(name) {
+      Promise.resolve().then(() => {
+        (this._listeners[name] || []).forEach((h) => h());
+      });
     }
     setCenter(point) {
       window.__mapsSetCenters = window.__mapsSetCenters || [];
       window.__mapsSetCenters.push(coordinate(point));
+      this._fire("idle");
     }
     panTo(point) {
       window.__mapsPanTos = window.__mapsPanTos || [];
       window.__mapsPanTos.push(coordinate(point));
+      this._fire("idle");
     }
     setZoom(zoom) {
+      this.zoom = zoom;
       window.__mapsSetZooms = window.__mapsSetZooms || [];
       window.__mapsSetZooms.push(zoom);
+      this._fire("idle");
     }
     fitBounds(bounds) {
       window.__mapsFitBoundsCalls = window.__mapsFitBoundsCalls || [];
       window.__mapsFitBoundsCalls.push(
         (bounds.points || []).map((point) => [point.lat, point.lng])
       );
+      this._fire("idle");
     }
   }
 
@@ -434,6 +463,19 @@ async function setZoomCalls(page: Page): Promise<number[]> {
           __mapsSetZooms?: number[];
         }
       ).__mapsSetZooms ?? []
+  );
+}
+
+async function setCenterCalls(
+  page: Page
+): Promise<Array<{ lat: number; lng: number } | null>> {
+  return page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __mapsSetCenters?: Array<{ lat: number; lng: number } | null>;
+        }
+      ).__mapsSetCenters ?? []
   );
 }
 
@@ -1123,6 +1165,53 @@ test("@mock clicking a stop chip pans and zooms the camera to that exact stop, a
   const zooms3 = await setZoomCalls(page);
   expect(pans3.at(-1)).toEqual({ lat: 43.6512, lng: -79.4148 });
   expect(zooms3.at(-1)).toBe(17);
+});
+
+test("@mock a stop-to-stop hop at the same zoom skips the redundant setZoom call; a zoom-changing focus still calls it", async ({ page }) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+
+  const chips = page.locator(".chip");
+  await expect(chips).toHaveCount(2);
+
+  // The map starts at the overview zoom (14): the first focus needs a real
+  // zoom change and must still call setZoom.
+  const zoomsBeforeFirst = (await setZoomCalls(page)).length;
+  await chips.first().click();
+  await expect(chips.first()).toHaveClass(/chip--selected/);
+  expect((await setZoomCalls(page)).length).toBe(zoomsBeforeFirst + 1);
+  expect((await panToCalls(page)).length).toBeGreaterThan(0);
+
+  // Hopping to the other stop is already at STOP_FOCUS_ZOOM (17): no
+  // redundant setZoom call should fire, only the pan.
+  const zoomsBeforeHop = (await setZoomCalls(page)).length;
+  const pansBeforeHop = (await panToCalls(page)).length;
+  await chips.nth(1).click();
+  await expect(chips.nth(1)).toHaveClass(/chip--selected/);
+  expect((await setZoomCalls(page)).length).toBe(zoomsBeforeHop);
+  expect((await panToCalls(page)).length).toBe(pansBeforeHop + 1);
+});
+
+test("@mock reduced motion jumps the camera instantly instead of animating", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+
+  const chips = page.locator(".chip");
+  const pansBefore = (await panToCalls(page)).length;
+  const centersBefore = (await setCenterCalls(page)).length;
+
+  await chips.first().click();
+  await expect(chips.first()).toHaveClass(/chip--selected/);
+
+  // setCenter (instant), never panTo (animated glide), under reduced motion.
+  expect((await panToCalls(page)).length).toBe(pansBefore);
+  const centers = await setCenterCalls(page);
+  expect(centers.length).toBe(centersBefore + 1);
+  expect(centers.at(-1)).toEqual({ lat: 43.6479, lng: -79.4214 });
+  expect((await setZoomCalls(page)).at(-1)).toBe(17);
 });
 
 test("@mock a programmatic selection change never moves the map camera", async ({ page }) => {

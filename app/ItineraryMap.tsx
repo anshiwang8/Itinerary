@@ -248,6 +248,10 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   const [mapState, setMapState] = useState<"loading" | "ready" | "failed">("loading");
   const [retryCount, setRetryCount] = useState(0);
   const [dismissedRetry, setDismissedRetry] = useState<number | null>(null);
+  // True for the duration of an explicit camera pan/zoom (the focusRequest
+  // effect below). Suppresses the chip's own position transition while it's
+  // set — see the .ov-layer--camera-moving rule for why.
+  const [cameraMoving, setCameraMoving] = useState(false);
 
   // one-time map + projection probe
   useEffect(() => {
@@ -267,6 +271,12 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
             backgroundColor: "#e9e6df",
             clickableIcons: false,
           });
+          // Marks the end of any camera movement (ours or a manual drag) so
+          // the chip transition suppressed at the start of an explicit focus
+          // (below) is only ever off for as long as the camera is actually
+          // moving. Added once; it just keeps resetting a flag that starts
+          // false, so firing on a user gesture too is harmless.
+          mapRef.current.addListener("idle", () => setCameraMoving(false));
           // A projection probe: its draw() fires on every pan/zoom, giving
           // us live container-pixel projection for the HTML overlay layer.
           // The tick is scheduled on the next frame — never call setState
@@ -683,8 +693,27 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     if (!map || mapState !== "ready" || !focusRequest) return;
     const target = stops.find((s) => s.id === focusRequest.stopId);
     if (!target) return;
-    map.panTo({ lat: target.lat, lng: target.lng });
-    map.setZoom(STOP_FOCUS_ZOOM);
+    const point = { lat: target.lat, lng: target.lng };
+    const zoomChange = map.getZoom() !== STOP_FOCUS_ZOOM;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotion) {
+      // No animated glide under reduced motion — jump straight there.
+      map.setCenter(point);
+      if (zoomChange) map.setZoom(STOP_FOCUS_ZOOM);
+      return;
+    }
+    // setZoom is an instant step (never animated); panTo glides. The old
+    // order — panTo then an UNCONDITIONAL setZoom — fired both every time,
+    // and the setZoom cut the pan's glide off mid-animation, which is what
+    // read as a jump rather than a smooth camera move. Fixed two ways: skip
+    // setZoom entirely when the zoom is already correct (the common
+    // stop-to-stop hop, since both stops focus at the same STOP_FOCUS_ZOOM —
+    // this alone is the fix for that case), and when a zoom step genuinely is
+    // needed, do it FIRST so the instant snap happens before the glide starts
+    // rather than interrupting it partway through.
+    setCameraMoving(true);
+    if (zoomChange) map.setZoom(STOP_FOCUS_ZOOM);
+    map.panTo(point);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequest?.nonce, mapState]);
 
@@ -828,7 +857,7 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
           <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
         </svg>
       </button>
-      <div className="ov-layer">
+      <div className={"ov-layer" + (cameraMoving ? " ov-layer--camera-moving" : "")}>
         {legLabels.map((l) => (
           <div key={l.key} className="leglab" style={{ left: l.x, top: l.y }}>
             {l.segs.length > 0 && (
