@@ -16,6 +16,7 @@ import { createRetryableLoader } from "./lib/retryableLoader";
 import { displayableRouteMode } from "./lib/mapRoutePolicy";
 import { transitRideColor } from "./lib/transitRidePalette";
 import { travelLegVisible } from "./lib/travelLegVisibility";
+import { startCameraTween, type CameraPoint, type CameraTweenHandle } from "./lib/cameraTween";
 
 // Printed-cartography map: pale-blue Google styling (inline JSON, so no
 // Cloud map id), occurrence-coloured transit lines, and an HTML overlay layer
@@ -244,6 +245,10 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   const linesRef = useRef<google.maps.Polyline[]>([]);
   const visibleTravelKey = visibleTravelLegIds.join("|");
   const rafRef = useRef<number | null>(null);
+  // The in-flight stop-focus camera tween, if any — cancelled (and read for
+  // its current position, via the map's own getCenter/getZoom) whenever a
+  // new focus request arrives before the previous one finishes.
+  const cameraTweenRef = useRef<CameraTweenHandle | null>(null);
   const [, setTick] = useState(0);
   const [mapState, setMapState] = useState<"loading" | "ready" | "failed">("loading");
   const [retryCount, setRetryCount] = useState(0);
@@ -693,27 +698,44 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     if (!map || mapState !== "ready" || !focusRequest) return;
     const target = stops.find((s) => s.id === focusRequest.stopId);
     if (!target) return;
-    const point = { lat: target.lat, lng: target.lng };
-    const zoomChange = map.getZoom() !== STOP_FOCUS_ZOOM;
+    const targetPoint: CameraPoint = { lat: target.lat, lng: target.lng, zoom: STOP_FOCUS_ZOOM };
+
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (reduceMotion) {
       // No animated glide under reduced motion — jump straight there.
-      map.setCenter(point);
-      if (zoomChange) map.setZoom(STOP_FOCUS_ZOOM);
+      map.setCenter({ lat: targetPoint.lat, lng: targetPoint.lng });
+      if (map.getZoom() !== STOP_FOCUS_ZOOM) map.setZoom(STOP_FOCUS_ZOOM);
       return;
     }
-    // setZoom is an instant step (never animated); panTo glides. The old
-    // order — panTo then an UNCONDITIONAL setZoom — fired both every time,
-    // and the setZoom cut the pan's glide off mid-animation, which is what
-    // read as a jump rather than a smooth camera move. Fixed two ways: skip
-    // setZoom entirely when the zoom is already correct (the common
-    // stop-to-stop hop, since both stops focus at the same STOP_FOCUS_ZOOM —
-    // this alone is the fix for that case), and when a zoom step genuinely is
-    // needed, do it FIRST so the instant snap happens before the glide starts
-    // rather than interrupting it partway through.
+
+    // `panTo` did not visibly animate in this app's environment (see
+    // DEVLOG), so the camera is driven explicitly via a per-frame
+    // requestAnimationFrame tween (app/lib/cameraTween.ts) rather than
+    // relying on the Maps SDK's own implicit glide.
+    const currentCenter = map.getCenter();
+    const startPoint: CameraPoint = {
+      lat: currentCenter ? currentCenter.lat() : targetPoint.lat,
+      lng: currentCenter ? currentCenter.lng() : targetPoint.lng,
+      zoom: map.getZoom() ?? targetPoint.zoom,
+    };
+    // Reading the map's OWN current center/zoom here (rather than the last
+    // tween's target) is what makes a mid-glide redirect smooth: the prior
+    // tween is cancelled by this same effect's cleanup before this body
+    // reruns, so `startPoint` reflects wherever the camera actually stopped,
+    // not where it was headed.
+
     setCameraMoving(true);
-    if (zoomChange) map.setZoom(STOP_FOCUS_ZOOM);
-    map.panTo(point);
+    cameraTweenRef.current = startCameraTween(
+      startPoint,
+      targetPoint,
+      (point) => map.moveCamera({ center: { lat: point.lat, lng: point.lng }, zoom: point.zoom }),
+      () => setCameraMoving(false)
+    );
+
+    return () => {
+      cameraTweenRef.current?.cancel();
+      cameraTweenRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequest?.nonce, mapState]);
 

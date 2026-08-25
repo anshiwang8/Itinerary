@@ -43,11 +43,15 @@ const MAPS_STUB = String.raw`
     constructor(element, options) {
       this.element = element;
       this.zoom = (options && typeof options.zoom === "number") ? options.zoom : 14;
+      this.center = coordinate((options && options.center) || null);
       this._listeners = {};
       element.dataset.providerMap = "ready";
     }
     getZoom() {
       return this.zoom;
+    }
+    getCenter() {
+      return this.center ? new LatLng(this.center) : undefined;
     }
     // A real MVCObject listener: production code uses map.addListener("idle", ...)
     // to know when a pan/zoom settles. Fired async (a microtask) so a caller
@@ -69,11 +73,13 @@ const MAPS_STUB = String.raw`
       });
     }
     setCenter(point) {
+      this.center = coordinate(point);
       window.__mapsSetCenters = window.__mapsSetCenters || [];
       window.__mapsSetCenters.push(coordinate(point));
       this._fire("idle");
     }
     panTo(point) {
+      this.center = coordinate(point);
       window.__mapsPanTos = window.__mapsPanTos || [];
       window.__mapsPanTos.push(coordinate(point));
       this._fire("idle");
@@ -82,6 +88,19 @@ const MAPS_STUB = String.raw`
       this.zoom = zoom;
       window.__mapsSetZooms = window.__mapsSetZooms || [];
       window.__mapsSetZooms.push(zoom);
+      this._fire("idle");
+    }
+    // Real Maps: "Immediately sets the map's camera to the target camera
+    // options, without animation." Production code drives its own rAF tween
+    // (app/lib/cameraTween.ts) and calls this once per frame with both
+    // center and zoom together, which is what the recorder below captures.
+    moveCamera(options) {
+      const center = options && options.center ? coordinate(options.center) : null;
+      const zoom = options && typeof options.zoom === "number" ? options.zoom : null;
+      if (center) this.center = center;
+      if (zoom !== null) this.zoom = zoom;
+      window.__mapsMoveCameraCalls = window.__mapsMoveCameraCalls || [];
+      window.__mapsMoveCameraCalls.push({ center, zoom });
       this._fire("idle");
     }
     fitBounds(bounds) {
@@ -442,19 +461,6 @@ async function fitBoundsCalls(page: Page): Promise<Array<Array<[number, number]>
   );
 }
 
-async function panToCalls(
-  page: Page
-): Promise<Array<{ lat: number; lng: number } | null>> {
-  return page.evaluate(
-    () =>
-      (
-        window as Window & {
-          __mapsPanTos?: Array<{ lat: number; lng: number } | null>;
-        }
-      ).__mapsPanTos ?? []
-  );
-}
-
 async function setZoomCalls(page: Page): Promise<number[]> {
   return page.evaluate(
     () =>
@@ -463,6 +469,19 @@ async function setZoomCalls(page: Page): Promise<number[]> {
           __mapsSetZooms?: number[];
         }
       ).__mapsSetZooms ?? []
+  );
+}
+
+type MoveCameraCall = { center: { lat: number; lng: number } | null; zoom: number | null };
+
+async function moveCameraCalls(page: Page): Promise<MoveCameraCall[]> {
+  return page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __mapsMoveCameraCalls?: MoveCameraCall[];
+        }
+      ).__mapsMoveCameraCalls ?? []
   );
 }
 
@@ -1136,7 +1155,7 @@ test("@mock an uncertain travel estimate does not draw a solid map route", async
   ).toBe(0);
 });
 
-test("@mock clicking a stop chip pans and zooms the camera to that exact stop, and re-clicking it re-centers", async ({ page }) => {
+test("@mock clicking a stop chip animates the camera to that exact stop, and re-clicking it re-centers", async ({ page }) => {
   await serveMaps(page);
   await page.goto("/test-harness/maps");
   await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
@@ -1146,28 +1165,75 @@ test("@mock clicking a stop chip pans and zooms the camera to that exact stop, a
 
   await chips.first().click();
   await expect(chips.first()).toHaveClass(/chip--selected/);
-  const pans1 = await panToCalls(page);
-  const zooms1 = await setZoomCalls(page);
-  expect(pans1.at(-1)).toEqual({ lat: 43.6479, lng: -79.4214 });
-  expect(zooms1.at(-1)).toBe(17);
+  await expect
+    .poll(async () => (await moveCameraCalls(page)).at(-1))
+    .toEqual({ center: { lat: 43.6479, lng: -79.4214 }, zoom: 17 });
+  const callsAfterFirst = await moveCameraCalls(page);
+  // A real multi-frame glide, not a single teleporting jump.
+  expect(callsAfterFirst.length).toBeGreaterThan(1);
 
   // Re-clicking the SAME stop bumps the nonce and re-centers, even though
-  // `selected` itself does not change value.
+  // `selected` itself does not change value. The camera is already exactly
+  // there, so the tween's no-op path fires one immediate moveCamera call
+  // rather than animating a glide with nothing to interpolate.
   await chips.first().click();
-  const pans2 = await panToCalls(page);
-  expect(pans2.length).toBe(pans1.length + 1);
-  expect(pans2.at(-1)).toEqual({ lat: 43.6479, lng: -79.4214 });
+  await expect
+    .poll(async () => (await moveCameraCalls(page)).length)
+    .toBe(callsAfterFirst.length + 1);
+  expect((await moveCameraCalls(page)).at(-1)).toEqual({
+    center: { lat: 43.6479, lng: -79.4214 },
+    zoom: 17,
+  });
 
-  // Clicking the OTHER stop focuses its own coordinate.
+  // Clicking the OTHER stop focuses its own coordinate, animated again.
+  const beforeSecond = (await moveCameraCalls(page)).length;
   await chips.nth(1).click();
   await expect(chips.nth(1)).toHaveClass(/chip--selected/);
-  const pans3 = await panToCalls(page);
-  const zooms3 = await setZoomCalls(page);
-  expect(pans3.at(-1)).toEqual({ lat: 43.6512, lng: -79.4148 });
-  expect(zooms3.at(-1)).toBe(17);
+  await expect
+    .poll(async () => (await moveCameraCalls(page)).at(-1))
+    .toEqual({ center: { lat: 43.6512, lng: -79.4148 }, zoom: 17 });
+  expect((await moveCameraCalls(page)).length).toBeGreaterThan(beforeSecond + 1);
 });
 
-test("@mock a stop-to-stop hop at the same zoom skips the redundant setZoom call; a zoom-changing focus still calls it", async ({ page }) => {
+test("@mock clicking a second stop mid-glide cancels the first tween and redirects from wherever the camera actually was", async ({ page }) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+
+  const chips = page.locator(".chip");
+  await expect(chips).toHaveCount(2);
+
+  await chips.first().click();
+  await expect(chips.first()).toHaveClass(/chip--selected/);
+  // Interrupt partway through the ~400ms glide toward stop 1.
+  await page.waitForTimeout(120);
+  const midFlightCalls = await moveCameraCalls(page);
+  expect(midFlightCalls.length).toBeGreaterThan(0);
+  // This assertion is only meaningful if it genuinely interrupts an
+  // in-flight glide rather than a finished one.
+  expect(midFlightCalls.at(-1)).not.toEqual({
+    center: { lat: 43.6479, lng: -79.4214 },
+    zoom: 17,
+  });
+
+  await chips.nth(1).click();
+  await expect(chips.nth(1)).toHaveClass(/chip--selected/);
+  await expect
+    .poll(async () => (await moveCameraCalls(page)).at(-1))
+    .toEqual({ center: { lat: 43.6512, lng: -79.4148 }, zoom: 17 });
+
+  // A redirect must start from wherever the camera actually stopped, not
+  // snap back to stop 1's exact coordinate first and then re-animate — that
+  // would read as a stutter rather than one continuous glide.
+  const callsAfterRedirect = (await moveCameraCalls(page)).slice(midFlightCalls.length);
+  expect(
+    callsAfterRedirect.some(
+      (call) => call.center && call.center.lat === 43.6479 && call.center.lng === -79.4214
+    )
+  ).toBe(false);
+});
+
+test("@mock a stop-to-stop hop holds zoom constant across every frame; an overview-to-stop focus animates zoom too", async ({ page }) => {
   await serveMaps(page);
   await page.goto("/test-harness/maps");
   await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
@@ -1176,21 +1242,30 @@ test("@mock a stop-to-stop hop at the same zoom skips the redundant setZoom call
   await expect(chips).toHaveCount(2);
 
   // The map starts at the overview zoom (14): the first focus needs a real
-  // zoom change and must still call setZoom.
-  const zoomsBeforeFirst = (await setZoomCalls(page)).length;
+  // zoom change, so at least one intermediate frame must show a zoom
+  // strictly between 14 and 17 (a genuine interpolation, not an instant
+  // jump straight to the target).
   await chips.first().click();
   await expect(chips.first()).toHaveClass(/chip--selected/);
-  expect((await setZoomCalls(page)).length).toBe(zoomsBeforeFirst + 1);
-  expect((await panToCalls(page)).length).toBeGreaterThan(0);
+  await expect
+    .poll(async () => (await moveCameraCalls(page)).at(-1)?.zoom)
+    .toBe(17);
+  const firstFocusCalls = await moveCameraCalls(page);
+  const intermediateZooms = firstFocusCalls.slice(0, -1).map((call) => call.zoom);
+  expect(intermediateZooms.some((zoom) => zoom !== null && zoom > 14 && zoom < 17)).toBe(true);
 
-  // Hopping to the other stop is already at STOP_FOCUS_ZOOM (17): no
-  // redundant setZoom call should fire, only the pan.
-  const zoomsBeforeHop = (await setZoomCalls(page)).length;
-  const pansBeforeHop = (await panToCalls(page)).length;
+  // Hopping to the other stop is already at STOP_FOCUS_ZOOM (17): every
+  // frame of that glide should hold zoom exactly at 17 and animate only the
+  // center.
+  const beforeHop = firstFocusCalls.length;
   await chips.nth(1).click();
   await expect(chips.nth(1)).toHaveClass(/chip--selected/);
-  expect((await setZoomCalls(page)).length).toBe(zoomsBeforeHop);
-  expect((await panToCalls(page)).length).toBe(pansBeforeHop + 1);
+  await expect
+    .poll(async () => (await moveCameraCalls(page)).at(-1)?.center)
+    .toEqual({ lat: 43.6512, lng: -79.4148 });
+  const hopCalls = (await moveCameraCalls(page)).slice(beforeHop);
+  expect(hopCalls.length).toBeGreaterThan(1); // a real multi-frame glide
+  expect(hopCalls.every((call) => call.zoom === 17)).toBe(true);
 });
 
 test("@mock reduced motion jumps the camera instantly instead of animating", async ({ page }) => {
@@ -1200,14 +1275,14 @@ test("@mock reduced motion jumps the camera instantly instead of animating", asy
   await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
 
   const chips = page.locator(".chip");
-  const pansBefore = (await panToCalls(page)).length;
+  const movesBefore = (await moveCameraCalls(page)).length;
   const centersBefore = (await setCenterCalls(page)).length;
 
   await chips.first().click();
   await expect(chips.first()).toHaveClass(/chip--selected/);
 
-  // setCenter (instant), never panTo (animated glide), under reduced motion.
-  expect((await panToCalls(page)).length).toBe(pansBefore);
+  // setCenter (instant), never the animated moveCamera tween, under reduced motion.
+  expect((await moveCameraCalls(page)).length).toBe(movesBefore);
   const centers = await setCenterCalls(page);
   expect(centers.length).toBe(centersBefore + 1);
   expect(centers.at(-1)).toEqual({ lat: 43.6479, lng: -79.4214 });
@@ -1219,10 +1294,10 @@ test("@mock a programmatic selection change never moves the map camera", async (
   await page.goto("/test-harness/maps");
   await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
 
-  const before = await panToCalls(page);
+  const before = await moveCameraCalls(page);
   await page.getByRole("button", { name: "Select first stop programmatically" }).click();
   await expect(page.locator(".chip").first()).toHaveClass(/chip--selected/);
-  const after = await panToCalls(page);
+  const after = await moveCameraCalls(page);
   // `selected` changed (proven by the class above); the camera did not.
   expect(after.length).toBe(before.length);
 });
