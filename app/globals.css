@@ -623,7 +623,7 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__name--home { font-size: 17px; }
 
 .lstrip__stop {
-  width: 182px; font-family: var(--grot);
+  width: 182px; font-family: var(--grot); position: relative;
   transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.3s ease;
 }
 .lstrip__select {
@@ -684,6 +684,37 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__stop--live { border-color: var(--live); border-width: 1.5px; }
 .lstrip__stop--changed { border-color: var(--live); border-width: 1.5px; }
 .lstrip__stop--done { background: var(--card-2); }
+
+/* The active stop's real-time progress caret. It straddles the card's own
+   bottom edge — tip pointing UP into the card (embedded in the --live
+   border), base pointing DOWN past it (protruding into the strip's blank
+   padding) — and creeps left to right over the stop's real window via a
+   CSS animation whose duration/delay are computed ONCE per render from
+   real instants (see activeTriangleCreep.ts). No ticker: the negative
+   delay starts the animation already offset at the correct position, and
+   the browser's own compositor carries it forward from there, including
+   across a frozen/backgrounded tab.
+   Sizing is measured against `.lstrip`'s own clipping budget (globals.css,
+   overflow-x:auto forces overflow-y:auto, clipping at the 8px bottom
+   padding): -9px is the last `bottom` offset that does not clip or
+   introduce a stray scrollbar. Reuses --live rather than inventing a new
+   colour — the border it straddles already carries that exact meaning
+   ("happening now"), and this is the same meaning, not a new one. */
+.lstrip__triangle {
+  position: absolute; bottom: -9px;
+  width: 0; height: 0;
+  border-left: 6px solid transparent; border-right: 6px solid transparent;
+  border-bottom: 7px solid var(--live);
+  transform: translateX(-50%);
+  animation-name: lstrip-triangle-creep;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+  pointer-events: none;
+}
+@keyframes lstrip-triangle-creep {
+  from { left: 0%; }
+  to { left: 100%; }
+}
 
 /* inline swap prompt, revealed under the selected card */
 .lstrip__swap { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--rule); }
@@ -1689,6 +1720,12 @@ button { font-family: var(--grot); cursor: pointer; }
      fade animation goes. The banner snaps straight to invisible instead of
      easing there. */
   .banner--fading { transition: none !important; }
+  /* The creep still SAYS where "now" sits — the inline `left` set beside
+     the animation properties is the fraction computed at this render, so
+     disabling only the animation leaves a correct (if un-ticking) static
+     position, the same "no ticker, correct as of last render" contract the
+     rest of the app already keeps. */
+  .lstrip__triangle { animation: none !important; }
   .auth, .auth__card { animation: none !important; }
   .acct__signin, .auth__google, .auth__guest { transition: none !important; }
   .acctmenu__pop { animation: none !important; }

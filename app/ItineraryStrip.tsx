@@ -15,6 +15,7 @@ import {
   shouldShowTimeline,
 } from "./lib/transitDetail";
 import { originDisplayLabel } from "./lib/locationLabels";
+import { computeTriangleCreep } from "./lib/activeTriangleCreep";
 
 // Horizontal itinerary strip — the primary surface, sitting just under
 // the search bar. Reads left to right like a transit-app trip view:
@@ -635,6 +636,7 @@ function StopCard({
   swap,
   remove,
   timeZone,
+  now,
   focusRequest,
   onFocusHandled,
 }: {
@@ -645,6 +647,10 @@ function StopCard({
   swap?: SwapInline | null;
   remove?: RemoveInline | null;
   timeZone: string;
+  /** the app's one "now" (real clock, or the dev sim clock) — same instant
+   *  threaded into LegCard, so the triangle's position and the leg/"now"
+   *  pill can never disagree the moment anyone simulates time. */
+  now: Date;
   focusRequest?: StripFocusRequest | null;
   onFocusHandled?: (nonce: number) => void;
 }) {
@@ -668,6 +674,13 @@ function StopCard({
     (stop.status === "completed" ? " lstrip__stop--done" : "") +
     (stop.changed ? " lstrip__stop--changed" : "") +
     (armed ? " lstrip__stop--arming" : "");
+  // WHETHER to show anything is stop.status's job alone (already the
+  // source of truth); this only computes WHERE the caret sits once status
+  // has decided to show it, and returns null for the same "not really
+  // active by the clock, or the window can't be measured" cases status
+  // itself would refuse to call active.
+  const triangle =
+    stop.status === "active" ? computeTriangleCreep(stop.start, stop.end, now) : null;
 
   useEffect(() => {
     if (
@@ -809,6 +822,22 @@ function StopCard({
           />
         )}
       </div>
+      {/* A SIBLING of the button and details div, never nested inside
+          either — it straddles the CARD's own bottom edge regardless of
+          whether the card is expanded. Purely decorative (the "now" pill
+          and the "be here" range already say what a screen reader needs),
+          so it carries no information of its own beyond the visual creep. */}
+      {triangle && (
+        <span
+          className="lstrip__triangle"
+          aria-hidden="true"
+          style={{
+            left: `${triangle.fraction * 100}%`,
+            animationDuration: `${triangle.durationMs}ms`,
+            animationDelay: `${triangle.delayMs}ms`,
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -876,6 +905,7 @@ export default function ItineraryStrip({
             swap={selected === s.id ? swap : null}
             remove={selected === s.id ? remove : null}
             timeZone={timeZone}
+            now={now}
             focusRequest={focusRequest}
             onFocusHandled={onFocusHandled}
           />

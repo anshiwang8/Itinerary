@@ -1924,6 +1924,45 @@ test("@mock a driving leg renders as Drive, not as a walk, and stays selectable"
   ).toHaveCount(1);
 });
 
+// ── the active-stop real-time creep triangle ──
+// "Drive Specimen One" is the driving specimen's only fixture-marked
+// `active` stop, in a 19:00-20:00 window; the specimen's own fixed `now`
+// (19:30) sits at exactly its midpoint, so the triangle's position is
+// deterministic — no real clock, no polling, no flakiness.
+test("@mock the active stop's card alone shows the real-time creep triangle, at its computed fraction", async ({
+  page,
+}) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+  await page.getByRole("button", { name: "Show driving specimen" }).click();
+
+  const strip = page.getByTestId("driving-strip-specimen");
+  const stops = strip.locator(".lstrip__stop");
+  await expect(stops).toHaveCount(4);
+
+  // Present, exactly once, on the active card.
+  const activeCard = stops.filter({ hasText: "Drive Specimen One" });
+  await expect(activeCard.locator(".lstrip__triangle")).toHaveCount(1);
+
+  // Absent on every upcoming card — three stops, zero triangles between them.
+  const upcoming = stops.filter({ hasText: /Drive Specimen (Two|Three|Four)/ });
+  await expect(upcoming).toHaveCount(3);
+  await expect(upcoming.locator(".lstrip__triangle")).toHaveCount(0);
+
+  // And roughly positioned per the computed fraction: 30 of 60 minutes
+  // elapsed is exactly 50%, so the triangle's horizontal center should sit
+  // at the card's own midpoint (a generous ±2% tolerance covers subpixel
+  // rounding in the two bounding boxes, well inside the investigation's
+  // measured ±1% accuracy for the underlying CSS technique).
+  const cardBox = await activeCard.boundingBox();
+  const triangleBox = await activeCard.locator(".lstrip__triangle").boundingBox();
+  if (!cardBox || !triangleBox) throw new Error("expected both boxes to be measurable");
+  const fraction = (triangleBox.x + triangleBox.width / 2 - cardBox.x) / cardBox.width;
+  expect(fraction).toBeGreaterThan(0.48);
+  expect(fraction).toBeLessThan(0.52);
+});
+
 test("@mock a driving leg draws its real road line, and none at all without geometry", async ({
   page,
 }) => {
