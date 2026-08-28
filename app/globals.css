@@ -939,6 +939,8 @@ button { font-family: var(--grot); cursor: pointer; }
 }
 .dev button.ghost { background: transparent; color: #b3cdd8; border: 1px solid #2f5468; }
 .dev__collapsed { width: auto; padding: 8px 11px; cursor: pointer; }
+.dev__note { font-size: 10.5px; color: #b3cdd8; line-height: 1.45; word-break: break-word; }
+.dev__row > .dev__note { margin-left: auto; text-align: right; }
 
 /* ────────────────  Accounts (Stage 1A — login only)  ────────────────
    NOTE ON COLOUR: acid green (--live) is RESERVED for "happening now / just

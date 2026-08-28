@@ -102,11 +102,33 @@ import {
   toggleManualLegId,
   visibleTravelLegIds as deriveVisibleTravelLegIds,
 } from "./lib/travelLegVisibility";
+import { useLiveTracking } from "./lib/useLiveTracking";
+import { LIVE_TRACKING_WHILE_OPEN_NOTE, type LiveTrackingState } from "./lib/liveTracking";
 
 const SHOW_DEV_CONTROLS = shouldShowDevControls(
   process.env.NODE_ENV,
   process.env.NEXT_PUBLIC_ENABLE_DEV_CONTROLS
 );
+
+/** Dev-only console trace for the live-location stream (Piece 1 has no real
+ *  UI yet). Fires on TRANSITIONS only, never on a timer. Lets the owner
+ *  eyeball the stale/live flips on :3200 without Piece 2's toggle existing. */
+function logLiveTracking(state: LiveTrackingState): void {
+  const parts = [`[live-tracking] ${state.status}`];
+  if (state.staleReason) parts.push(`reason=${state.staleReason}`);
+  if (state.errorKind) parts.push(`err=${state.errorKind}`);
+  if (state.position) {
+    parts.push(
+      `at ${state.position.lat.toFixed(5)},${state.position.lng.toFixed(5)} +/-${Math.round(
+        state.position.accuracyM
+      )}m`
+    );
+  }
+  if (state.lastUpdatedAt) {
+    parts.push(`age=${Math.round((Date.now() - state.lastUpdatedAt) / 1000)}s`);
+  }
+  console.log(parts.join(" "));
+}
 
 interface Place {
   id: string;
@@ -636,6 +658,14 @@ export default function Home() {
   const [changedIds, setChangedIds] = useState<Set<string>>(new Set());
   const [oldStarts, setOldStarts] = useState<Record<string, string | null>>({});
   const [devOpen, setDevOpen] = useState(true);
+  // Live-location tracking (Piece 1): dev-only opt-in for now. The real
+  // toggle is Piece 2. `enabled` folds in `!!itinerary` so ending the plan
+  // stops the watch — one of the lifecycle paths the module must cover.
+  const [liveTrackWanted, setLiveTrackWanted] = useState(false);
+  const liveTracking = useLiveTracking(
+    SHOW_DEV_CONTROLS && liveTrackWanted && Boolean(itinerary),
+    SHOW_DEV_CONTROLS ? logLiveTracking : undefined
+  );
   const [swapText, setSwapText] = useState("");
   const [swapping, setSwapping] = useState(false);
   const [swapError, setSwapError] = useState<string | null>(null);
@@ -3458,6 +3488,32 @@ export default function Home() {
               cancel
             </button>
           </div>
+          <div className="dev__row">
+            <label>live loc</label>
+            <button
+              type="button"
+              className={liveTrackWanted ? "ghost" : undefined}
+              aria-label="Toggle dev live-location tracking"
+              aria-pressed={liveTrackWanted}
+              onClick={() => setLiveTrackWanted((v) => !v)}
+            >
+              {liveTrackWanted ? "stop" : "start"}
+            </button>
+            <span className="dev__note">{liveTracking.status}</span>
+          </div>
+          <div className="dev__note">
+            {liveTracking.position
+              ? `${liveTracking.position.lat.toFixed(5)}, ${liveTracking.position.lng.toFixed(
+                  5
+                )} +/-${Math.round(liveTracking.position.accuracyM)}m`
+              : "no fix yet"}
+            {liveTracking.lastUpdatedAt
+              ? `, ${Math.round((displayNowMs - liveTracking.lastUpdatedAt) / 1000)}s ago`
+              : ""}
+            {liveTracking.staleReason ? `, ${liveTracking.staleReason}` : ""}
+            {liveTracking.errorKind ? `, ${liveTracking.errorKind}` : ""}
+          </div>
+          <div className="dev__note">{LIVE_TRACKING_WHILE_OPEN_NOTE}</div>
         </div>
       ) : (
         <button
