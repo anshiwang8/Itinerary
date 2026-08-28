@@ -46,6 +46,20 @@ const MAPS_STUB = String.raw`
       this.center = coordinate((options && options.center) || null);
       this._listeners = {};
       element.dataset.providerMap = "ready";
+      // A handle for the drag/scroll-zoom simulation below: the real API fires
+      // "bounds_changed" continuously during a user gesture and "idle" once
+      // when it settles. Nothing in production reaches the map object this
+      // way; this is purely so a test can drive those two events without going
+      // through the chip-click focus-request path.
+      window.__mapsLastMap = this;
+    }
+    // Test-only: fire one gesture frame / the gesture settling, synchronously,
+    // WITHOUT recording a camera call or mutating center/zoom.
+    __fireBoundsChanged() {
+      (this._listeners["bounds_changed"] || []).forEach((h) => h());
+    }
+    __fireIdle() {
+      (this._listeners["idle"] || []).forEach((h) => h());
     }
     getZoom() {
       return this.zoom;
@@ -1300,6 +1314,88 @@ test("@mock a programmatic selection change never moves the map camera", async (
   const after = await moveCameraCalls(page);
   // `selected` changed (proven by the class above); the camera did not.
   expect(after.length).toBe(before.length);
+});
+
+// BUG 2: the chip-ease suppression flag was wired to the focus tween ONLY. A
+// real user drag or scroll-wheel zoom never set it, so the chip kept its
+// 0.55s left/top ease chasing a per-frame-moving target and visibly swam
+// behind its pin. The fix wires `bounds_changed` (fires on ANY camera change)
+// as the rising edge; `idle` stays the one falling edge.
+test("@mock a user drag or scroll-zoom suppresses the chip position ease, independent of the focus tween", async ({ page }) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+
+  const ovLayer = page.locator(".ov-layer");
+  // The initial fit settles to idle, so the chip ease is NOT suppressed at rest.
+  await expect(ovLayer).not.toHaveClass(/ov-layer--camera-moving/);
+
+  // A drag / scroll-wheel zoom fires bounds_changed repeatedly. This is NOT
+  // the chip-click focus path: no moveCamera tween ever runs.
+  const movesBefore = (await moveCameraCalls(page)).length;
+  await page.evaluate(() => {
+    (
+      window as Window & { __mapsLastMap?: { __fireBoundsChanged: () => void } }
+    ).__mapsLastMap?.__fireBoundsChanged();
+  });
+  await expect(ovLayer).toHaveClass(/ov-layer--camera-moving/);
+  expect((await moveCameraCalls(page)).length).toBe(movesBefore);
+
+  // The gesture settling (idle) clears it again.
+  await page.evaluate(() => {
+    (
+      window as Window & { __mapsLastMap?: { __fireIdle: () => void } }
+    ).__mapsLastMap?.__fireIdle();
+  });
+  await expect(ovLayer).not.toHaveClass(/ov-layer--camera-moving/);
+});
+
+// BUG 1: `.mk--home`'s anchor box used to include the address label, so
+// centering the box on the coordinate (translate(-50%, -50%)) left the DOT
+// itself offset — by half the label's width horizontally and a constant
+// ~11.5px vertically. The mock projection is a fixed linear fake, so this can
+// only be observed as a real-CSS layout assertion, not a projection round-trip.
+test("@mock the home marker's dot sits on its coordinate for a short label and a long address", async ({ page }) => {
+  await openVisibilitySpecimen(page);
+
+  const readOffsets = async () => {
+    const style = (await page.locator(".mk--home").getAttribute("style")) ?? "";
+    const declaredLeft = Number.parseFloat(/left:\s*([\d.]+)px/.exec(style)?.[1] ?? "NaN");
+    const declaredTop = Number.parseFloat(/top:\s*([\d.]+)px/.exec(style)?.[1] ?? "NaN");
+    const [ov, dot, tag] = await Promise.all([
+      page.locator(".ov-layer").boundingBox(),
+      page.locator(".mk--home .mk__dot").boundingBox(),
+      page.locator(".mk--home .mk__tag").boundingBox(),
+    ]);
+    if (!ov || !dot || !tag) throw new Error("home marker parts are not laid out");
+    return {
+      // rendered dot centre, relative to the declared coordinate
+      dotX: dot.x + dot.width / 2 - ov.x - declaredLeft,
+      dotY: dot.y + dot.height / 2 - ov.y - declaredTop,
+      // the tag stays centred on the dot, 5px below it
+      tagCentreOffset: tag.x + tag.width / 2 - ov.x - declaredLeft,
+      tagGap: tag.y - (dot.y + dot.height),
+    };
+  };
+
+  // Short label ("Visibility Home").
+  const short = await readOffsets();
+  expect(Math.abs(short.dotX)).toBeLessThan(1);
+  expect(Math.abs(short.dotY)).toBeLessThan(1);
+  expect(Math.abs(short.tagCentreOffset)).toBeLessThan(1);
+  expect(short.tagGap).toBeGreaterThan(3);
+  expect(short.tagGap).toBeLessThan(7);
+
+  // A long formatted address: the tag is now far wider than the dot, which is
+  // exactly the case that used to shove the dot ~150px sideways.
+  await page.getByRole("button", { name: "Use long home label" }).click();
+  await expect(page.locator(".mk--home .mk__tag")).toContainText("1200 Bay Street");
+  const long = await readOffsets();
+  expect(Math.abs(long.dotX)).toBeLessThan(1);
+  expect(Math.abs(long.dotY)).toBeLessThan(1);
+  expect(Math.abs(long.tagCentreOffset)).toBeLessThan(1);
+  expect(long.tagGap).toBeGreaterThan(3);
+  expect(long.tagGap).toBeLessThan(7);
 });
 
 test("@mock the show-full-itinerary control reframes through the same fitAllStops path as the initial fit", async ({ page }) => {

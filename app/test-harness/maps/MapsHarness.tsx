@@ -588,6 +588,11 @@ const ROUTE_STRIP_STOPS: StripStop[] = [
 // ROUTE_STOPS above and would make every identified transit leg visible,
 // masking the exact home-boundary behavior this specimen exists to exercise.
 const VISIBILITY_HOME_LEG_ID = "leg:visibility-home";
+// A deliberately long formatted address. The home dot must stay centred on its
+// coordinate no matter how wide the tag beside it is (BUG 1: the label used to
+// sit inside the marker's anchor box and push the dot sideways).
+const LONG_HOME_LABEL =
+  "1200 Bay Street, Suite 800, Toronto, Ontario M5R 2A5, Canada";
 const VISIBILITY_DECODED_WALK_ID = "leg:visibility-walk-decoded";
 const VISIBILITY_FALLBACK_WALK_ID = "leg:visibility-walk-fallback";
 const VISIBILITY_MANUAL_WALK_ID = "leg:visibility-walk-manual";
@@ -1250,6 +1255,18 @@ export default function MapsHarness() {
           </button>
           <button type="button" onClick={showVisibilitySpecimen}>
             Reset visibility plan
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setVisibilityPlan((plan) => {
+                const clone = cloneVisibilityPlan(plan);
+                clone.mapHome = { ...clone.mapHome, label: LONG_HOME_LABEL };
+                return clone;
+              })
+            }
+          >
+            Use long home label
           </button>
         </div>
       )}

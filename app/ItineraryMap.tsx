@@ -276,11 +276,17 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
             backgroundColor: "#e9e6df",
             clickableIcons: false,
           });
-          // Marks the end of any camera movement (ours or a manual drag) so
-          // the chip transition suppressed at the start of an explicit focus
-          // (below) is only ever off for as long as the camera is actually
-          // moving. Added once; it just keeps resetting a flag that starts
-          // false, so firing on a user gesture too is harmless.
+          // The chip-ease suppression must cover EVERY camera-changing source,
+          // not just our own focus tween (which also sets the flag below, now
+          // redundant, kept for legibility). `bounds_changed` fires on any
+          // viewport change — a user drag, a scroll-wheel zoom, and the
+          // tween's per-frame moveCamera — so it is the one rising edge that
+          // catches all of them; `idle` is the single falling edge when motion
+          // settles. Without the drag/zoom half, the chip keeps its 0.55s
+          // left/top ease chasing a target that moves every frame and visibly
+          // swims behind its pin. Re-setting an already-true flag is a no-op
+          // React render, so the high fire rate costs nothing measurable.
+          mapRef.current.addListener("bounds_changed", () => setCameraMoving(true));
           mapRef.current.addListener("idle", () => setCameraMoving(false));
           // A projection probe: its draw() fires on every pan/zoom, giving
           // us live container-pixel projection for the HTML overlay layer.
@@ -724,6 +730,9 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     // reruns, so `startPoint` reflects wherever the camera actually stopped,
     // not where it was headed.
 
+    // Redundant since the `bounds_changed` listener (map setup) now also
+    // catches the tween's per-frame moveCamera, but kept for legibility: this
+    // is where an explicit focus starts moving the camera.
     setCameraMoving(true);
     cameraTweenRef.current = startCameraTween(
       startPoint,

@@ -322,6 +322,13 @@ button { font-family: var(--grot); cursor: pointer; }
 }
 .mk--home .mk__dot svg { width: 13px; height: 13px; fill: #FFFFFF; }
 .mk--home .mk__tag {
+  /* Take the address label OUT of the marker's flow. `.mk` centres its whole
+     border box on the coordinate (translate(-50%, -50%)); with the label in
+     flow that box is dot + label, so the DOT lands offset by half the label's
+     width and a constant ~11.5px up. Absolute-positioning the label leaves the
+     box as just the dot, like every other marker, and the label still hangs
+     5px below the dot, centred on it. */
+  position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
   font-family: var(--grot); font-size: 11px; color: var(--ink-soft);
   white-space: nowrap; margin-top: 5px; text-align: center;
   background: rgba(255,255,255,0.88); padding: 2px 7px; border-radius: 6px;
