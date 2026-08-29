@@ -17,6 +17,11 @@ import { displayableRouteMode } from "./lib/mapRoutePolicy";
 import { transitRideColor } from "./lib/transitRidePalette";
 import { travelLegVisible } from "./lib/travelLegVisibility";
 import { startCameraTween, type CameraPoint, type CameraTweenHandle } from "./lib/cameraTween";
+import type { YouMarkerView } from "./lib/youMarker";
+
+/** `YouMarkerView` plus the "Last known 7:42 PM" label the caller formats in
+ *  the plan's timezone (shown only while the fix is stale). */
+export type YouMarkerRender = YouMarkerView & { label: string | null };
 
 // Printed-cartography map: pale-blue Google styling (inline JSON, so no
 // Cloud map id), occurrence-coloured transit lines, and an HTML overlay layer
@@ -103,6 +108,9 @@ const INK = "#2E6F8A";
 // The map-label gray is the established neutral on this pale-blue canvas.
 // Walking stays semantically neutral instead of borrowing a route colour.
 const WALK_GRAY = "#4F6F7E";
+// The live "you are here" marker (Piece 2) is an HTML overlay like every
+// other marker here, so its colours live with the --you / --you-stale
+// tokens in globals.css rather than as constants in this file.
 const PROVIDER_HEX_COLOR = /^#[\da-f]{6}$/i;
 
 /**
@@ -236,9 +244,14 @@ interface Props {
    *  load, a swap/reroute/remove's own reselect, …) that must not yank the
    *  camera. */
   focusRequest?: MapFocusRequest | null;
+  /** the live device position to draw as a "you are here" marker, or null to
+   *  draw none. Computed by `computeYouMarker` (page.tsx) from the Piece 1
+   *  tracker; NEVER auto-pans the camera to follow it (see the effect note
+   *  on focusRequest — camera moves only on an explicit request). */
+  youMarker?: YouMarkerRender | null;
 }
 
-export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTravelLegIds = [], legacyTransitVisibility = true, focusRequest = null }: Props) {
+export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTravelLegIds = [], legacyTransitVisibility = true, focusRequest = null, youMarker = null }: Props) {
   const mapDivRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const projRef = useRef<google.maps.MapCanvasProjection | null>(null);
@@ -773,6 +786,30 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   };
   const midPx = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) =>
     px((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
+
+  // The live-position accuracy ring, sized in REAL metres. It reuses the same
+  // projection every marker uses (CLAUDE.md: "do not build a second
+  // positioning mechanism"): project the fix and a point `meters` due north
+  // of it, and take the pixel gap as the radius, so the ring grows and
+  // shrinks with the zoom for free. Null (no ring, just the dot) when there
+  // is no projection yet or no usable accuracy figure.
+  const accuracyRadiusPx = (
+    lat: number,
+    lng: number,
+    meters: number | null
+  ): number | null => {
+    const proj = projRef.current;
+    if (!proj || meters == null || !Number.isFinite(meters) || meters <= 0) {
+      return null;
+    }
+    const here = proj.fromLatLngToContainerPixel(new google.maps.LatLng(lat, lng));
+    const north = proj.fromLatLngToContainerPixel(
+      new google.maps.LatLng(lat + meters / 111_320, lng)
+    );
+    if (!here || !north) return null;
+    const r = Math.abs(here.y - north.y);
+    return Number.isFinite(r) && r > 0 ? r : null;
+  };
   const chipX = (x: number | string): number | string => {
     const width = mapDivRef.current?.clientWidth ?? 0;
     if (width <= 0) return x;
@@ -946,6 +983,45 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
             </div>
           </div>
         ))}
+        {/* "You are here" — the live device position (Piece 2). Rendered
+            ONLY when `computeYouMarker` returned a view, i.e. a real fix is
+            in hand; there is never a placeholder dot. A stale fix keeps its
+            real coordinate but drops to grey with a "last known" time, so it
+            can never read as current. Uses px() like every other marker and
+            never moves the camera. */}
+        {youMarker &&
+          (() => {
+            const p = px(youMarker.lat, youMarker.lng);
+            if (!p) return null;
+            const ringPx = accuracyRadiusPx(
+              youMarker.lat,
+              youMarker.lng,
+              youMarker.accuracyM
+            );
+            return (
+              <div
+                className={"mk mk--you" + (youMarker.stale ? " mk--you-stale" : "")}
+                style={{ left: p.x, top: p.y }}
+              >
+                {ringPx != null && (
+                  <div
+                    className="mk__accuracy"
+                    aria-hidden="true"
+                    style={{ width: ringPx * 2, height: ringPx * 2 }}
+                  />
+                )}
+                <div className="mk__dot" aria-hidden="true" />
+                {youMarker.stale && youMarker.label && (
+                  <div className="mk__tag" aria-hidden="true">{youMarker.label}</div>
+                )}
+                <span className="sr-only">
+                  {youMarker.stale
+                    ? `Your location on the map (${youMarker.label ?? "last known"})`
+                    : "Your current location on the map"}
+                </span>
+              </div>
+            );
+          })()}
         {home &&
           (() => {
             const p = px(home.lat, home.lng);

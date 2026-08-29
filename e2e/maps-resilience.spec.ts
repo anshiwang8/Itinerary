@@ -2112,3 +2112,97 @@ test("@mock remount after a cached Maps rejection starts a clean attempt", async
   await expect(page.locator(".chip")).toHaveCount(2);
   expect(provider.attempts()).toBe(2);
 });
+
+// ── Live-location "you are here" marker (Piece 2) ──────────────────────────
+// The marker's rendering is driven straight off a YouMarkerRender view via
+// the harness's "You marker …" buttons — the tracker state machine and a
+// real GPS are proven elsewhere / by owner eyeball. What matters here: the
+// marker never appears without a real fix, a stale fix looks different from a
+// live one, the accuracy ring scales with the reported metres, and the
+// marker never moves the camera.
+test.describe("the you-are-here marker", () => {
+  async function openYouMarkerHarness(page: Page) {
+    await serveMaps(page);
+    await page.goto("/test-harness/maps");
+    await expect(page.locator(".mapwrap")).toHaveAttribute(
+      "data-map-state",
+      "ready"
+    );
+  }
+
+  test("@mock appears only with a real fix and clears when tracking goes off", async ({
+    page,
+  }) => {
+    await openYouMarkerHarness(page);
+    await expect(page.locator(".mk--you")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "You marker live" }).click();
+    await expect(page.locator(".mk--you")).toHaveCount(1);
+    await expect(page.locator(".mk--you")).not.toHaveClass(/mk--you-stale/);
+    await expect(page.locator(".mk--you .mk__tag")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "You marker off" }).click();
+    await expect(page.locator(".mk--you")).toHaveCount(0);
+  });
+
+  test("@mock a stale fix is visibly muted and carries a last-known time", async ({
+    page,
+  }) => {
+    await openYouMarkerHarness(page);
+
+    await page.getByRole("button", { name: "You marker live" }).click();
+    const liveDot = page.locator(".mk--you .mk__dot");
+    const liveBackground = await liveDot.evaluate(
+      (element) => getComputedStyle(element).backgroundColor
+    );
+
+    await page.getByRole("button", { name: "You marker stale" }).click();
+    const stale = page.locator(".mk--you.mk--you-stale");
+    await expect(stale).toHaveCount(1);
+    await expect(stale.locator(".mk__tag")).toHaveText("Last known 7:42 PM");
+    const staleBackground = await stale
+      .locator(".mk__dot")
+      .evaluate((element) => getComputedStyle(element).backgroundColor);
+    expect(staleBackground).not.toBe(liveBackground);
+  });
+
+  test("@mock the accuracy ring grows with the reported accuracy", async ({
+    page,
+  }) => {
+    await openYouMarkerHarness(page);
+
+    await page.getByRole("button", { name: "You marker live" }).click();
+    const ring = page.locator(".mk--you .mk__accuracy");
+    await expect(ring).toHaveCount(1);
+    const tight = await ring.evaluate(
+      (element) => element.getBoundingClientRect().width
+    );
+    expect(tight).toBeGreaterThan(0);
+
+    await page.getByRole("button", { name: "You marker wide accuracy" }).click();
+    await expect
+      .poll(async () =>
+        page
+          .locator(".mk--you .mk__accuracy")
+          .evaluate((element) => element.getBoundingClientRect().width)
+      )
+      .toBeGreaterThan(tight * 3);
+  });
+
+  test("@mock the marker never moves the camera", async ({ page }) => {
+    await openYouMarkerHarness(page);
+    const moveBefore = (await moveCameraCalls(page)).length;
+    const centerBefore = (await setCenterCalls(page)).length;
+    const fitBefore = (await fitBoundsCalls(page)).length;
+
+    await page.getByRole("button", { name: "You marker live" }).click();
+    await expect(page.locator(".mk--you")).toHaveCount(1);
+    await page.getByRole("button", { name: "You marker wide accuracy" }).click();
+    await page.getByRole("button", { name: "You marker stale" }).click();
+    await expect(page.locator(".mk--you.mk--you-stale")).toHaveCount(1);
+
+    expect((await moveCameraCalls(page)).length).toBe(moveBefore);
+    expect((await setCenterCalls(page)).length).toBe(centerBefore);
+    expect((await fitBoundsCalls(page)).length).toBe(fitBefore);
+  });
+});

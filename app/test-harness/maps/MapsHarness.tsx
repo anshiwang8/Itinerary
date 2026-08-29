@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import ItineraryMap, { MapFocusRequest, MapHome, MapStop } from "../../ItineraryMap";
+import ItineraryMap, {
+  MapFocusRequest,
+  MapHome,
+  MapStop,
+  YouMarkerRender,
+} from "../../ItineraryMap";
 import ItineraryStrip, {
   StripHome,
   StripStop,
@@ -16,6 +21,23 @@ import {
 } from "../../lib/travelLegVisibility";
 
 const PROVIDER_RED = "#D71920";
+
+// Live-location "you are here" marker specimens (Piece 2). Fixed views fed
+// straight to the ItineraryMap prop, so the marker's rendering is proven
+// without a real GPS or the tracker state machine. Coordinates sit near the
+// route-specimen stops so the stub projection places them on screen.
+const YOU_BASE = { lat: 43.6495, lng: -79.4193, lastFixAtMs: 1_756_400_000_000 };
+const YOU_MARKER_SAMPLES = {
+  live: { ...YOU_BASE, accuracyM: 55, stale: false, ageMs: 2_000, label: null },
+  stale: {
+    ...YOU_BASE,
+    accuracyM: 55,
+    stale: true,
+    ageMs: 180_000,
+    label: "Last known 7:42 PM",
+  },
+  wide: { ...YOU_BASE, accuracyM: 600, stale: false, ageMs: 2_000, label: null },
+} satisfies Record<string, YouMarkerRender>;
 
 // Deliberately asymmetric facts/geometry. If either renderer pairs the two
 // filtered arrays by position, the facts-only ride shifts every later colour:
@@ -982,6 +1004,7 @@ export default function MapsHarness() {
   const [drivingSpecimen, setDrivingSpecimen] = useState(false);
   const [manualLegId, setManualLegId] = useState<string | null>(null);
   const [routeStops, setRouteStops] = useState(ROUTE_STOPS);
+  const [youMarker, setYouMarker] = useState<YouMarkerRender | null>(null);
   const [visibilityPlan, setVisibilityPlan] = useState(() =>
     makeVisibilityPlan("visibility-plan")
   );
@@ -1277,6 +1300,30 @@ export default function MapsHarness() {
       >
         Select first stop programmatically
       </button>
+      <div
+        data-testid="you-marker-controls"
+        style={{
+          position: "fixed",
+          zIndex: 1000,
+          top: 200,
+          left: 8,
+          display: "flex",
+          gap: 4,
+        }}
+      >
+        <button type="button" onClick={() => setYouMarker(null)}>
+          You marker off
+        </button>
+        <button type="button" onClick={() => setYouMarker(YOU_MARKER_SAMPLES.live)}>
+          You marker live
+        </button>
+        <button type="button" onClick={() => setYouMarker(YOU_MARKER_SAMPLES.stale)}>
+          You marker stale
+        </button>
+        <button type="button" onClick={() => setYouMarker(YOU_MARKER_SAMPLES.wide)}>
+          You marker wide accuracy
+        </button>
+      </div>
       {mounted && (
         <ItineraryMap
           stops={stops}
@@ -1286,6 +1333,7 @@ export default function MapsHarness() {
           visibleTravelLegIds={visibleLegIds}
           legacyTransitVisibility={legacyTransitVisibility}
           focusRequest={focusRequest}
+          youMarker={youMarker}
         />
       )}
       {routeSpecimen && (

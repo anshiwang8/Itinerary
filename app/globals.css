@@ -43,6 +43,17 @@
   --danger: #A3372F;
   --danger-wash: rgba(163, 55, 47, 0.08);
 
+  /* LIVE DEVICE POSITION — the "you are here" dot (live location tracking,
+     Piece 2). A saturated azure: the near-universal "my location" signal,
+     deliberately OUTSIDE this map's teal route family and never --live
+     (which means "now", reserved for the active stop). Its muted twin is
+     what a STALE fix drops to — colour means the fix is current, grey means
+     it is not. Like --live and --danger it is a signal, not decoration. */
+  --you: #1A73E8;
+  --you-wash: rgba(26, 115, 232, 0.14);
+  --you-stale: #7C8A99;
+  --you-stale-wash: rgba(124, 138, 153, 0.13);
+
   --disp: 'Fraunces Variable', Georgia, 'Times New Roman', serif;
   --grot: 'Space Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
 
@@ -306,6 +317,31 @@ button { font-family: var(--grot); cursor: pointer; }
 }
 .mapctl--fit:active { transform: translateY(-50%) scale(0.96); }
 
+/* Live-location toggle — stacked just above the fit control, same mid-right
+   clear zone (see .mapctl note). Distinct from the fit glyph and from any
+   GPS/navigation arrow: concentric circles read "my position" without
+   implying the map will follow you (it never does — camera moves only on an
+   explicit request). */
+.mapctl--live {
+  position: absolute; top: 50%; right: 16px;
+  transform: translateY(calc(-50% - 52px));
+  z-index: 16;
+}
+.mapctl--live:active { transform: translateY(calc(-50% - 52px)) scale(0.96); }
+.mapctl--live svg { fill: none; }
+.mapctl--live .mapctl__hub { fill: currentColor; stroke: none; }
+/* ON + a live fix: filled azure, white glyph. */
+.mapctl--live-on {
+  background: var(--you); color: #FFFFFF; border-color: var(--you);
+}
+.mapctl--live-on:hover { background: #1669d6; }
+/* ON but the fix is stale (tab was away): filled grey — same "colour = live,
+   grey = not" language as the marker. */
+.mapctl--live-stale {
+  background: var(--you-stale); color: #FFFFFF; border-color: var(--you-stale);
+}
+.mapctl--live-stale:hover { background: #6f7d8b; }
+
 .ov-layer { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
 
 /* markers */
@@ -348,6 +384,53 @@ button { font-family: var(--grot); cursor: pointer; }
 /* swap-/reroute-changed but not the live "now" stop: ink dot, chartreuse ring */
 .mk--changed .mk__dot { border-color: var(--live); box-shadow: 0 0 0 4px var(--live-wash); }
 .mk--done .mk__dot { background: var(--ink-faint); }
+
+/* ── "You are here": the live device position (Piece 2 of live tracking) ──
+   Follows the marker-anchor invariant from the start: the anchor box is
+   JUST the dot (.mk centres its border box on the coordinate), so the
+   accuracy ring and the "last known" tag are BOTH position:absolute, out of
+   flow, exactly like .mk--home's tag. Decorative, so pointer-events:none —
+   the toggle is the .mapctl--live button, not this. */
+.mk--you { z-index: 4; pointer-events: none; }
+/* NO position transition, ever. left/top live on .mk, which carries no
+   transition — the dot must JUMP to each real fix, never glide between two
+   (a glide fabricates the in-between positions Piece 1 forbids). This
+   explicit rule is a guard against a future edit adding one. */
+.mk--you, .mk--you .mk__dot { transition: none; }
+.mk--you .mk__dot {
+  width: 16px; height: 16px;
+  background: var(--you); border: 3px solid #FFFFFF;
+  box-shadow: 0 0 0 2px var(--you-wash), 0 1px 6px rgba(30, 58, 76, 0.35);
+}
+/* A STALE fix: same real coordinate, but visibly not-live — grey, dimmer,
+   no glow — plus the "Last known 7:42 PM" tag below. */
+.mk--you-stale .mk__dot {
+  background: var(--you-stale);
+  box-shadow: 0 0 0 2px var(--you-stale-wash), 0 1px 5px rgba(30, 58, 76, 0.25);
+  opacity: 0.9;
+}
+/* The accuracy radius, sized in real metres by the projection (see
+   accuracyRadiusPx). A bigger translucent disc for a worse fix is honest,
+   not decoration. */
+.mk__accuracy {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: var(--you-wash);
+  border: 1px solid rgba(26, 115, 232, 0.30);
+  pointer-events: none;
+}
+.mk--you-stale .mk__accuracy {
+  background: var(--you-stale-wash);
+  border-color: rgba(124, 138, 153, 0.30);
+}
+.mk--you .mk__tag {
+  /* Same out-of-flow treatment as .mk--home's tag, for the same reason. */
+  position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  font-family: var(--grot); font-size: 11px; color: var(--ink-soft);
+  white-space: nowrap; margin-top: 6px; text-align: center;
+  background: rgba(255, 255, 255, 0.9); padding: 2px 7px; border-radius: 6px;
+}
 
 /* resting chip */
 .chip {

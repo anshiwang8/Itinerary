@@ -88,7 +88,7 @@ import {
 } from "./lib/profileEdit";
 import { parseHistoryResponse, type HistoryResponseView } from "./lib/historyView";
 import type { StopChoice } from "./api/itinerary/stopPlan";
-import ItineraryMap, { MapFocusRequest, MapHome, MapStop } from "./ItineraryMap";
+import ItineraryMap, { MapFocusRequest, MapHome, MapStop, YouMarkerRender } from "./ItineraryMap";
 import ItineraryStrip, {
   StripFocusRequest,
   StripHome,
@@ -103,7 +103,14 @@ import {
   visibleTravelLegIds as deriveVisibleTravelLegIds,
 } from "./lib/travelLegVisibility";
 import { useLiveTracking } from "./lib/useLiveTracking";
-import { LIVE_TRACKING_WHILE_OPEN_NOTE, type LiveTrackingState } from "./lib/liveTracking";
+import {
+  LIVE_TRACKING_DENIED_NOTE,
+  LIVE_TRACKING_LAST_KNOWN_LABEL,
+  LIVE_TRACKING_UNAVAILABLE_NOTE,
+  LIVE_TRACKING_WHILE_OPEN_NOTE,
+  type LiveTrackingState,
+} from "./lib/liveTracking";
+import { computeYouMarker, liveControlLabel } from "./lib/youMarker";
 
 const SHOW_DEV_CONTROLS = shouldShowDevControls(
   process.env.NODE_ENV,
@@ -658,14 +665,46 @@ export default function Home() {
   const [changedIds, setChangedIds] = useState<Set<string>>(new Set());
   const [oldStarts, setOldStarts] = useState<Record<string, string | null>>({});
   const [devOpen, setDevOpen] = useState(true);
-  // Live-location tracking (Piece 1): dev-only opt-in for now. The real
-  // toggle is Piece 2. `enabled` folds in `!!itinerary` so ending the plan
-  // stops the watch — one of the lifecycle paths the module must cover.
+  // Live-location tracking (Piece 2): a real, user-facing opt-in — the
+  // .mapctl--live button on the map. `enabled` folds in `!!itinerary` so
+  // ending the plan stops the watch (a lifecycle path the module must
+  // cover); `liveTrackWanted` itself persists across plans, matching the
+  // browser's own per-origin permission. The dev console trace stays
+  // dev-gated; the feature no longer is.
   const [liveTrackWanted, setLiveTrackWanted] = useState(false);
   const liveTracking = useLiveTracking(
-    SHOW_DEV_CONTROLS && liveTrackWanted && Boolean(itinerary),
+    liveTrackWanted && Boolean(itinerary),
     SHOW_DEV_CONTROLS ? logLiveTracking : undefined
   );
+  // A permission refusal / device failure is a real "this did not work,
+  // here is why" — the app's shared banner is exactly that surface (swap /
+  // reroute / mode-switch refusals use it the same way). Fire ONCE per
+  // transition into a failing state, and only when the user asked for it;
+  // clear our own note again once a fix arrives or tracking is turned off.
+  const liveTrackStatusRef = useRef(liveTracking.status);
+  useEffect(() => {
+    const previous = liveTrackStatusRef.current;
+    liveTrackStatusRef.current = liveTracking.status;
+    if (liveTracking.status === previous) return;
+    const ourNote = (value: string | null) =>
+      value === LIVE_TRACKING_DENIED_NOTE || value === LIVE_TRACKING_UNAVAILABLE_NOTE;
+    if (
+      liveTrackWanted &&
+      (liveTracking.status === "denied" || liveTracking.status === "unavailable")
+    ) {
+      setBannerFlat(true);
+      setBannerPersist(true);
+      setBanner(
+        liveTracking.status === "denied"
+          ? LIVE_TRACKING_DENIED_NOTE
+          : LIVE_TRACKING_UNAVAILABLE_NOTE
+      );
+    } else if (liveTracking.status === "live" || !liveTrackWanted) {
+      // A later real fix, or the user turning tracking off, resolves the
+      // complaint — retract our banner, but never touch another feature's.
+      setBanner((current) => (ourNote(current) ? null : current));
+    }
+  }, [liveTracking.status, liveTrackWanted]);
   const [swapText, setSwapText] = useState("");
   const [swapping, setSwapping] = useState(false);
   const [swapError, setSwapError] = useState<string | null>(null);
@@ -2606,6 +2645,22 @@ export default function Home() {
   const displayNow = simNow ? new Date(simNow) : new Date();
   const displayNowMs = displayNow.getTime();
 
+  // The live "you are here" marker view (Piece 2). `computeYouMarker` returns
+  // null unless the tracker holds a REAL fix — no placeholder is ever drawn.
+  // The "Last known" label needs the plan's zone, so it is composed here
+  // rather than in the pure helper; a fresh fix carries no label.
+  const youMarkerView = computeYouMarker(liveTracking, displayNowMs);
+  const youMarker: YouMarkerRender | null = youMarkerView && {
+    ...youMarkerView,
+    label: youMarkerView.stale
+      ? `${LIVE_TRACKING_LAST_KNOWN_LABEL} ${formatStopTime(
+          new Date(youMarkerView.lastFixAtMs),
+          displayNow,
+          displayZone
+        )}`
+      : null,
+  };
+
   const mapHome = useMemo<MapHome | null>(() => {
     if (!homeLeg) return null;
     const first = (schedule ?? []).find((s) => s.start_time);
@@ -3211,7 +3266,41 @@ export default function Home() {
         legacyTransitVisibility={legacyTransitVisibility}
         onSelect={selectAndFocusStop}
         focusRequest={mapFocusRequest}
+        youMarker={youMarker}
       />
+
+      {/* Live-location toggle (Piece 2). Requests permission on the first
+          click; shows the current state (off / finding / live / paused).
+          It never pans the camera to follow you — the you-marker just
+          renders wherever the current view happens to show it. */}
+      <button
+        type="button"
+        className={
+          "mapctl mapctl--live" +
+          (liveTrackWanted &&
+          (liveTracking.status === "live" || liveTracking.status === "requesting")
+            ? " mapctl--live-on"
+            : "") +
+          (liveTrackWanted && liveTracking.status === "stale"
+            ? " mapctl--live-stale"
+            : "")
+        }
+        aria-pressed={liveTrackWanted}
+        aria-busy={liveTrackWanted && liveTracking.status === "requesting"}
+        aria-label={liveControlLabel(liveTrackWanted, liveTracking.status)}
+        title={liveControlLabel(liveTrackWanted, liveTracking.status)}
+        onClick={() => setLiveTrackWanted((want) => !want)}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="7.5" />
+          <circle className="mapctl__hub" cx="12" cy="12" r="2.6" />
+        </svg>
+      </button>
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {liveTrackWanted
+          ? `Live location: ${liveTracking.status}`
+          : ""}
+      </span>
 
       {wxNow && (
         <div className="weather" aria-label={`Current weather for ${city.trim() || "Toronto"}`}>
@@ -3488,17 +3577,11 @@ export default function Home() {
               cancel
             </button>
           </div>
+          {/* live-location readout — the toggle is now the real .mapctl--live
+              button on the map; this stays for diagnostics (exact coords,
+              accuracy, fix age, stale reason). */}
           <div className="dev__row">
             <label>live loc</label>
-            <button
-              type="button"
-              className={liveTrackWanted ? "ghost" : undefined}
-              aria-label="Toggle dev live-location tracking"
-              aria-pressed={liveTrackWanted}
-              onClick={() => setLiveTrackWanted((v) => !v)}
-            >
-              {liveTrackWanted ? "stop" : "start"}
-            </button>
             <span className="dev__note">{liveTracking.status}</span>
           </div>
           <div className="dev__note">
