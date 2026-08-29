@@ -38,6 +38,9 @@ function makeHarness(configPatch: Partial<LiveTrackingConfig> = {}, startHidden 
   let heartbeatCb: (() => void) | null = null;
   let successCb: ((p: GeolocationPosition) => void) | null = null;
   let errorCb: ((e: GeolocationPositionError) => void) | null = null;
+  let oneShotSuccessCb: ((p: GeolocationPosition) => void) | null = null;
+  let oneShotErrorCb: ((e: GeolocationPositionError) => void) | null = null;
+  const oneShotOptions: PositionOptions[] = [];
 
   const watchIds: number[] = [];
   const clearedIds: number[] = [];
@@ -53,6 +56,11 @@ function makeHarness(configPatch: Partial<LiveTrackingConfig> = {}, startHidden 
     },
     clearWatch(id: number) {
       clearedIds.push(id);
+    },
+    getCurrentPosition(success, error, options) {
+      oneShotOptions.push(options ?? {});
+      oneShotSuccessCb = success;
+      oneShotErrorCb = error;
     },
   };
 
@@ -111,6 +119,28 @@ function makeHarness(configPatch: Partial<LiveTrackingConfig> = {}, startHidden 
     },
     emitError(code: number) {
       errorCb?.({ code, message: "test geolocation error" } as GeolocationPositionError);
+    },
+    emitOneShotFix(input: FixInput = {}) {
+      oneShotSuccessCb?.({
+        coords: {
+          latitude: input.lat ?? 43.6532,
+          longitude: input.lng ?? -79.3832,
+          accuracy: input.accuracy ?? 18,
+        },
+        timestamp: input.deviceTimestamp ?? nowMs,
+      } as GeolocationPosition);
+    },
+    emitOneShotError(code: number) {
+      oneShotErrorCb?.({
+        code,
+        message: "test one-shot geolocation error",
+      } as GeolocationPositionError);
+    },
+    get oneShotCount() {
+      return oneShotOptions.length;
+    },
+    get lastOneShotOptions(): PositionOptions {
+      return oneShotOptions[oneShotOptions.length - 1];
     },
     removeGeolocation() {
       geoPresent = false;
@@ -458,6 +488,176 @@ const cases: Case[] = [
       assert.strictEqual(h.last.status, "requesting");
       assert.strictEqual(h.watchCount, 2, "a fresh watch on the retry");
       assert.strictEqual(h.heartbeatRunning, true);
+    },
+  ],
+
+  // ── Arrival sanity guard: a fix that is ALREADY stale when it lands ──
+  [
+    "a fix already older than the staleness window ON ARRIVAL -> 'stale' on its FIRST transition, no heartbeat tick",
+    () => {
+      const h = makeHarness();
+      h.tracker.start();
+      h.advance(3_000);
+      const oldTs = h.nowMs - (STALE + 30_000);
+      const before = h.states.length;
+      // No h.fireHeartbeat() anywhere in this case.
+      h.emitFix({ lat: 12, lng: 34, deviceTimestamp: oldTs });
+
+      const firstTransition = h.states[before];
+      assert.strictEqual(
+        firstTransition.status,
+        "stale",
+        "the fix's OWN transition is stale — never 'live for one heartbeat then corrected'"
+      );
+      assert.strictEqual(firstTransition.staleReason, "stale_on_arrival");
+      assert.strictEqual(firstTransition.fixAgeAtReceiptMs, STALE + 30_000);
+      assert.strictEqual(firstTransition.lastUpdatedAt, h.nowMs, "receipt time is still our clock");
+      // Nothing this fix ever produces is 'live'.
+      for (const s of h.states.slice(before)) {
+        assert.notStrictEqual(s.status, "live", "no state after a stale-on-arrival fix is 'live'");
+      }
+      assert.deepStrictEqual(
+        { lat: firstTransition.position!.lat, lng: firstTransition.position!.lng },
+        { lat: 12, lng: 34 },
+        "the fix itself is retained, exactly as reported"
+      );
+      assert.strictEqual(
+        firstTransition.position!.deviceTimestamp,
+        oldTs,
+        "deviceTimestamp is NEVER rewritten — the guard derives a separate age"
+      );
+    },
+  ],
+  [
+    "clock skew: a fix with a FUTURE deviceTimestamp -> age 'unknown' (null), NOT treated as extra-fresh",
+    () => {
+      const h = makeHarness();
+      h.tracker.start();
+      h.emitFix({ deviceTimestamp: h.nowMs + 60_000 });
+      assert.strictEqual(h.last.status, "live", "negative raw age never forces stale");
+      assert.strictEqual(
+        h.last.fixAgeAtReceiptMs,
+        null,
+        "unknowable age is null, not clamped to 0 and read as fresh"
+      );
+      assert.strictEqual(h.last.staleReason, null);
+      assert.strictEqual(h.oneShotCount, 0, "clock skew is not a stale-on-arrival event");
+    },
+  ],
+  [
+    "a fresh fix is unaffected: normal 'live', small real fixAgeAtReceiptMs, no escalation",
+    () => {
+      const h = makeHarness();
+      h.tracker.start();
+      h.advance(5_000);
+      h.emitFix({ deviceTimestamp: h.nowMs - 1_200 });
+      assert.strictEqual(h.last.status, "live");
+      assert.strictEqual(h.last.fixAgeAtReceiptMs, 1_200);
+      assert.strictEqual(h.last.staleReason, null);
+      assert.strictEqual(h.oneShotCount, 0, "a healthy first fix triggers no probe");
+    },
+  ],
+
+  // ── The bounded escalation ──────────────────────────────────────────
+  [
+    "stale-on-arrival FIRST fix -> exactly ONE forced-fresh probe; a fresh probe result -> 'live'",
+    () => {
+      const h = makeHarness();
+      h.tracker.start();
+      h.emitFix({ lat: 1, lng: 1, deviceTimestamp: h.nowMs - (STALE + 5_000) });
+      assert.strictEqual(h.oneShotCount, 1, "one probe fired");
+      assert.strictEqual(h.last.status, "requesting", "visibly attempting while the probe runs");
+      assert.strictEqual(h.lastOneShotOptions.maximumAge, 0, "forced fresh");
+      assert.strictEqual(h.lastOneShotOptions.enableHighAccuracy, true);
+      assert.strictEqual(
+        h.lastOneShotOptions.timeout,
+        DEFAULT_LIVE_TRACKING_CONFIG.escalationTimeoutMs,
+        "bounded by the escalation timeout, not the normal one"
+      );
+      h.advance(2_000);
+      h.emitOneShotFix({ lat: 2, lng: 2, deviceTimestamp: h.nowMs - 500 });
+      assert.strictEqual(h.last.status, "live", "a genuinely fresher fix recovers to live");
+      assert.strictEqual(h.last.fixAgeAtReceiptMs, 500);
+      assert.strictEqual(h.oneShotCount, 1, "the probe's own result never re-escalates");
+    },
+  ],
+  [
+    "PROVABLY BOUNDED: the probe ALSO returns stale -> settle on 'stale', never a second probe",
+    () => {
+      const h = makeHarness();
+      h.tracker.start();
+      h.emitFix({ lat: 1, lng: 1, deviceTimestamp: h.nowMs - (STALE + 5_000) });
+      assert.strictEqual(h.oneShotCount, 1);
+      h.emitOneShotFix({ lat: 9, lng: 9, deviceTimestamp: h.nowMs - (STALE + 4_000) });
+      assert.strictEqual(h.last.status, "stale");
+      assert.strictEqual(h.last.staleReason, "stale_on_arrival");
+      assert.strictEqual(h.oneShotCount, 1, "one stale-on-arrival event -> at most one probe");
+      // And a later stale watch fix still does not spin up another.
+      h.advance(1_000);
+      h.emitFix({ lat: 9, lng: 9, deviceTimestamp: h.nowMs - (STALE + 4_000) });
+      assert.strictEqual(h.oneShotCount, 1, "still bounded");
+    },
+  ],
+  [
+    "the probe times out -> fall back to the retained stale fix, marked stale, no retry",
+    () => {
+      const h = makeHarness();
+      h.tracker.start();
+      h.emitFix({ lat: 7, lng: 7, deviceTimestamp: h.nowMs - (STALE + 5_000) });
+      assert.strictEqual(h.last.status, "requesting");
+      h.emitOneShotError(3); // TIMEOUT
+      assert.strictEqual(h.last.status, "stale", "settles on the stale fix we already hold");
+      assert.deepStrictEqual(
+        { lat: h.last.position!.lat, lng: h.last.position!.lng },
+        { lat: 7, lng: 7 }
+      );
+      assert.strictEqual(h.oneShotCount, 1, "timed out is a clean settle, not a re-try");
+    },
+  ],
+  [
+    "a LATER stale-on-arrival fix (not the first of the session) does NOT escalate",
+    () => {
+      const h = makeHarness();
+      h.tracker.start();
+      h.emitFix({ deviceTimestamp: h.nowMs - 1_000 }); // healthy first fix
+      assert.strictEqual(h.last.status, "live");
+      h.advance(20_000);
+      h.emitFix({ deviceTimestamp: h.nowMs - (STALE + 10_000) }); // now a stale one
+      assert.strictEqual(h.last.status, "stale");
+      assert.strictEqual(h.last.staleReason, "stale_on_arrival");
+      assert.strictEqual(h.oneShotCount, 0, "escalation is for the FIRST fix only");
+    },
+  ],
+  [
+    "escalation re-arms after a background/resume: a stale first fix on the NEW watch probes once",
+    () => {
+      const h = makeHarness();
+      h.tracker.start();
+      h.emitFix({ deviceTimestamp: h.nowMs - 1_000 }); // healthy, consumes the initial arm
+      assert.strictEqual(h.oneShotCount, 0);
+      h.setHidden(true);
+      h.setHidden(false); // a brand-new watch
+      assert.strictEqual(h.watchCount, 2);
+      h.emitFix({ deviceTimestamp: h.nowMs - (STALE + 8_000) });
+      assert.strictEqual(h.last.status, "requesting");
+      assert.strictEqual(h.oneShotCount, 1, "the fresh watch session gets its own single probe");
+    },
+  ],
+  [
+    "an unanswered probe does not loop: no heartbeat resurrects it, it rests until a real result",
+    () => {
+      const h = makeHarness();
+      h.tracker.start();
+      h.emitFix({ deviceTimestamp: h.nowMs - (STALE + 5_000) });
+      assert.strictEqual(h.oneShotCount, 1, "the single probe fired");
+      // Nothing ever answers the probe (a browser that silently never calls
+      // back). The heartbeat only acts on 'live', so it stays put — no
+      // second probe, no spin.
+      h.advance(STALE * 5);
+      h.fireHeartbeat();
+      h.fireHeartbeat();
+      assert.strictEqual(h.last.status, "requesting");
+      assert.strictEqual(h.oneShotCount, 1, "still exactly one probe, ever");
     },
   ],
 ];

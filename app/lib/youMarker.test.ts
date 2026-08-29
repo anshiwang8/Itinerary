@@ -197,6 +197,78 @@ const cases: Case[] = [
       assert.match(liveControlLabel(true, "unavailable"), /could not provide a location/i);
     },
   ],
+
+  // ── Arrival-time staleness (a DIFFERENT gap from the accrued-age one) ──
+  [
+    "stale-on-arrival: fixAgeAtReceiptMs past the threshold reads stale even if status still says 'live'",
+    () => {
+      const view = computeYouMarker(
+        state({
+          status: "live",
+          position: FIX,
+          lastUpdatedAt: NOW, // received just now — the accrued-age check passes
+          fixAgeAtReceiptMs: LIVE_TRACKING_STALENESS_MS + 5_000,
+        }),
+        NOW
+      );
+      assert.ok(view);
+      assert.strictEqual(view!.stale, true, "the fix's OWN age fails it, independent of receipt age");
+    },
+  ],
+  [
+    "stale-on-arrival: 'Last known' time is the genuinely older instant, not near-now",
+    () => {
+      const view = computeYouMarker(
+        state({
+          status: "stale",
+          position: FIX,
+          lastUpdatedAt: NOW,
+          fixAgeAtReceiptMs: 3_600_000, // an hour old at receipt
+        }),
+        NOW
+      );
+      assert.ok(view);
+      assert.strictEqual(
+        view!.lastFixAtMs,
+        NOW - 3_600_000,
+        "receipt time minus the fix's age at receipt = when it was actually recorded"
+      );
+    },
+  ],
+  [
+    "clock skew (fixAgeAtReceiptMs null) -> fresh, and lastFixAtMs falls back to receipt time",
+    () => {
+      const view = computeYouMarker(
+        state({
+          status: "live",
+          position: FIX,
+          lastUpdatedAt: NOW - 2_000,
+          fixAgeAtReceiptMs: null,
+        }),
+        NOW
+      );
+      assert.ok(view);
+      assert.strictEqual(view!.stale, false, "unknowable age never forces stale");
+      assert.strictEqual(view!.lastFixAtMs, NOW - 2_000);
+    },
+  ],
+  [
+    "a healthy fix with a small fixAgeAtReceiptMs is unaffected: fresh, honest last-fix instant",
+    () => {
+      const view = computeYouMarker(
+        state({
+          status: "live",
+          position: FIX,
+          lastUpdatedAt: NOW,
+          fixAgeAtReceiptMs: 1_000,
+        }),
+        NOW
+      );
+      assert.ok(view);
+      assert.strictEqual(view!.stale, false);
+      assert.strictEqual(view!.lastFixAtMs, NOW - 1_000);
+    },
+  ],
 ];
 
 function main() {

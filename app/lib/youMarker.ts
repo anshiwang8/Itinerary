@@ -55,7 +55,10 @@ export interface YouMarkerView {
  * every other time-aware surface reads).
  */
 export function computeYouMarker(
-  state: Pick<LiveTrackingState, "status" | "position" | "lastUpdatedAt">,
+  state: Pick<
+    LiveTrackingState,
+    "status" | "position" | "lastUpdatedAt" | "fixAgeAtReceiptMs"
+  >,
   nowMs: number
 ): YouMarkerView | null {
   const { position } = state;
@@ -81,13 +84,39 @@ export function computeYouMarker(
   const ageMs =
     state.lastUpdatedAt != null ? Math.max(0, nowMs - state.lastUpdatedAt) : null;
 
-  // Fresh only when the module says "live" AND the fix has not aged past the
-  // staleness threshold since we received it — the heartbeat runs every 15s,
-  // so `status` can lag the truth by up to one interval, and this closes
-  // that gap on the display side.
+  // TWO independent staleness gaps, and `fresh` must fail on EITHER:
+  //
+  //   1. ACCRUED-AFTER-ARRIVAL — a fix that was current when it landed but
+  //      has since aged out. `status` can lag by up to one 15s heartbeat,
+  //      so the `ageMs` (time since WE received it) check closes that on the
+  //      display side. This is the gap this comment used to describe alone.
+  //
+  //   2. STALE-ON-ARRIVAL — a fix whose OWN timestamp was already older than
+  //      the threshold when the device handed it over (seen live: an
+  //      18h-old position painted confidently blue). `liveTracking` now
+  //      measures that at receipt and carries it as `fixAgeAtReceiptMs`;
+  //      past the threshold the dot must read "last known" from its first
+  //      paint. Gap 1 never looked at the fix's own timestamp and did NOT
+  //      cover this — the module also sets `status: "stale"` for it, but we
+  //      re-check here so a future state that somehow kept "live" still
+  //      cannot paint current.
   const fresh =
     state.status === "live" &&
-    (ageMs === null || ageMs <= LIVE_TRACKING_STALENESS_MS);
+    (ageMs === null || ageMs <= LIVE_TRACKING_STALENESS_MS) &&
+    (state.fixAgeAtReceiptMs == null ||
+      state.fixAgeAtReceiptMs <= LIVE_TRACKING_STALENESS_MS);
+
+  // The instant the position was actually recorded, on OUR clock: receipt
+  // time minus how old the fix already was at receipt. For an ordinary fix
+  // that is ~receipt time; for one that arrived already stale it is the
+  // genuinely older instant, so the "Last known 9:47 PM" tag tells the
+  // truth instead of showing a near-current time. Falls back to receipt
+  // time, then the device's own clock, when that age was not knowable
+  // (device clock ahead of ours).
+  const lastFixAtMs =
+    state.lastUpdatedAt != null && state.fixAgeAtReceiptMs != null
+      ? state.lastUpdatedAt - state.fixAgeAtReceiptMs
+      : state.lastUpdatedAt ?? position.deviceTimestamp;
 
   return {
     lat: position.lat,
@@ -95,7 +124,7 @@ export function computeYouMarker(
     accuracyM,
     stale: !fresh,
     ageMs,
-    lastFixAtMs: state.lastUpdatedAt ?? position.deviceTimestamp,
+    lastFixAtMs,
   };
 }
 

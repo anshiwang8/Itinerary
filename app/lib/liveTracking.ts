@@ -122,14 +122,28 @@ export const LIVE_TRACKING_MAX_AGE_MS = 15_000;
 export const LIVE_TRACKING_TIMEOUT_MS = 30_000;
 
 /**
- * A foreground fix older than this is no longer "current". Derived as
- * `maximumAge` (15s) + `timeout` (30s): a healthy device would have
- * delivered a new fix or fired an error within that span, so past it
- * something is wrong (GPS lost, the OS throttled the tab, the watch went
- * silent). POLICY: the point past which we would rather say "last known
- * 7:42" than let a dot imply it is live.
+ * A fix older than this is no longer "current". POLICY, not a platform
+ * guarantee: the value roughly tracks `maximumAge` (15s) + `timeout` (30s),
+ * on the intuition that a healthy device would usually have delivered a new
+ * fix or fired an error within that span — but a prior investigation
+ * confirmed nothing in the geolocation spec ENFORCES that, so this is a
+ * reasonable line we draw, not a fact the browser holds us to. It is the
+ * point past which we would rather say "last known 7:42" than let a dot
+ * imply it is live. Applied two ways: to the age a fix accrues AFTER we
+ * receive it (the heartbeat), and to the age a fix already HAS when it
+ * lands (the arrival sanity guard in `handleFix`).
  */
 export const LIVE_TRACKING_STALENESS_MS = 45_000;
+
+/**
+ * `timeout` for the ONE bounded escalation probe fired when the very first
+ * fix of a watch session arrives already stale (see `handleFix`). Shorter
+ * than the normal `timeout` because this is a deliberate "try once, right
+ * now" — if a forced-fresh acquisition cannot land inside this window we
+ * fall back to the stale fix we already hold, clearly marked, and do NOT
+ * retry. POLICY, like every constant here.
+ */
+export const LIVE_TRACKING_ESCALATION_TIMEOUT_MS = 12_000;
 
 /**
  * How often the foreground staleness check runs. Must be shorter than the
@@ -146,6 +160,7 @@ export interface LiveTrackingConfig {
   timeoutMs: number;
   stalenessMs: number;
   heartbeatMs: number;
+  escalationTimeoutMs: number;
 }
 
 export const DEFAULT_LIVE_TRACKING_CONFIG: LiveTrackingConfig = {
@@ -154,6 +169,7 @@ export const DEFAULT_LIVE_TRACKING_CONFIG: LiveTrackingConfig = {
   timeoutMs: LIVE_TRACKING_TIMEOUT_MS,
   stalenessMs: LIVE_TRACKING_STALENESS_MS,
   heartbeatMs: LIVE_TRACKING_HEARTBEAT_MS,
+  escalationTimeoutMs: LIVE_TRACKING_ESCALATION_TIMEOUT_MS,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -198,7 +214,11 @@ export type LiveStaleReason =
   | "backgrounded"
   /** no fix has arrived within the staleness window, or a transient error
    *  came in, while the tab is still visible. */
-  | "no_recent_fix";
+  | "no_recent_fix"
+  /** the fix the device just handed us was ALREADY older than the staleness
+   *  window when it landed — its own timestamp, not time since we received
+   *  it. Seen live: an 18-hour-old position painted confidently "live". */
+  | "stale_on_arrival";
 
 export interface LiveTrackingState {
   status: LiveTrackingStatus;
@@ -213,6 +233,15 @@ export interface LiveTrackingState {
   errorKind: LiveTrackingErrorKind | null;
   /** only meaningful with status "stale": why freshness was lost. */
   staleReason: LiveStaleReason | null;
+  /** how old `position` already was, on OUR clock, at the instant we
+   *  received it: `now - GeolocationPosition.timestamp`, clamped to >= 0.
+   *  Null with no fix, and null when the device's clock ran AHEAD of ours
+   *  (a negative raw age — the true age is then not knowable, so we do not
+   *  pretend it is fresh OR stale). A NEW derived value; `deviceTimestamp`
+   *  itself is never rewritten. Past `stalenessMs` the fix was stale before
+   *  it ever painted, and `status` is set to "stale" here rather than
+   *  "live" — no heartbeat tick needed to catch it. */
+  fixAgeAtReceiptMs: number | null;
 }
 
 export const INITIAL_LIVE_TRACKING_STATE: LiveTrackingState = {
@@ -221,13 +250,18 @@ export const INITIAL_LIVE_TRACKING_STATE: LiveTrackingState = {
   lastUpdatedAt: null,
   errorKind: null,
   staleReason: null,
+  fixAgeAtReceiptMs: null,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
 // Injected dependencies
 // ─────────────────────────────────────────────────────────────────────────
 
-/** The slice of `navigator.geolocation` this module uses. */
+/** The slice of `navigator.geolocation` this module uses. `getCurrentPosition`
+ *  was added for ONE purpose: the single bounded escalation probe in
+ *  `handleFix` when the first fix of a watch session lands already stale. It
+ *  is a deliberate interface widening; `navigator.geolocation` supplies it
+ *  natively and the test harness fakes it. */
 export interface GeolocationLike {
   watchPosition: (
     success: (position: GeolocationPosition) => void,
@@ -235,6 +269,11 @@ export interface GeolocationLike {
     options?: PositionOptions
   ) => number;
   clearWatch: (watchId: number) => void;
+  getCurrentPosition: (
+    success: (position: GeolocationPosition) => void,
+    error: (error: GeolocationPositionError) => void,
+    options?: PositionOptions
+  ) => void;
 }
 
 type LiveTrackingTimer = ReturnType<typeof setInterval>;
@@ -312,6 +351,13 @@ export function createLiveTracker(
   let watchId: number | null = null;
   let heartbeat: LiveTrackingTimer | null = null;
   let unsubscribeVisibility: (() => void) | null = null;
+  // True from the moment a brand-new watch opens until its FIRST fix lands.
+  // The stale-on-arrival escalation fires only on that first fix — never on
+  // a later one — so a silent stream that starts stale gets exactly one
+  // forced-fresh retry, and a stream that merely goes stale mid-session
+  // does not. Re-armed on every fresh watch (initial start AND each
+  // post-background resume), consumed once.
+  let firstFixPending = false;
 
   function set(patch: Partial<LiveTrackingState>): void {
     state = { ...state, ...patch };
@@ -336,6 +382,7 @@ export function createLiveTracker(
     // A NEW watch every time. There is no documented "resume" of a watch
     // that stopped when the tab backgrounded, so we never assume the old
     // one comes back — visibility-visible always lands here for a fresh id.
+    firstFixPending = true;
     watchId = geo.watchPosition(handleFix, handleError, positionOptions());
   }
 
@@ -343,6 +390,7 @@ export function createLiveTracker(
     if (watchId === null) return;
     deps.getGeolocation()?.clearWatch(watchId);
     watchId = null;
+    firstFixPending = false;
   }
 
   function handleFix(position: GeolocationPosition): void {
@@ -352,14 +400,79 @@ export function createLiveTracker(
       lat: position.coords.latitude,
       lng: position.coords.longitude,
       accuracyM: position.coords.accuracy,
+      // EXACTLY what the device reported. Never rewritten — the sanity guard
+      // below derives a SEPARATE age value and does not touch this.
       deviceTimestamp: position.timestamp,
     };
+
+    // ── Arrival sanity guard ────────────────────────────────────────────
+    // Nothing else in this module looks at a fix's OWN timestamp; the
+    // heartbeat only measures age accrued AFTER receipt. So a fix that is
+    // already old the instant it lands (device woke with a cached fix, OS
+    // handed back a stale reading) used to be labelled "live" forever. Here
+    // we measure that age once, at receipt.
+    const receivedNow = deps.now();
+    const rawAgeMs = receivedNow - position.timestamp;
+    // Device clock AHEAD of ours -> negative -> the true age is unknowable.
+    // Do NOT clamp it into looking fresh: carry null ("unknown"), and let
+    // the fix proceed as "live" so the normal heartbeat still governs it.
+    const fixAgeAtReceiptMs = rawAgeMs >= 0 ? rawAgeMs : null;
+    const staleOnArrival =
+      fixAgeAtReceiptMs !== null && fixAgeAtReceiptMs > config.stalenessMs;
+
+    const wasFirstFix = firstFixPending;
+    firstFixPending = false;
+
     set({
-      status: "live",
+      // Stale from its first paint, not "live for one heartbeat then
+      // corrected" — the display side (`computeYouMarker`) reads this
+      // straight and never shows the dot as current.
+      status: staleOnArrival ? "stale" : "live",
       position: fix,
-      lastUpdatedAt: deps.now(),
+      lastUpdatedAt: receivedNow,
+      fixAgeAtReceiptMs,
       errorKind: null,
-      staleReason: null,
+      staleReason: staleOnArrival ? "stale_on_arrival" : null,
+    });
+
+    // ── Bounded escalation ──────────────────────────────────────────────
+    // ONLY when the FIRST fix of this watch session is the stale one: fire
+    // exactly one forced-fresh probe. Not a loop — `firstFixPending` is
+    // already false, so the probe's own result (which also lands here)
+    // cannot re-trigger this.
+    if (wasFirstFix && staleOnArrival) {
+      escalateOnce();
+    }
+  }
+
+  /**
+   * The single bounded recovery attempt for a first-fix-was-stale event.
+   * One `getCurrentPosition({ maximumAge: 0 })` probe with a short timeout:
+   *
+   *   - success with a fresher fix -> `handleFix` flips us to "live";
+   *   - success with ANOTHER stale fix -> `handleFix` settles on "stale"
+   *     (and cannot escalate again — `firstFixPending` is false);
+   *   - error / timeout -> `handleError` falls back to the stale fix we
+   *     already hold, marked stale, no retry.
+   *
+   * Chosen over restarting the watch with `enableHighAccuracy: true`
+   * because a one-shot is provably bounded on its face — it fires once, has
+   * its own timeout, and leaves the running watch (and the global
+   * `enableHighAccuracy` default) untouched. Chrome's scan-backoff means
+   * this can legitimately just time out on a stationary desktop; that is a
+   * clean settle-on-stale, not a failure to handle.
+   */
+  function escalateOnce(): void {
+    if (!started || deps.isHidden()) return;
+    const geo = deps.getGeolocation();
+    if (!geo || typeof geo.getCurrentPosition !== "function") return;
+    // Keep the retained fix on screen (grey, "last known") while we retry;
+    // "requesting" is what the toggle reads as "attempting".
+    set({ status: "requesting", staleReason: null });
+    geo.getCurrentPosition(handleFix, handleError, {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: config.escalationTimeoutMs,
     });
   }
 
@@ -377,6 +490,7 @@ export function createLiveTracker(
         lastUpdatedAt: null,
         errorKind: "denied",
         staleReason: null,
+        fixAgeAtReceiptMs: null,
       });
       return;
     }
@@ -443,6 +557,7 @@ export function createLiveTracker(
       unsubscribeVisibility();
       unsubscribeVisibility = null;
     }
+    firstFixPending = false;
     started = false;
   }
 
@@ -481,6 +596,7 @@ export function createLiveTracker(
         lastUpdatedAt: null,
         errorKind: null,
         staleReason: null,
+        fixAgeAtReceiptMs: null,
       });
     },
 
