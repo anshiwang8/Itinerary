@@ -111,6 +111,11 @@ import {
   type LiveTrackingState,
 } from "./lib/liveTracking";
 import { computeYouMarker, liveControlLabel } from "./lib/youMarker";
+import {
+  INITIAL_ARRIVAL_PROGRESS,
+  reduceArrival,
+  type ArrivalProgress,
+} from "./lib/arrivalDetection";
 
 const SHOW_DEV_CONTROLS = shouldShowDevControls(
   process.env.NODE_ENV,
@@ -705,6 +710,20 @@ export default function Home() {
       setBanner((current) => (ourNote(current) ? null : current));
     }
   }, [liveTracking.status, liveTrackWanted]);
+
+  // ── Arrival detection (live tracking, Piece 3) — DISPLAY ONLY. ──────────
+  // When the live fix sits within a small radius of the CURRENTLY-active
+  // stop, on fresh accurate fixes, for a sustained span, that stop is marked
+  // ARRIVED and its strip card turns fully chartreuse. This never touches
+  // the stored itinerary, the schedule, or any mutation engine — it is a
+  // session-local render decision, and a reload re-detects it. `distanceM`
+  // is measured by ItineraryMap (it owns the Maps geometry lib); everything
+  // else — the dwell, the freshness/accuracy gates — is the pure
+  // `reduceArrival` fold. See `arrivalDetection.ts`.
+  const [youToActiveStopM, setYouToActiveStopM] = useState<number | null>(null);
+  const arrivalProgressRef = useRef<ArrivalProgress>(INITIAL_ARRIVAL_PROGRESS);
+  const [arrivedStopId, setArrivedStopId] = useState<string | null>(null);
+
   const [swapText, setSwapText] = useState("");
   const [swapping, setSwapping] = useState(false);
   const [swapError, setSwapError] = useState<string | null>(null);
@@ -2033,6 +2052,9 @@ export default function Home() {
     setHomeLeg(null);
     setSelected(null);
     setManualLegId(null);
+    arrivalProgressRef.current = INITIAL_ARRIVAL_PROGRESS;
+    setArrivedStopId(null);
+    setYouToActiveStopM(null);
     setBanner(null);
     setChangedIds(new Set());
     setOldStarts({});
@@ -2661,6 +2683,38 @@ export default function Home() {
       : null,
   };
 
+  // Fold the live fix's position relative to the active stop into the
+  // session-local "arrived" state (Piece 3). Runs on the app's existing
+  // render cadence — a new device fix or the active stop advancing is what
+  // carries real new information in, and each forces a render; there is no
+  // ticker. `reduceArrival` is pure and folding a repeated sample is a fixed
+  // point, so React's double-invoked effects are harmless. A missing
+  // youMarker view means no usable fix -> `stale: true` so it can never
+  // confirm an arrival.
+  const activeStopIdNow =
+    itinerary?.stops.find((s) => s.status === "active")?.id ?? null;
+  const arrivalFixStale = youMarkerView ? youMarkerView.stale : true;
+  const arrivalFixAccuracyM = youMarkerView?.accuracyM ?? null;
+  useEffect(() => {
+    const next = reduceArrival(arrivalProgressRef.current, {
+      activeStopId: activeStopIdNow,
+      distanceM: youToActiveStopM,
+      accuracyM: arrivalFixAccuracyM,
+      stale: arrivalFixStale,
+      nowMs: displayNowMs,
+    });
+    arrivalProgressRef.current = next;
+    setArrivedStopId((current) =>
+      current === next.arrivedStopId ? current : next.arrivedStopId
+    );
+  }, [
+    activeStopIdNow,
+    youToActiveStopM,
+    arrivalFixAccuracyM,
+    arrivalFixStale,
+    displayNowMs,
+  ]);
+
   const mapHome = useMemo<MapHome | null>(() => {
     if (!homeLeg) return null;
     const first = (schedule ?? []).find((s) => s.start_time);
@@ -2794,6 +2848,13 @@ export default function Home() {
     const nextId = itinerary?.id ?? null;
     if (displayedItineraryId.current !== nextId) {
       setManualLegId(null);
+      // Arrival is session-local and per-plan: a new plan (or a resumed
+      // one, or ending this one) starts with nothing arrived. The fold also
+      // clears itself once the active stop id stops matching, but a plan
+      // swap should not wait for the next fix to do it.
+      arrivalProgressRef.current = INITIAL_ARRIVAL_PROGRESS;
+      setArrivedStopId(null);
+      setYouToActiveStopM(null);
       displayedItineraryId.current = nextId;
     }
   }, [itinerary?.id]);
@@ -3267,6 +3328,7 @@ export default function Home() {
         onSelect={selectAndFocusStop}
         focusRequest={mapFocusRequest}
         youMarker={youMarker}
+        onYouToActiveStopMeters={setYouToActiveStopM}
       />
 
       {/* Live-location toggle (Piece 2). Requests permission on the first
@@ -3316,6 +3378,7 @@ export default function Home() {
         selected={selected}
         timeZone={displayZone}
         now={displayNow}
+        arrivedStopId={arrivedStopId}
         manualLegId={manualLegId}
         onToggleManualLeg={(legId) =>
           setManualLegId((current) => toggleManualLegId(current, legId))

@@ -637,6 +637,7 @@ function StopCard({
   remove,
   timeZone,
   now,
+  arrived,
   focusRequest,
   onFocusHandled,
 }: {
@@ -651,6 +652,12 @@ function StopCard({
    *  threaded into LegCard, so the triangle's position and the leg/"now"
    *  pill can never disagree the moment anyone simulates time. */
   now: Date;
+  /** the live device position has confirmed arrival at THIS stop (Piece 3).
+   *  The caller has already AND-ed it with `status === "active"`, so it
+   *  stacks with the active styling — a full chartreuse card wash on top of
+   *  the active border, the "now" pill and the creep caret, all of which
+   *  stay. Display only. */
+  arrived: boolean;
   focusRequest?: StripFocusRequest | null;
   onFocusHandled?: (nonce: number) => void;
 }) {
@@ -671,6 +678,7 @@ function StopCard({
     "lstrip__stop" +
     (selected ? " lstrip__stop--sel" : "") +
     (stop.status === "active" ? " lstrip__stop--live" : "") +
+    (arrived ? " lstrip__stop--arrived" : "") +
     (stop.status === "completed" ? " lstrip__stop--done" : "") +
     (stop.changed ? " lstrip__stop--changed" : "") +
     (armed ? " lstrip__stop--arming" : "");
@@ -718,6 +726,10 @@ function StopCard({
           </span>
           <span className="eyebrow">{stop.category}</span>
           {stop.status === "active" && <span className="lstrip__now">now</span>}
+          {/* The chartreuse "arrived" wash is a purely visual signal; this
+              carries the same fact to a screen reader, which the "now" pill
+              and "be here" range do not. */}
+          {arrived && <span className="sr-only">, arrived</span>}
         </span>
         <span className="lstrip__name">{stop.name}</span>
         {stop.start && stop.end && (
@@ -857,6 +869,13 @@ export interface ItineraryStripProps {
    *  read at RENDER: nothing here ticks, so an auto-shown leg re-evaluates
    *  on the app's existing render cadence, never on a timer of its own. */
   now?: Date;
+  /** the venue id of the stop the live device position has confirmed
+   *  ARRIVED at (live tracking, Piece 3), or null. Display only — it never
+   *  reaches the store or the schedule. The arrived card turns fully
+   *  chartreuse; this only ever takes effect on the card that is also
+   *  `status === "active"`, so it stacks with the active border and the
+   *  creep caret rather than replacing them. */
+  arrivedStopId?: string | null;
   manualLegId?: string | null;
   onToggleManualLeg?: (legId: string) => void;
   focusRequest?: StripFocusRequest | null;
@@ -872,6 +891,7 @@ export default function ItineraryStrip({
   remove,
   timeZone = "America/Toronto",
   now = new Date(),
+  arrivedStopId = null,
   manualLegId = null,
   onToggleManualLeg = () => {},
   focusRequest,
@@ -906,6 +926,7 @@ export default function ItineraryStrip({
             remove={selected === s.id ? remove : null}
             timeZone={timeZone}
             now={now}
+            arrived={s.status === "active" && arrivedStopId === s.id}
             focusRequest={focusRequest}
             onFocusHandled={onFocusHandled}
           />

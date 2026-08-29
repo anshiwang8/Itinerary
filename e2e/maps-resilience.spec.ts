@@ -1963,6 +1963,51 @@ test("@mock the active stop's card alone shows the real-time creep triangle, at 
   expect(fraction).toBeLessThan(0.52);
 });
 
+// ── arrival detection: the chartreuse "arrived" card (live tracking, Piece 3) ──
+// The GPS proximity + dwell decision cannot be mocked (it needs a real
+// device), but the render plumbing can: the harness feeds a fixed
+// `arrivedStopId` straight to the strip. "Drive Specimen One" is the
+// specimen's only active stop, so it is the only valid target.
+test("@mock a stop marked arrived turns its card chartreuse and keeps the active caret", async ({
+  page,
+}) => {
+  await serveMaps(page);
+  await page.goto("/test-harness/maps");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+  await page.getByRole("button", { name: "Show driving specimen" }).click();
+
+  const strip = page.getByTestId("driving-strip-specimen");
+  const activeCard = strip.locator(".lstrip__stop").filter({ hasText: "Drive Specimen One" });
+
+  // Before arrival: active border only, no arrived wash.
+  await expect(activeCard).toHaveClass(/lstrip__stop--live/);
+  await expect(activeCard).not.toHaveClass(/lstrip__stop--arrived/);
+
+  await page.getByRole("button", { name: "Mark drive stop one arrived" }).click();
+
+  // The card goes chartreuse — the arrived class plus a visible background
+  // wash that the plain active state does not carry.
+  await expect(activeCard).toHaveClass(/lstrip__stop--arrived/);
+  const bg = await activeCard.evaluate(
+    (el) => getComputedStyle(el).backgroundColor
+  );
+  expect(bg).not.toBe("rgba(0, 0, 0, 0)");
+  expect(bg).not.toBe("rgb(255, 255, 255)");
+
+  // The clock-based caret is INDEPENDENT and still true — it stays.
+  await expect(activeCard.locator(".lstrip__triangle")).toHaveCount(1);
+  // A screen reader still hears the fact the colour conveys.
+  await expect(activeCard).toContainText("arrived");
+
+  // Only the active stop is eligible: an upcoming card never gets the wash.
+  const upcoming = strip.locator(".lstrip__stop").filter({ hasText: "Drive Specimen Two" });
+  await expect(upcoming).not.toHaveClass(/lstrip__stop--arrived/);
+
+  // And it clears cleanly.
+  await page.getByRole("button", { name: "Arrival off" }).click();
+  await expect(activeCard).not.toHaveClass(/lstrip__stop--arrived/);
+});
+
 test("@mock a driving leg draws its real road line, and none at all without geometry", async ({
   page,
 }) => {

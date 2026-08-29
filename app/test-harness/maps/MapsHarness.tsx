@@ -1005,6 +1005,11 @@ export default function MapsHarness() {
   const [manualLegId, setManualLegId] = useState<string | null>(null);
   const [routeStops, setRouteStops] = useState(ROUTE_STOPS);
   const [youMarker, setYouMarker] = useState<YouMarkerRender | null>(null);
+  // Arrival detection (live tracking, Piece 3): a fixed "arrived" venue id
+  // fed straight to the strip, so the chartreuse-card rendering is proven
+  // without the GPS/dwell state machine. Only the driving specimen's active
+  // stop ("maps-drive-one", 19:00-20:00, DRIVE_NOW 19:30) is a candidate.
+  const [arrivedStopId, setArrivedStopId] = useState<string | null>(null);
   const [visibilityPlan, setVisibilityPlan] = useState(() =>
     makeVisibilityPlan("visibility-plan")
   );
@@ -1324,6 +1329,24 @@ export default function MapsHarness() {
           You marker wide accuracy
         </button>
       </div>
+      <div
+        data-testid="arrival-controls"
+        style={{
+          position: "fixed",
+          zIndex: 1000,
+          top: 232,
+          left: 8,
+          display: "flex",
+          gap: 4,
+        }}
+      >
+        <button type="button" onClick={() => setArrivedStopId(null)}>
+          Arrival off
+        </button>
+        <button type="button" onClick={() => setArrivedStopId("maps-drive-one")}>
+          Mark drive stop one arrived
+        </button>
+      </div>
       {mounted && (
         <ItineraryMap
           stops={stops}
@@ -1350,6 +1373,7 @@ export default function MapsHarness() {
             home={currentStripHome}
             stops={currentStripStops}
             selected={selected}
+            arrivedStopId={arrivedStopId}
             onSelect={selectAndFocus}
             now={
               drivingSpecimen

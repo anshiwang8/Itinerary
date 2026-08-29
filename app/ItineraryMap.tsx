@@ -249,9 +249,19 @@ interface Props {
    *  tracker; NEVER auto-pans the camera to follow it (see the effect note
    *  on focusRequest — camera moves only on an explicit request). */
   youMarker?: YouMarkerRender | null;
+  /** Reports the straight-line metres from the live "you are here" fix to
+   *  the stop that is active right now, measured with the Maps geometry
+   *  library this component already loads (no second haversine — same
+   *  reasoning as `homeFitsWithStops`). null whenever it cannot be
+   *  measured: no live fix, no active stop, or the library is not ready.
+   *  Piece 3 (arrival detection) folds this — together with the fix's
+   *  freshness and accuracy, which live in page.tsx — into a display-only
+   *  "arrived" state. This component does the GEOMETRY only: it makes no
+   *  arrival decision, stores nothing, and never moves the camera for it. */
+  onYouToActiveStopMeters?: (meters: number | null) => void;
 }
 
-export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTravelLegIds = [], legacyTransitVisibility = true, focusRequest = null, youMarker = null }: Props) {
+export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTravelLegIds = [], legacyTransitVisibility = true, focusRequest = null, youMarker = null, onYouToActiveStopMeters }: Props) {
   const mapDivRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const projRef = useRef<google.maps.MapCanvasProjection | null>(null);
@@ -760,6 +770,54 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequest?.nonce, mapState]);
+
+  // ── Piece 3 (arrival detection): the GEOMETRY half only. ────────────────
+  // The live fix's straight-line distance to the stop that is active right
+  // now, measured with the Maps geometry library this component already
+  // loads (no second haversine — same reasoning as `homeFitsWithStops`).
+  // The arrival DECISION — the sustained-dwell requirement, the freshness
+  // and accuracy gates — is folded in page.tsx, where the tracker state
+  // lives; this reports a plain number and nothing else, and it never moves
+  // the camera.
+  const activeStop = stops.find((s) => s.status === "active") ?? null;
+  const activeStopId = activeStop?.id ?? null;
+  const activeStopLat = activeStop?.lat ?? null;
+  const activeStopLng = activeStop?.lng ?? null;
+  const youLat = youMarker?.lat ?? null;
+  const youLng = youMarker?.lng ?? null;
+  useEffect(() => {
+    if (!onYouToActiveStopMeters) return;
+    if (
+      mapState !== "ready" ||
+      youLat === null ||
+      youLng === null ||
+      activeStopLat === null ||
+      activeStopLng === null
+    ) {
+      onYouToActiveStopMeters(null);
+      return;
+    }
+    let meters: number | null = null;
+    try {
+      meters = google.maps.geometry.spherical.computeDistanceBetween(
+        new google.maps.LatLng(youLat, youLng),
+        new google.maps.LatLng(activeStopLat, activeStopLng)
+      );
+    } catch {
+      meters = null;
+    }
+    onYouToActiveStopMeters(
+      typeof meters === "number" && Number.isFinite(meters) ? meters : null
+    );
+  }, [
+    mapState,
+    youLat,
+    youLng,
+    activeStopId,
+    activeStopLat,
+    activeStopLng,
+    onYouToActiveStopMeters,
+  ]);
 
   const fallbackPoints = [
     ...(home ? [{ lat: home.lat, lng: home.lng }] : []),

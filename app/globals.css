@@ -768,6 +768,25 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__stop--changed { border-color: var(--live); border-width: 1.5px; }
 .lstrip__stop--done { background: var(--card-2); }
 
+/* ARRIVED (live location tracking, Piece 3): the live device position has
+   confirmed the traveller is AT this stop. The owner's design — "the event
+   turns chartreuse" — is the whole card going chartreuse, layered ON TOP OF
+   the active state: the --live border, the "now" pill and the creep caret
+   all stay (the clock is still true, and how far through the window it is
+   is still useful), and this adds a full --live-wash fill plus a heavier
+   border. It is only ever combined with --live (the caller AND-s "arrived"
+   with status === "active"), so the border is already chartreuse.
+   This is a DELIBERATE second use of --live within its ONE "currently true,
+   right now" meaning — the same sense the active border and the caret carry
+   — NOT a competing meaning (contrast the reroute "just changed" accent).
+   Background + border only: no box-shadow, which the strip's ~8px vertical
+   clip budget would crop (see the caret sizing note below). */
+.lstrip__stop--arrived {
+  background: var(--live-wash);
+  border-color: var(--live);
+  border-width: 2px;
+}
+
 /* The active stop's real-time progress caret. It straddles the card's own
    bottom edge — tip pointing UP into the card (embedded in the --live
    border), base pointing DOWN past it (protruding into the strip's blank
