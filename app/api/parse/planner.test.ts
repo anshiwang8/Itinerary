@@ -12,9 +12,11 @@ import {
   MIN_ACTIVITY_MINUTES,
   applyTimeFloors,
   buildPlannerMessages,
+  countCoverageGaps,
   describeNow,
   fallbackPlan,
   findPlanProblems,
+  kindQuestion,
   planStartInstant,
   planToParsed,
   planWithModel,
@@ -426,15 +428,31 @@ const cases: Array<[string, () => void]> = [
     },
   ],
 
-  // ── the vagueness contract ──
+  // ── the vagueness contract: CODE guarantees coverage, the model doesn't ──
   [
-    "a confident:false activity with NO question is a problem",
+    "a confident:false activity with NO question is NOT a hard problem (coercePlan closes the gap)",
     () => {
-      expectProblem(
-        goodPlan({ activities: [activity({ confident: false })], questions: [] }),
-        /no question attached/,
-        "unanswered vague activity"
-      );
+      // It used to push a problem — triggering the correction retry, then the
+      // single-stop fallback, dropping the app's NORMAL case ("something to
+      // do tonight"). Now the raw-JSON validator lets it through and
+      // coercePlan synthesizes the missing slot-scoped question.
+      const raw = goodPlan({ activities: [activity({ confident: false })], questions: [] });
+      assert.deepStrictEqual(findPlanProblems(raw, NOW), []);
+
+      const result = validatePlan(raw, NOW);
+      assert.ok(result.ok);
+      if (!result.ok) return;
+      const covering = result.plan.questions.find((q) => q.appliesToSlot === 0);
+      assert.ok(covering, "code must synthesize a question for the vague slot");
+      assert.strictEqual(covering!.question, "What kind of thing?");
+      assert.deepStrictEqual(covering!.options, [
+        "food",
+        "drinks",
+        "something to do",
+        "outdoors",
+      ]);
+      // telemetry still SEES the gap — it just no longer fails the plan
+      assert.strictEqual(countCoverageGaps(raw), 1);
     },
   ],
   [
@@ -457,8 +475,14 @@ const cases: Array<[string, () => void]> = [
         },
       });
       assert.deepStrictEqual(findPlanProblems(raw, NOW), []);
+      assert.strictEqual(countCoverageGaps(raw), 0, "one question already covers all three");
+      const covered = validatePlan(raw, NOW);
+      assert.ok(covered.ok);
+      if (!covered.ok) return;
+      assert.strictEqual(covered.plan.questions.length, 1, "coercePlan adds nothing");
 
-      // a DIFFERENT searchQuery is not covered by that answer
+      // a DIFFERENT searchQuery is NOT covered by that answer — no longer a
+      // hard problem; coercePlan synthesizes a question for the loose slot
       const mixed = goodPlan({
         activities: [
           activity({ slot: 0, searchQuery: "things to do", confident: false }),
@@ -468,7 +492,135 @@ const cases: Array<[string, () => void]> = [
           { id: "kind", question: "What kind of thing?", options: ["food"], appliesToSlot: 0 },
         ],
       });
-      expectProblem(mixed, /no question attached/, "uncovered second query");
+      assert.deepStrictEqual(findPlanProblems(mixed, NOW), []);
+      assert.strictEqual(countCoverageGaps(mixed), 1, "the restaurant slot is uncovered");
+      const result = validatePlan(mixed, NOW);
+      assert.ok(result.ok);
+      if (!result.ok) return;
+      assert.ok(
+        result.plan.questions.find((q) => q.appliesToSlot === 1),
+        "the uncovered slot gets a synthesized question"
+      );
+      const ids = result.plan.questions.map((q) => q.id);
+      assert.strictEqual(new Set(ids).size, ids.length, `ids collided: ${ids.join(",")}`);
+    },
+  ],
+  [
+    "coercePlan SYNTHESIZES a slot-scoped question for every uncovered vague activity",
+    () => {
+      // one vague slot, model attached nothing at all
+      const one = validatePlan(
+        goodPlan({
+          activities: [activity({ slot: 0, searchQuery: "things to do", confident: false })],
+          questions: [],
+        }),
+        NOW
+      );
+      assert.ok(one.ok);
+      if (!one.ok) return;
+      const q0 = one.plan.questions.find((q) => q.appliesToSlot === 0);
+      assert.ok(q0, "slot 0 must be covered");
+      assert.strictEqual(q0!.question, "What kind of thing?");
+
+      // TWO uncovered vague slots, different queries → two questions, each
+      // scoped to its own slot, with unique ids
+      const two = validatePlan(
+        goodPlan({
+          activities: [
+            activity({ slot: 0, searchQuery: "restaurant", confident: false }),
+            activity({ slot: 1, searchQuery: "bar", confident: false }),
+          ],
+          questions: [],
+        }),
+        NOW
+      );
+      assert.ok(two.ok);
+      if (!two.ok) return;
+      assert.ok(two.plan.questions.find((q) => q.appliesToSlot === 0), "slot 0 covered");
+      assert.ok(two.plan.questions.find((q) => q.appliesToSlot === 1), "slot 1 covered");
+      const ids = two.plan.questions.map((q) => q.id);
+      assert.strictEqual(new Set(ids).size, ids.length, `ids collided: ${ids.join(",")}`);
+
+      // ALREADY covered by the model → no synthesis, idempotent
+      const already = validatePlan(
+        goodPlan({
+          activities: [activity({ slot: 0, searchQuery: "things to do", confident: false })],
+          questions: [
+            { id: "kind", question: "What kind of thing?", options: ["food"], appliesToSlot: 0 },
+          ],
+        }),
+        NOW
+      );
+      assert.ok(already.ok);
+      if (!already.ok) return;
+      assert.strictEqual(already.plan.questions.length, 1, "no duplicate question added");
+    },
+  ],
+  [
+    "a synthesized question SURVIVES the cap alongside a real slot question and when",
+    () => {
+      const result = validatePlan(
+        goodPlan({
+          activities: [
+            activity({ slot: 0, searchQuery: "restaurant", confident: false }),
+            activity({ slot: 1, searchQuery: "bar", confident: false }),
+          ],
+          timeIntent: { startISO: null, endISO: null, kind: "unspecified", label: "unspecified" },
+          questions: [
+            // model covered slot 0, added plan-level filler, left slot 1 loose
+            { id: "food", question: "Craving?", options: ["Italian"], appliesToSlot: 0 },
+            { id: "vibe", question: "What vibe?", options: ["cozy"], appliesToSlot: null },
+          ],
+        }),
+        NOW
+      );
+      assert.ok(result.ok);
+      if (!result.ok) return;
+      assert.strictEqual(result.plan.questions.length, MAX_QUESTIONS);
+      assert.ok(
+        result.plan.questions.find((q) => q.appliesToSlot === 1),
+        "slot 1's synthesized question is kept"
+      );
+      assert.ok(
+        result.plan.questions.find((q) => q.appliesToSlot === 0),
+        "the model's real slot question is kept"
+      );
+      assert.ok(result.plan.questions.some((q) => q.id === "when"), "when is kept");
+      assert.ok(!result.plan.questions.some((q) => q.id === "vibe"), "plan-level filler is dropped");
+    },
+  ],
+  [
+    "countCoverageGaps counts the vague slots the model left uncovered, tolerant of junk",
+    () => {
+      assert.strictEqual(countCoverageGaps(null), 0);
+      assert.strictEqual(countCoverageGaps("{}"), 0);
+      assert.strictEqual(countCoverageGaps(goodPlan()), 0, "no vague activities");
+      assert.strictEqual(
+        countCoverageGaps(goodPlan({ activities: [activity({ confident: false })], questions: [] })),
+        1
+      );
+      assert.strictEqual(
+        countCoverageGaps(
+          goodPlan({
+            activities: [
+              activity({ slot: 0, searchQuery: "things to do", confident: false }),
+              activity({ slot: 1, searchQuery: "things to do", confident: false }),
+            ],
+            questions: [{ id: "k", question: "?", options: ["a"], appliesToSlot: 0 }],
+          })
+        ),
+        0,
+        "one question covers both slots sharing a query"
+      );
+    },
+  ],
+  [
+    "kindQuestion is the one code-owned coverage-question shape",
+    () => {
+      const q = kindQuestion(2);
+      assert.strictEqual(q.id, "kind");
+      assert.strictEqual(q.appliesToSlot, 2);
+      assert.deepStrictEqual(q.options, ["food", "drinks", "something to do", "outdoors"]);
     },
   ],
   [
@@ -643,6 +795,48 @@ const cases: Array<[string, () => void]> = [
         findPlanProblems(JSON.parse(JSON.stringify(plan)), NOW),
         []
       );
+    },
+  ],
+  [
+    "END TO END: the exact bug shape (confident:false + a PLAN-LEVEL kind question) does NOT fall to the fallback",
+    async () => {
+      let calls = 0;
+      const raw = JSON.stringify(
+        goodPlan({
+          activities: [activity({ slot: 0, searchQuery: "live music venue", confident: false })],
+          timeIntent: { startISO: null, endISO: null, kind: "unspecified", label: "unspecified" },
+          // the model asked "what kind of thing?" — but at plan level, which
+          // coveredSlots does not accept. This is what used to reach fallback.
+          questions: [
+            { id: "kind", question: "What kind of thing?", options: ["food"], appliesToSlot: null },
+          ],
+        })
+      );
+      const outcome = await planWithModel([], NOW, "something to do tonight", ZONE, async () => {
+        calls++;
+        return raw;
+      });
+      assert.strictEqual(calls, 1, "accepted on the first answer — no correction retry");
+      assert.strictEqual(outcome.source, "model", "not the fallback");
+      assert.strictEqual(outcome.plan.activities[0].searchQuery, "live music venue");
+      const covering = outcome.plan.questions.find((q) => q.appliesToSlot === 0);
+      assert.ok(covering, "the vague slot is covered in the FINAL coerced plan");
+      assert.ok(outcome.plan.questions.some((q) => q.id === "when"), "and the when-question is there");
+      assert.strictEqual(outcome.coverageGaps, 1, "telemetry recorded the gap the model left");
+    },
+  ],
+  [
+    "coverageGaps is 0 for a clean answer and for the fallback",
+    async () => {
+      const clean = await planWithModel([], NOW, "dinner", ZONE, async () =>
+        JSON.stringify(goodPlan())
+      );
+      assert.strictEqual(clean.source, "model");
+      assert.strictEqual(clean.coverageGaps, 0);
+
+      const fell = await planWithModel([], NOW, "x", ZONE, async () => "not json at all");
+      assert.strictEqual(fell.source, "fallback");
+      assert.strictEqual(fell.coverageGaps, 0);
     },
   ],
 

@@ -134,7 +134,7 @@ export async function POST(request: NextRequest) {
     // invalid, here's why" → correction), and letting a correction land on a
     // different model than the answer it corrects would be a subtler bug than
     // the rate limit it was working around.
-    const { plan: modelPlan, source, problems } = await withModelFallback(
+    const { plan: modelPlan, source, problems, coverageGaps } = await withModelFallback(
       "planner",
       (model) =>
         planWithModel(
@@ -179,6 +179,11 @@ export async function POST(request: NextRequest) {
       // taste. Omitted entirely when the strip did nothing, which is the
       // ordinary case.
       ...(strippedConstraints > 0 ? { strippedConstraints } : {}),
+      // HOW MANY vague activities the model left without a slot-scoped
+      // question — coercePlan synthesized one for each, so this never failed
+      // the plan; it is the tuning signal for the prompt's appliesToSlot
+      // wording. Omitted when the model got it right, which is the aim.
+      ...(coverageGaps > 0 ? { coverageGaps } : {}),
       ...(problems.length > 0 ? { problems: problems.slice(0, 6) } : {}),
     });
     return apiJson(ctx, { plan, parsed: planToParsed(plan) });

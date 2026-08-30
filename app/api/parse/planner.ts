@@ -161,6 +161,13 @@ Respond with ONLY a single JSON object. No prose, no explanations, no markdown f
       "searchQuery": "italian restaurant",
       "estimatedMinutes": 90,
       "confident": true
+    },
+    {
+      "slot": 1,
+      "intent": "something to do after",
+      "searchQuery": "things to do",
+      "estimatedMinutes": 90,
+      "confident": false
     }
   ],
   "timeIntent": {
@@ -170,7 +177,7 @@ Respond with ONLY a single JSON object. No prose, no explanations, no markdown f
     "label": "3-8pm"
   },
   "questions": [
-    { "id": "food-type", "question": "What are you craving?", "options": ["Italian", "Japanese", "Mexican"], "appliesToSlot": 1 }
+    { "id": "kind", "question": "What kind of thing?", "options": ["live music", "a gallery", "a game", "a walk"], "appliesToSlot": 1 }
   ],
   "context": {
     "aesthetic": "lively night out",
@@ -203,7 +210,7 @@ VARIETY — a day out is not a sequence of meals
 VAGUENESS — never guess a vague activity into a specific one
 - Vague food ("dinner", "somewhere to eat") → keep searchQuery general ("restaurant"), set "confident": false, and ask what they are craving.
 - Vague everything ("something to do", "surprise me") → set "confident": false and ask what KIND of thing, with options drawn from real cases: indoor, outdoor, athletic, competitive, relaxed, creative, social. Pick the ones that fit the request; this is not a taxonomy to recite.
-- EVERY activity with "confident": false MUST have a question whose "appliesToSlot" is that activity's slot.
+- EVERY activity with "confident": false MUST have a question whose "appliesToSlot" is that activity's slot. This holds even when that question is the ONLY thing you ask: a lone vague activity's "what kind of thing?" still carries its slot number in "appliesToSlot", never null. A null "appliesToSlot" is only ever for a question about the whole day (the time, the overall vibe).
 - An already-specific ask is "confident": true and gets no question: "ramen", "bowling", "a jazz club" are pinned already.
 
 TASTE PREFERENCES — only when a "preferences" object is present
@@ -342,9 +349,11 @@ export function parseInstant(value: unknown): Date | null {
 const TIME_INTENT_KINDS: TimeIntentKind[] = ["explicit", "relative", "unspecified"];
 
 /** Which activity slots a question set actually covers: the slot a question
- *  names, plus every other slot asking for the SAME searchQuery. Shared by
- *  the validator and by answer-folding so both agree on what one answer
- *  resolves. Tolerant of raw (unvalidated) shapes — it runs mid-validation. */
+ *  names, plus every other slot asking for the SAME searchQuery. The one
+ *  definition of "covered" — coercePlan's synthesis loop closes any gap
+ *  against it, countCoverageGaps() reports the gaps the model left, and the
+ *  second planner pass folds one answer across every slot it covers.
+ *  Tolerant of raw (unvalidated) shapes — it also runs on model JSON. */
 export function coveredSlots(activities: unknown[], questions: unknown[]): Set<number> {
   const queryBySlot = new Map<number, string>();
   for (const entry of activities) {
@@ -365,6 +374,32 @@ export function coveredSlots(activities: unknown[], questions: unknown[]): Set<n
     }
   }
   return covered;
+}
+
+/**
+ * How many `confident: false` activities the RAW model answer left with no
+ * question covering their slot. coercePlan synthesizes one per gap (see the
+ * synthesis loop there), so this is NEVER a failure path — it is the tuning
+ * signal for how often the model needs that backfill, logged on
+ * `planner_plan`. Tolerant of raw shapes: it runs on unvalidated JSON.
+ */
+export function countCoverageGaps(raw: unknown): number {
+  if (!isRecord(raw)) return 0;
+  const activities = Array.isArray(raw.activities) ? raw.activities : [];
+  const questions = Array.isArray(raw.questions) ? raw.questions : [];
+  const covered = coveredSlots(activities, questions);
+  let gaps = 0;
+  for (const entry of activities) {
+    if (
+      isRecord(entry) &&
+      entry.confident === false &&
+      typeof entry.slot === "number" &&
+      !covered.has(entry.slot)
+    ) {
+      gaps++;
+    }
+  }
+  return gaps;
 }
 
 /**
@@ -494,25 +529,19 @@ export function findPlanProblems(raw: unknown, now: Date): string[] {
       }
     });
 
-    // The contract rule: a vague activity MUST come with its question.
+    // NO hard check here that a vague activity carries its question.
     //
-    // DEVIATION from the one-question-per-slot reading: coverage extends to
-    // every vague activity sharing that slot's searchQuery. "three places"
-    // is three vague slots but ONE honest question, and asking "what kind
-    // of thing?" three times would be an interview, not a clarification —
-    // the pre-planner clarify made exactly this call ("drinks then another
-    // bar is two slots but one question"). Answer-folding mirrors it.
-    if (Array.isArray(activities)) {
-      const covered = coveredSlots(activities, questions);
-      activities.forEach((entry, index) => {
-        if (!isRecord(entry) || entry.confident !== false) return;
-        if (typeof entry.slot === "number" && !covered.has(entry.slot)) {
-          problems.push(
-            `activity ${index} is marked "confident": false but has no question attached to its slot`
-          );
-        }
-      });
-    }
+    // It used to push a problem — triggering the correction retry, then the
+    // deterministic single-stop fallback — when a `confident: false` activity
+    // had no question covering its slot. But a broad request ("something to
+    // do tonight") is the app's NORMAL case, and a model that asks "what
+    // kind of thing?" at plan level (appliesToSlot: null) instead of scoped
+    // to the slot was dropping that whole case to the fallback. coercePlan
+    // now GUARANTEES coverage by synthesizing the missing slot-scoped
+    // question (the exact companion of the when-question guarantee), so this
+    // raw-JSON check is redundant as a gate. The signal is kept as pure
+    // telemetry — countCoverageGaps(), logged on `planner_plan` — so the
+    // owner can still see how often the model needs that backfill.
   }
 
   // ── context ──
@@ -551,6 +580,22 @@ export function whenQuestion(): PlannerQuestion {
     question: "When?",
     options: [...WHEN_QUESTION_OPTIONS],
     appliesToSlot: null,
+  };
+}
+
+/** The kind-question — the companion of whenQuestion(). Code synthesizes it
+ *  in coercePlan for any `confident: false` activity whose slot the model
+ *  left without a question, and fallbackPlan ships it too. ONE definition so
+ *  the two copies cannot drift. `appliesToSlot` is always the vague slot: a
+ *  coverage question is SLOT-scoped, never plan-level. */
+export const KIND_QUESTION_ID = "kind";
+export const KIND_QUESTION_OPTIONS = ["food", "drinks", "something to do", "outdoors"];
+export function kindQuestion(slot: number): PlannerQuestion {
+  return {
+    id: KIND_QUESTION_ID,
+    question: "What kind of thing?",
+    options: [...KIND_QUESTION_OPTIONS],
+    appliesToSlot: slot,
   };
 }
 
@@ -651,6 +696,26 @@ function coercePlan(raw: Record<string, unknown>, now: Date): PlanIntent {
     questions.push(whenQuestion());
   }
 
+  // Code-owned guarantee, the exact companion of the when-question above and
+  // the same reasoning: the prompt says every `confident: false` activity
+  // carries a question scoped to its slot, and "the prompt asking for this is
+  // not proof that it happened". A broad request ("something to do tonight")
+  // is the NORMAL case; a model that asks "what kind of thing?" at plan level
+  // (appliesToSlot: null) or omits it must not cost the user their plan and a
+  // retry. coveredSlots is what the pipeline checks against, so close the gap
+  // against coveredSlots: synthesize the missing slot-scoped question.
+  for (const act of activities) {
+    if (act.confident) continue;
+    // recomputed each iteration on purpose: a synthesized question covers
+    // every OTHER vague slot sharing its searchQuery, exactly like a real
+    // one, so "three things to do" needs ONE synthesized question, not three
+    if (coveredSlots(activities, questions).has(act.slot)) continue;
+    let id = KIND_QUESTION_ID;
+    for (let n = 1; seenIds.has(id); n++) id = `${KIND_QUESTION_ID}-${n}`;
+    seenIds.add(id);
+    questions.push({ ...kindQuestion(act.slot), id });
+  }
+
   const rawContext = raw.context as Record<string, unknown>;
   const context: PlanContext = {
     aesthetic: (rawContext.aesthetic as string).trim() || "unspecified",
@@ -691,6 +756,11 @@ export interface PlannerOutcome {
   source: "model" | "retry" | "fallback";
   /** why the earlier rung was rejected; empty when the first answer was valid */
   problems: string[];
+  /** how many `confident: false` activities the accepted model answer left
+   *  without a slot-covering question — coercePlan synthesized one for each.
+   *  Pure telemetry (see countCoverageGaps); 0 for a clean answer and for the
+   *  fallback, which is well-formed by construction. */
+  coverageGaps: number;
 }
 
 function parseJson(raw: string): unknown {
@@ -715,8 +785,11 @@ export async function planWithModel(
   complete: PlannerModelCall
 ): Promise<PlannerOutcome> {
   const raw = await complete(messages);
-  let attempt = validatePlan(parseJson(raw), now);
-  if (attempt.ok) return { plan: attempt.plan, source: "model", problems: [] };
+  const parsed = parseJson(raw);
+  let attempt = validatePlan(parsed, now);
+  if (attempt.ok) {
+    return { plan: attempt.plan, source: "model", problems: [], coverageGaps: countCoverageGaps(parsed) };
+  }
 
   const firstProblems = attempt.problems;
   const retryMessages = [
@@ -725,13 +798,22 @@ export async function planWithModel(
     { role: "user", content: correctionMessage(firstProblems) },
   ];
   const retryRaw = await complete(retryMessages);
-  attempt = validatePlan(parseJson(retryRaw), now);
-  if (attempt.ok) return { plan: attempt.plan, source: "retry", problems: firstProblems };
+  const retryParsed = parseJson(retryRaw);
+  attempt = validatePlan(retryParsed, now);
+  if (attempt.ok) {
+    return {
+      plan: attempt.plan,
+      source: "retry",
+      problems: firstProblems,
+      coverageGaps: countCoverageGaps(retryParsed),
+    };
+  }
 
   return {
     plan: fallbackPlan(prompt, now, timeZone),
     source: "fallback",
     problems: attempt.problems,
+    coverageGaps: 0,
   };
 }
 
@@ -764,15 +846,7 @@ export function fallbackPlan(prompt: string, now: Date, timeZone: string): PlanI
       kind: "unspecified",
       label: "unspecified",
     },
-    questions: [
-      {
-        id: "kind",
-        question: "What kind of thing?",
-        options: ["food", "drinks", "something to do", "outdoors"],
-        appliesToSlot: 0,
-      },
-      whenQuestion(),
-    ],
+    questions: [kindQuestion(0), whenQuestion()],
     context: {
       aesthetic: "unspecified",
       groupContext: "unspecified",
