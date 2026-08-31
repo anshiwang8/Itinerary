@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { updateItinerary } from "../../store";
 import { switchTravelMode } from "../../modeSwitch";
+import { enforceItineraryOwnership } from "../../byIdOwnership";
 import {
   ApiError,
   apiError,
@@ -38,9 +39,11 @@ import {
 // allowlist is still that function's — an unknown string is rejected rather
 // than coerced — and the required-ness is checked on top of it.
 //
-// AUTH follows the swap and remove precedent exactly: none beyond the plan id.
-// Only `/end` verifies a caller, because ending a plan writes to a person's
-// history. This writes only to the plan itself.
+// AUTH (AUDIT_FINDINGS.md R1, step 2): an owned plan's travel mode may be
+// switched only by its verified owner — `enforceItineraryOwnership`, the
+// identical gate /swap, /remove and the by-id GET run. Unowned/legacy plans
+// stay capability-by-id (mock e2e, the guest sign-in race). `/reroute` stays
+// ungated for now (dev-only).
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -52,6 +55,10 @@ export async function POST(
     if (!/^[A-Za-z0-9-]{1,128}$/.test(id)) {
       throw new ApiError(400, "invalid_itinerary_id", "Invalid itinerary id.");
     }
+    // R1: an owned plan is the verified owner's to mutate; any other caller
+    // gets the same 404 a missing plan returns. Runs before the body is read
+    // and before any CAS write. Unowned/legacy plans pass through.
+    await enforceItineraryOwnership(request, id);
 
     const body = await readJsonBody(request);
     if (!isRecord(body)) {

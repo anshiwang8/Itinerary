@@ -190,13 +190,14 @@ are unavailable, without a user-facing configuration error.
 
 Server token verification, itinerary ownership, active-plan resume, account history/archive,
 and profile-based personalization are implemented. Guests can receive an anonymous Firebase
-identity; account history and personalization require a non-anonymous identity. `/end` and
-the by-id `GET` verify the caller and enforce ownership: an owned plan is readable only by
-its verified owner, and every other caller gets a 404 indistinguishable from a missing plan
-(unowned/legacy plans, including mock e2e, stay readable by anyone with the id). Authorization
-is still **partial**: `/swap`, `/remove`, `/mode`, and `/reroute` still do **no caller
-verification** and accept the itinerary ID alone. Do not treat owned plans as having complete
-access protection; the broader authorization/sharing contract remains unresolved.
+identity; account history and personalization require a non-anonymous identity. `/end`, the
+by-id `GET`, and the by-id mutations `/swap`, `/remove` and `/mode` verify the caller and
+enforce ownership: an owned plan is readable/mutable only by its verified owner, and every
+other caller gets a 404 indistinguishable from a missing plan (unowned/legacy plans,
+including mock e2e, stay accessible to anyone with the id). One route is still open: `/reroute`
+does **no caller verification** and accepts the itinerary ID alone; it is dev-only (behind
+`SHOW_DEV_CONTROLS`) and unreachable from the production UI. The broader authorization/sharing
+contract for legacy and shared plans remains an open product decision.
 
 `.env` is gitignored, so your keys are never committed.
 

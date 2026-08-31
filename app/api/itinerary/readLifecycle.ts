@@ -65,8 +65,10 @@ async function maybeArchive(itinerary: Itinerary): Promise<Itinerary> {
  * One lifecycle for by-id and active-plan reads: persist status/lock changes
  * through CAS, then perform best-effort conclusion work. Resume supplies its
  * verified caller; check ownership on EVERY proposal/retry before any write
- * or owner-scoped side effect. By-id deliberately retains its existing
- * capability-by-id access (the separate R1 decision is unchanged).
+ * or owner-scoped side effect. The by-id GET route now gates ownership at its
+ * own boundary before calling this (audit R1 step 1); the three by-id MUTATION
+ * routes gate there too (R1 step 2). This function's own caller check remains
+ * for resume, where the caller is threaded in rather than checked upstream.
  */
 export async function readItineraryWithLifecycle(
   id: string,

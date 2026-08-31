@@ -2203,6 +2203,21 @@ export default function Home() {
     );
   }
 
+  /** A by-id mutation (swap/remove/mode) now refuses an unauthenticated or
+   *  non-owner caller with the same 404 a missing plan returns (audit R1). The
+   *  usual benign cause is a tab opened before this build that never attached
+   *  the auth header, which one reload fixes; that is indistinguishable from a
+   *  plan that genuinely expired, and the advice is the same either way, so the
+   *  message is one generic line rather than a guess at the cause. Matches
+   *  `/end`'s "couldn't confirm who you are" copy. */
+  function ownershipRefusalMessage(err: unknown): string | null {
+    return err instanceof ClientFetchError &&
+      err.status === 404 &&
+      err.code === "itinerary_not_found"
+      ? "Couldn't confirm who you are. Refresh and try again."
+      : null;
+  }
+
   async function fireDisruption() {
     if (!itinerary) return;
     const operation = beginOperation();
@@ -2354,7 +2369,10 @@ export default function Home() {
     try {
       const data = await fetchJson(`/api/itinerary/${itinerary.id}/swap`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // The token is what proves this plan is yours to change (audit R1).
+        // Absent when there is no session; the route treats that as guest-level
+        // and still serves unowned/legacy plans, so this is additive.
+        headers: { "Content-Type": "application/json", ...((await authHeaders()) ?? {}) },
         body: JSON.stringify({
           stopIndex,
           refinement,
@@ -2451,7 +2469,7 @@ export default function Home() {
       setSwapError(
         mutationApplied
           ? `The swap finished, but the follow-up refresh failed; what you see may be out of date. (${detail})`
-          : detail
+          : ownershipRefusalMessage(err) ?? detail
       );
     } finally {
       setSwapping(false);
@@ -2503,7 +2521,10 @@ export default function Home() {
     try {
       const data = await fetchJson(`/api/itinerary/${itinerary.id}/remove`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // The token is what proves this plan is yours to change (audit R1).
+        // Absent when there is no session; the route treats that as guest-level
+        // and still serves unowned/legacy plans, so this is additive.
+        headers: { "Content-Type": "application/json", ...((await authHeaders()) ?? {}) },
         body: JSON.stringify({
           stopIndex,
           version: itinerary.version,
@@ -2573,7 +2594,7 @@ export default function Home() {
       setRemoveError(
         mutationApplied
           ? `The stop was removed, but the follow-up refresh failed; what you see may be out of date. (${detail})`
-          : detail
+          : ownershipRefusalMessage(err) ?? detail
       );
     } finally {
       setRemoving(false);
@@ -2614,7 +2635,10 @@ export default function Home() {
     try {
       const data = await fetchJson(`/api/itinerary/${itinerary.id}/mode`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // The token is what proves this plan is yours to change (audit R1).
+        // Absent when there is no session; the route treats that as guest-level
+        // and still serves unowned/legacy plans, so this is additive.
+        headers: { "Content-Type": "application/json", ...((await authHeaders()) ?? {}) },
         body: JSON.stringify({
           travelMode: target,
           version: itinerary.version,
@@ -2682,7 +2706,7 @@ export default function Home() {
       setError(
         mutationApplied
           ? `The plan switched travel modes, but the follow-up refresh failed; what you see may be out of date. (${detail})`
-          : detail
+          : ownershipRefusalMessage(err) ?? detail
       );
     } finally {
       setSwitchingMode(null);

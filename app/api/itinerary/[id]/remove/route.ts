@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { updateItinerary } from "../../store";
 import { removeStop } from "../../removeStop";
+import { enforceItineraryOwnership } from "../../byIdOwnership";
 import {
   ApiError,
   apiError,
@@ -29,10 +30,10 @@ import { parseOptionalInstant, parseOptionalVersion } from "../../../_shared/sch
 // phrase in front of the LLM for an operation that must never consult one, or
 // branching the route on an absent field, which is the same fork one level up.
 //
-// AUTH follows the swap precedent exactly: none beyond the plan id. Verified
-// against current code — `/swap` and `/reroute` do no caller verification, and
-// only `/end` calls `verifyCaller`, because ending a plan writes to a person's
-// history. A removal writes only to the plan itself, like a swap.
+// AUTH (AUDIT_FINDINGS.md R1, step 2): an owned plan may be modified only by
+// its verified owner — `enforceItineraryOwnership`, the identical gate /swap,
+// /mode and the by-id GET run. Unowned/legacy plans stay capability-by-id (mock
+// e2e, the guest sign-in race). `/reroute` stays ungated for now (dev-only).
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -44,6 +45,10 @@ export async function POST(
     if (!/^[A-Za-z0-9-]{1,128}$/.test(id)) {
       throw new ApiError(400, "invalid_itinerary_id", "Invalid itinerary id.");
     }
+    // R1: an owned plan is the verified owner's to mutate; any other caller
+    // gets the same 404 a missing plan returns. Runs before the body is read
+    // and before any CAS write. Unowned/legacy plans pass through.
+    await enforceItineraryOwnership(request, id);
 
     const body = await readJsonBody(request);
     if (!isRecord(body)) {
