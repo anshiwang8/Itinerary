@@ -62,18 +62,16 @@
 // Piece 0 — the locked honest label copy.
 // ─────────────────────────────────────────────────────────────────────────
 
-/** The feature's name. Plain, no capability claim. */
+/** The feature's name. Plain, no capability claim. This is the single
+ *  source of truth for the visible name: every label that starts with it
+ *  (the map toggle's states, the sr-only status line) composes from this
+ *  constant rather than re-typing the literal. */
 export const LIVE_TRACKING_LABEL = "Live location";
 
 /** The one-line honesty note that sits next to the toggle (Piece 2 renders
  *  it). States the ceiling plainly. */
 export const LIVE_TRACKING_WHILE_OPEN_NOTE =
   "Tracks only while this tab is open and in front of you.";
-
-/** The longer explainer, for a tooltip or a first-run note. Says what
- *  happens on background/lock rather than hiding it. */
-export const LIVE_TRACKING_EXPLAINER =
-  "Your position shows on the map while you have this page open. It pauses when you switch tabs or lock your phone, and picks back up when you return.";
 
 /** Prefix for a retained-but-stale reading, e.g. "Last known 7:42 PM". */
 export const LIVE_TRACKING_LAST_KNOWN_LABEL = "Last known";

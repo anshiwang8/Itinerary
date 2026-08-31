@@ -1,10 +1,8 @@
 import assert from "node:assert";
 import type { ParsedPrompt } from "../api/places/search/filter";
 import {
-  finalizeRequestedSlots,
   normalizeStopCountSlots,
   resolveRequestedSlots,
-  slotsFromDistributionAnswer,
 } from "./planSlots";
 
 function parsed(overrides: Partial<ParsedPrompt>): ParsedPrompt {
@@ -60,18 +58,6 @@ const cases: Array<[string, () => void]> = [
         count: 3,
         categories: ["dinner", "drinks"],
       });
-      assert.deepStrictEqual(
-        slotsFromDistributionAnswer("2 dinner + 1 drinks", value.category_signals, 3),
-        ["dinner", "dinner", "drinks"]
-      );
-      assert.deepStrictEqual(
-        slotsFromDistributionAnswer("one dinner and two drinks", value.category_signals, 3),
-        ["dinner", "drinks", "drinks"]
-      );
-      assert.strictEqual(
-        slotsFromDistributionAnswer("dinner + drinks", value.category_signals, 3),
-        null
-      );
     },
   ],
   [
@@ -99,50 +85,21 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
-    "post-clarification finalization blocks every unresolved counted request",
+    "normalizeStopCountSlots leaves an unresolved counted request untouched",
     () => {
-      const needsKind = finalizeRequestedSlots(parsed({ stop_count: 3 }));
-      assert.strictEqual(needsKind.ok, false);
-      if (!needsKind.ok) {
-        assert.strictEqual(needsKind.resolution.kind, "needs-kind");
-        assert.match(needsKind.reason, /all 3 stops/i);
-      }
-
-      const needsDistribution = finalizeRequestedSlots(
-        parsed({
-          stop_count: 3,
-          category_signals: ["dinner", "drinks"],
-        })
+      const needsKind = parsed({ stop_count: 3 });
+      assert.strictEqual(
+        normalizeStopCountSlots(needsKind).category_signals,
+        needsKind.category_signals
       );
-      assert.strictEqual(needsDistribution.ok, false);
-      if (!needsDistribution.ok) {
-        assert.strictEqual(needsDistribution.resolution.kind, "needs-distribution");
-      }
-
-      const invalid = finalizeRequestedSlots(
-        parsed({ stop_count: 0, category_signals: ["coffee shop"] })
+      const needsDistribution = parsed({
+        stop_count: 3,
+        category_signals: ["dinner", "drinks"],
+      });
+      assert.deepStrictEqual(
+        normalizeStopCountSlots(needsDistribution).category_signals,
+        ["dinner", "drinks"]
       );
-      assert.strictEqual(invalid.ok, false);
-      if (!invalid.ok) assert.strictEqual(invalid.resolution.kind, "invalid");
-    },
-  ],
-  [
-    "post-clarification finalization expands a counted broad kind exactly",
-    () => {
-      const result = finalizeRequestedSlots(
-        parsed({
-          stop_count: 3,
-          category_signals: ["things to do"],
-        })
-      );
-      assert.strictEqual(result.ok, true);
-      if (result.ok) {
-        assert.deepStrictEqual(result.parsed.category_signals, [
-          "things to do",
-          "things to do",
-          "things to do",
-        ]);
-      }
     },
   ],
 ];

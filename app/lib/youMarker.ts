@@ -25,6 +25,7 @@
 
 import {
   LIVE_TRACKING_DENIED_NOTE,
+  LIVE_TRACKING_LABEL,
   LIVE_TRACKING_STALENESS_MS,
   LIVE_TRACKING_UNAVAILABLE_NOTE,
   LIVE_TRACKING_WHILE_OPEN_NOTE,
@@ -141,9 +142,9 @@ export function liveControlLabel(
     case "requesting":
       return "Finding your location";
     case "live":
-      return `Live location on. ${LIVE_TRACKING_WHILE_OPEN_NOTE}`;
+      return `${LIVE_TRACKING_LABEL} on. ${LIVE_TRACKING_WHILE_OPEN_NOTE}`;
     case "stale":
-      return "Live location paused. It resumes when you come back to this tab.";
+      return `${LIVE_TRACKING_LABEL} paused. It resumes when you come back to this tab.`;
     case "denied":
       return LIVE_TRACKING_DENIED_NOTE;
     case "unavailable":

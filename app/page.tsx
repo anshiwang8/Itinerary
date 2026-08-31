@@ -105,6 +105,7 @@ import {
 import { useLiveTracking } from "./lib/useLiveTracking";
 import {
   LIVE_TRACKING_DENIED_NOTE,
+  LIVE_TRACKING_LABEL,
   LIVE_TRACKING_LAST_KNOWN_LABEL,
   LIVE_TRACKING_UNAVAILABLE_NOTE,
   LIVE_TRACKING_WHILE_OPEN_NOTE,
@@ -3402,7 +3403,7 @@ export default function Home() {
       </button>
       <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {liveTrackWanted
-          ? `Live location: ${liveTracking.status}`
+          ? `${LIVE_TRACKING_LABEL}: ${liveTracking.status}`
           : ""}
       </span>
 

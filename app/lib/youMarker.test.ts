@@ -4,7 +4,9 @@ import assert from "node:assert";
 import { computeYouMarker, liveControlLabel } from "./youMarker";
 import {
   INITIAL_LIVE_TRACKING_STATE,
+  LIVE_TRACKING_LABEL,
   LIVE_TRACKING_STALENESS_MS,
+  LIVE_TRACKING_WHILE_OPEN_NOTE,
   type LiveTrackingState,
 } from "./liveTracking";
 
@@ -195,6 +197,24 @@ const cases: Case[] = [
       assert.match(liveControlLabel(true, "stale"), /paused/i);
       assert.match(liveControlLabel(true, "denied"), /permission is off/i);
       assert.match(liveControlLabel(true, "unavailable"), /could not provide a location/i);
+    },
+  ],
+  [
+    "the visible name is sourced from LIVE_TRACKING_LABEL, not a re-typed literal",
+    () => {
+      // Piece 0's locked copy. Pinning the value here means every label that
+      // composes from the constant (both liveControlLabel states below, and
+      // page.tsx's sr-only status line) stays byte-identical if the wording
+      // is ever revised, instead of silently diverging.
+      assert.strictEqual(LIVE_TRACKING_LABEL, "Live location");
+      assert.strictEqual(
+        liveControlLabel(true, "live"),
+        `${LIVE_TRACKING_LABEL} on. ${LIVE_TRACKING_WHILE_OPEN_NOTE}`
+      );
+      assert.strictEqual(
+        liveControlLabel(true, "stale"),
+        `${LIVE_TRACKING_LABEL} paused. It resumes when you come back to this tab.`
+      );
     },
   ],
 
