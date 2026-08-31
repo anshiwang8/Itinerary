@@ -92,7 +92,7 @@ export default function StopItineraryDialog({
                   (isCancel ? " stopdlg__btn--cancel" : "") +
                   (choice === "save-end" ? " stopdlg__btn--save" : "")
                 }
-                disabled={busy && !isCancel}
+                disabled={busy}
                 onClick={() => onChoose(choice)}
               >
                 {busy && !isCancel ? "…" : label}

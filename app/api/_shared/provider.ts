@@ -107,6 +107,14 @@ export function parseRetryAfter(
   return seconds > 0 ? seconds : undefined;
 }
 
+// Fetch resolves at headers. Keep its deadline/abort ownership attached to
+// the exact response until readProviderJson has consumed (or failed) the body.
+const pendingBodies = new WeakMap<Response, {
+  timedOut: () => boolean;
+  aborted: () => boolean;
+  cleanup: () => void;
+}>();
+
 export async function fetchProvider(
   provider: ProviderName,
   input: RequestInfo | URL,
@@ -121,18 +129,27 @@ export async function fetchProvider(
   }, timeoutMs);
   const onAbort = () => controller.abort();
   init.signal?.addEventListener("abort", onAbort, { once: true });
+  if (init.signal?.aborted) onAbort();
+  const cleanup = () => {
+    clearTimeout(timeout);
+    init.signal?.removeEventListener("abort", onAbort);
+  };
 
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    const response = await fetch(input, { ...init, signal: controller.signal });
+    pendingBodies.set(response, {
+      timedOut: () => timedOut,
+      aborted: () => controller.signal.aborted,
+      cleanup,
+    });
+    return response;
   } catch {
+    cleanup();
     throw new ProviderError(
       provider,
       timedOut ? 504 : 502,
       timedOut ? `${provider}_timeout` : `${provider}_unavailable`
     );
-  } finally {
-    clearTimeout(timeout);
-    init.signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -144,10 +161,22 @@ export async function readProviderJson(
   // page from a gateway), and parsing first would turn a rejection into
   // "invalid_response", sending the reader after a parser bug that isn't there.
   let text: string;
+  const pending = pendingBodies.get(response);
   try {
     text = await response.text();
   } catch {
+    if (pending?.aborted()) {
+      const timedOut = pending.timedOut();
+      throw new ProviderError(
+        provider,
+        timedOut ? 504 : 502,
+        timedOut ? `${provider}_timeout` : `${provider}_unavailable`
+      );
+    }
     throw new ProviderError(provider, 502, `${provider}_invalid_response`);
+  } finally {
+    pending?.cleanup();
+    pendingBodies.delete(response);
   }
 
   if (!response.ok) {

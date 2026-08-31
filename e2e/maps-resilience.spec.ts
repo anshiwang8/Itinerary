@@ -1,5 +1,96 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./test";
+import { expectStripMatchesPin, planEvening } from "./helpers";
+
+type InjectedFix = { at: number; lat: number; lng: number; accuracy: number; age?: number };
+
+// The real page, tracker, map measurement effect and arrival fold all run.
+// Only the device feed, clock and provider Maps implementation are replaced.
+// Updating time AND delivering a fix in one task reproduces the captured-
+// closure race without letting an unrelated render complete the dwell first.
+async function arrivalPage(page: Page) {
+  await serveMaps(page);
+  await page.addInitScript(() => {
+    const realDate = Date;
+    let now: number | undefined;
+    window.Date = class extends realDate {
+      constructor(value?: string | number) { super(value ?? now ?? realDate.now()); }
+      static now() { return now ?? realDate.now(); }
+    } as DateConstructor;
+    let onFix: PositionCallback | undefined;
+    Object.defineProperty(navigator, "geolocation", { configurable: true, value: {
+      watchPosition(callback: PositionCallback) { onFix = callback; return 1; },
+      clearWatch() { onFix = undefined; },
+      getCurrentPosition() { /* A stale first fix is not used in these cases. */ },
+    } });
+    (window as Window & { __arrivalFix?: (fix: InjectedFix) => void }).__arrivalFix = (fix) => {
+      if (!onFix) throw new Error("tracking watch has not started");
+      now = fix.at;
+      onFix({ coords: { latitude: fix.lat, longitude: fix.lng, accuracy: fix.accuracy,
+        altitude: null, altitudeAccuracy: null, heading: null, speed: null },
+        timestamp: fix.at - (fix.age ?? 0) } as GeolocationPosition);
+    };
+  });
+  let active!: { name: string; at: number; lat: number; lng: number };
+  await page.route(/\/api\/itinerary\/[^/?]+$/, async (route) => {
+    const initial = await route.fetch();
+    const plan = await initial.json();
+    const stop = plan.stops[0];
+    const at = Date.parse(stop.start_time) + 300_000;
+    // The actual status endpoint derives/persists the active stop. The page
+    // retains its ordinary display clock; injected fixes carry that instant.
+    const response = await route.fetch({ url: `${route.request().url()}?now=${encodeURIComponent(new Date(at).toISOString())}` });
+    active = { name: stop.name, at, lat: stop.location.latitude, lng: stop.location.longitude };
+    await route.fulfill({ response });
+  });
+  await planEvening(page, "dinner and drinks at 7pm");
+  await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
+  await expectStripMatchesPin(page, active.name);
+  await page.locator(".mapctl--live").click();
+  const card = page.locator(".lstrip__stop--live");
+  const emit = async (seconds: number, far = false, accuracy = 10, age = 0) => {
+    const fix = { at: active.at + seconds * 1000, lat: active.lat + (far ? 0.002 : 0.00018),
+      lng: active.lng, accuracy, age };
+    await page.evaluate((value) => {
+      (window as Window & { __arrivalFix?: (fix: InjectedFix) => void }).__arrivalFix!(value);
+    }, fix);
+    // Wait for React's effects AND any state they scheduled, without moving
+    // the frozen wall clock. This is the boundary the original code got wrong.
+    await page.evaluate(() => new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  };
+  await emit(0);
+  await expect(card).not.toHaveClass(/--arrived/);
+  return { card, emit };
+}
+
+test("@mock D6 old CLOSE distance cannot confirm a new accurate FAR fix at the dwell boundary", async ({ page }) => {
+  const { card, emit } = await arrivalPage(page);
+  await emit(30);
+  await emit(46, true);
+  await expect(card).not.toHaveClass(/--arrived/);
+});
+
+test("@mock D6 old FAR inaccurate distance cannot reset a new IN-RANGE fix's completing dwell", async ({ page }) => {
+  const { card, emit } = await arrivalPage(page);
+  await emit(30, true, 1000); // inconclusive, so the existing dwell must hold
+  await expect(card).not.toHaveClass(/--arrived/);
+  await emit(46); // fresh, accurate and actually close; original code reset at this render
+  await expect(card).toHaveClass(/--arrived/);
+});
+
+test("@mock D6 stale and inaccurate fixes cannot confirm; a coherent fix still can, and arrival stays sticky", async ({ page }) => {
+  const { card, emit } = await arrivalPage(page);
+  await emit(30);
+  await emit(46, false, 10, 60_000);
+  await expect(card).not.toHaveClass(/--arrived/);
+  await emit(47, false, 1000);
+  await expect(card).not.toHaveClass(/--arrived/);
+  await emit(48);
+  await expect(card).toHaveClass(/--arrived/);
+  await emit(49, true);
+  await expect(card).toHaveClass(/--arrived/);
+});
 
 const MAPS_SCRIPT = /^https:\/\/maps\.googleapis\.com\/maps\/api\/js\?/;
 
@@ -1964,8 +2055,7 @@ test("@mock the active stop's card alone shows the real-time creep triangle, at 
 });
 
 // ── arrival detection: the chartreuse "arrived" card (live tracking, Piece 3) ──
-// The GPS proximity + dwell decision cannot be mocked (it needs a real
-// device), but the render plumbing can: the harness feeds a fixed
+// This specimen covers the render plumbing: the harness feeds a fixed
 // `arrivedStopId` straight to the strip. "Drive Specimen One" is the
 // specimen's only active stop, so it is the only valid target.
 test("@mock a stop marked arrived turns its card chartreuse and keeps the active caret", async ({

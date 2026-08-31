@@ -18,6 +18,7 @@ import { transitRideColor } from "./lib/transitRidePalette";
 import { travelLegVisible } from "./lib/travelLegVisibility";
 import { startCameraTween, type CameraPoint, type CameraTweenHandle } from "./lib/cameraTween";
 import type { YouMarkerView } from "./lib/youMarker";
+import type { ArrivalSample } from "./lib/arrivalDetection";
 
 /** `YouMarkerView` plus the "Last known 7:42 PM" label the caller formats in
  *  the plan's timezone (shown only while the fix is stale). */
@@ -247,19 +248,14 @@ interface Props {
    *  tracker; NEVER auto-pans the camera to follow it (see the effect note
    *  on focusRequest — camera moves only on an explicit request). */
   youMarker?: YouMarkerRender | null;
-  /** Reports the straight-line metres from the live "you are here" fix to
-   *  the stop that is active right now, measured with the Maps geometry
-   *  library this component already loads (no second haversine — same
-   *  reasoning as `homeFitsWithStops`). null whenever it cannot be
-   *  measured: no live fix, no active stop, or the library is not ready.
-   *  Piece 3 (arrival detection) folds this — together with the fix's
-   *  freshness and accuracy, which live in page.tsx — into a display-only
-   *  "arrived" state. This component does the GEOMETRY only: it makes no
-   *  arrival decision, stores nothing, and never moves the camera for it. */
-  onYouToActiveStopMeters?: (meters: number | null) => void;
+  /** The page's display clock. Distance and the same fix's metadata leave
+   *  this component together; the parent never joins a previous distance
+   *  to a newer fix. The map still makes no arrival decision. */
+  arrivalNowMs?: number;
+  onArrivalSample?: (sample: ArrivalSample) => void;
 }
 
-export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTravelLegIds = [], legacyTransitVisibility = true, focusRequest = null, youMarker = null, onYouToActiveStopMeters }: Props) {
+export default function ItineraryMap({ stops, home, selected, timeZone = "America/Toronto", onSelect, visibleTravelLegIds = [], legacyTransitVisibility = true, focusRequest = null, youMarker = null, arrivalNowMs, onArrivalSample }: Props) {
   const mapDivRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const projRef = useRef<google.maps.MapCanvasProjection | null>(null);
@@ -775,46 +771,53 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   // loads (no second haversine — same reasoning as `homeFitsWithStops`).
   // The arrival DECISION — the sustained-dwell requirement, the freshness
   // and accuracy gates — is folded in page.tsx, where the tracker state
-  // lives; this reports a plain number and nothing else, and it never moves
-  // the camera.
+  // lives. One effect assembles the complete same-fix observation (D6),
+  // without separate distance state or a later parent effect joining it.
   const activeStop = stops.find((s) => s.status === "active") ?? null;
   const activeStopId = activeStop?.id ?? null;
   const activeStopLat = activeStop?.lat ?? null;
   const activeStopLng = activeStop?.lng ?? null;
   const youLat = youMarker?.lat ?? null;
   const youLng = youMarker?.lng ?? null;
+  const youStale = youMarker?.stale ?? true;
+  const youAccuracyM = youMarker?.accuracyM ?? null;
   useEffect(() => {
-    if (!onYouToActiveStopMeters) return;
-    if (
-      mapState !== "ready" ||
-      youLat === null ||
-      youLng === null ||
-      activeStopLat === null ||
-      activeStopLng === null
-    ) {
-      onYouToActiveStopMeters(null);
-      return;
-    }
+    if (!onArrivalSample || arrivalNowMs === undefined) return;
     let meters: number | null = null;
-    try {
-      meters = google.maps.geometry.spherical.computeDistanceBetween(
-        new google.maps.LatLng(youLat, youLng),
-        new google.maps.LatLng(activeStopLat, activeStopLng)
-      );
-    } catch {
-      meters = null;
+    if (
+      mapState === "ready" &&
+      youLat !== null &&
+      youLng !== null &&
+      activeStopLat !== null &&
+      activeStopLng !== null
+    ) {
+      try {
+        meters = google.maps.geometry.spherical.computeDistanceBetween(
+          new google.maps.LatLng(youLat, youLng),
+          new google.maps.LatLng(activeStopLat, activeStopLng)
+        );
+      } catch {
+        meters = null;
+      }
     }
-    onYouToActiveStopMeters(
-      typeof meters === "number" && Number.isFinite(meters) ? meters : null
-    );
+    onArrivalSample({
+      activeStopId,
+      distanceM: typeof meters === "number" && Number.isFinite(meters) ? meters : null,
+      accuracyM: youAccuracyM,
+      stale: youStale,
+      nowMs: arrivalNowMs,
+    });
   }, [
     mapState,
     youLat,
     youLng,
+    youStale,
+    youAccuracyM,
     activeStopId,
     activeStopLat,
     activeStopLng,
-    onYouToActiveStopMeters,
+    arrivalNowMs,
+    onArrivalSample,
   ]);
 
   const fallbackPoints = [

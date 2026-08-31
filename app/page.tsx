@@ -115,6 +115,7 @@ import {
   INITIAL_ARRIVAL_PROGRESS,
   reduceArrival,
   type ArrivalProgress,
+  type ArrivalSample,
 } from "./lib/arrivalDetection";
 
 const SHOW_DEV_CONTROLS = shouldShowDevControls(
@@ -716,9 +717,17 @@ export default function Home() {
   // is measured by ItineraryMap (it owns the Maps geometry lib); everything
   // else — the dwell, the freshness/accuracy gates — is the pure
   // `reduceArrival` fold. See `arrivalDetection.ts`.
-  const [youToActiveStopM, setYouToActiveStopM] = useState<number | null>(null);
   const arrivalProgressRef = useRef<ArrivalProgress>(INITIAL_ARRIVAL_PROGRESS);
   const [arrivedStopId, setArrivedStopId] = useState<string | null>(null);
+  // Fold exactly what the map measured in one render. A separate parent
+  // effect would see a new fix before the child's distance state landed.
+  const onArrivalSample = useCallback((sample: ArrivalSample) => {
+    const next = reduceArrival(arrivalProgressRef.current, sample);
+    arrivalProgressRef.current = next;
+    setArrivedStopId((current) =>
+      current === next.arrivedStopId ? current : next.arrivedStopId
+    );
+  }, []);
 
   const [swapText, setSwapText] = useState("");
   const [swapping, setSwapping] = useState(false);
@@ -817,7 +826,8 @@ export default function Home() {
     recovery?.mode === "empty" || recovery?.mode === "weather-gate"
       ? recovery.busy
       : false;
-  const busy = loadingText !== null || swapping || recoveryBusy;
+  const busy = loadingText !== null || swapping || removing ||
+    switchingMode !== null || stopBusy || recoveryBusy;
   const beginOperation = (): symbol | null => {
     if (activeOperation.current) return null;
     const token = Symbol("client-operation");
@@ -1967,6 +1977,7 @@ export default function Home() {
         parse: parseCreatePayload,
       });
       const stored = await readItinerary(data.id, simValue);
+      itineraryRef.current = stored;
       setItinerary(stored);
       const active = stored.stops.find((stop) => stop.status === "active");
       if (active?.id) setSelected(active.id);
@@ -1995,6 +2006,8 @@ export default function Home() {
   async function refreshItinerary(id: string, simValue: string) {
     try {
       const data = await readItinerary(id, simValue);
+      if (itineraryRef.current?.id !== id) return null;
+      itineraryRef.current = data;
       setItinerary(data);
       const active = data.stops.find((s) => s.status === "active");
       if (active?.id) setSelected(active.id);
@@ -2024,12 +2037,25 @@ export default function Home() {
     }
   }
 
-  function applyItinerary(it: Itinerary) {
+  function isCurrentOperation(operation: symbol, id: string): boolean {
+    return activeOperation.current === operation && itineraryRef.current?.id === id;
+  }
+
+  const applyItinerary = useCallback((it: Itinerary, expectedId: string | null, operation?: symbol): boolean => {
+    // Reuse the resume path's current-plan ref, and the existing operation
+    // token. A late completion may neither resurrect an ended plan nor
+    // overwrite a replacement; an older read of the same plan cannot rewind it.
+    const current = itineraryRef.current;
+    if ((current?.id ?? null) !== expectedId) return false;
+    if (operation !== undefined && (activeOperation.current !== operation || current?.id !== it.id)) return false;
+    if (current?.id === it.id && it.version < current.version) return false;
+    itineraryRef.current = it;
     setItinerary(it);
     setSchedule(it.stops as ScheduledStop[]);
     setMapStops(stopsFromItinerary(it));
     setHomeLeg(it.homeLeg ?? null);
-  }
+    return true;
+  }, []);
 
   // ── ending a plan on purpose ──
   //
@@ -2047,7 +2073,6 @@ export default function Home() {
     setManualLegId(null);
     arrivalProgressRef.current = INITIAL_ARRIVAL_PROGRESS;
     setArrivedStopId(null);
-    setYouToActiveStopM(null);
     setBanner(null);
     setChangedIds(new Set());
     setOldStarts({});
@@ -2061,20 +2086,25 @@ export default function Home() {
   }
 
   async function chooseStop(choice: StopChoice) {
+    // Includes the same-tick gap before stopBusy/disabled has rendered.
+    if (activeOperation.current) return;
     if (choice === "cancel") {
       setStopOpen(false);
       setStopError(null);
       return;
     }
-    const current = itinerary;
+    const current = itineraryRef.current;
     if (!current) {
       setStopOpen(false);
       return;
     }
+    const operation = beginOperation();
+    if (!operation) return;
     setStopBusy(true);
     setStopError(null);
     try {
       const headers = await authHeaders();
+      if (!isCurrentOperation(operation, current.id)) return;
       if (!headers) {
         // No verified identity means the server cannot know this plan is
         // yours, and it will refuse. Say so rather than appearing to hang.
@@ -2086,15 +2116,34 @@ export default function Home() {
         headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify({ choice }),
       });
+      if (!isCurrentOperation(operation, current.id)) return;
       setStopOpen(false);
       clearItineraryState();
     } catch (err) {
-      // Plan-then-commit, same as a failed swap: if the server did not end it,
-      // the user keeps the plan they are looking at rather than losing it to a
-      // half-applied action.
+      if (!isCurrentOperation(operation, current.id)) return;
+      // As with swap/remove/mode/reroute, a lost response does not prove the
+      // POST failed. Read back under the same lock before offering a retry.
+      if (mutationOutcomeMayBeAmbiguous(err)) {
+        try {
+          const latest = await readItinerary(current.id, simNow);
+          if (!isCurrentOperation(operation, current.id)) return;
+          if (latest.endedAt) {
+            setStopOpen(false);
+            clearItineraryState();
+            return;
+          }
+          if (!applyItinerary(latest, current.id, operation)) return;
+          setStopError("The end response was interrupted. The saved plan is still open; you can try again.");
+        } catch (refreshErr) {
+          if (!isCurrentOperation(operation, current.id)) return;
+          setStopError(`Couldn't confirm whether the plan ended. Refresh before retrying. (${clientErrorMessage(refreshErr)})`);
+        }
+        return;
+      }
       setStopError(clientErrorMessage(err, "Couldn't end the itinerary. Please try again."));
     } finally {
       setStopBusy(false);
+      endOperation(operation);
     }
   }
 
@@ -2130,7 +2179,7 @@ export default function Home() {
         if (cancelled || !data.itinerary) return;
         const stored = parseItineraryPayload(data.itinerary);
         if (itineraryRef.current) return;
-        applyItinerary(stored);
+        if (activeOperation.current || !applyItinerary(stored, null)) return;
         const active = stored.stops.find((s) => s.status === "active");
         if (active?.id) setSelected(active.id);
       } catch {
@@ -2142,7 +2191,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [auth.status, authHeaders]);
+  }, [auth.status, authHeaders, applyItinerary]);
 
   function mutationOutcomeMayBeAmbiguous(err: unknown): boolean {
     if (!(err instanceof ClientFetchError)) return true;
@@ -2184,6 +2233,7 @@ export default function Home() {
           parse: parseReroutePayload,
         }
       );
+      if (!isCurrentOperation(operation, itinerary.id)) return;
       if (!data.rerouted) {
         setBannerFlat(true);
         setBannerPersist(true);
@@ -2204,7 +2254,7 @@ export default function Home() {
           olds[stop.id] = changed.before.start;
         }
       }
-      applyItinerary(updated);
+      if (!applyItinerary(updated, itinerary.id, operation)) return;
       setChangedIds(ids);
       setOldStarts(olds);
       // surface the change: expand the first replanned stop so its new venue
@@ -2233,11 +2283,12 @@ export default function Home() {
           (kept ? `, your ${kept.category}'s unchanged.` : ".")
       );
     } catch (err) {
+      if (!isCurrentOperation(operation, itinerary.id)) return;
       const detail = clientErrorMessage(err);
       if (!mutationApplied && mutationOutcomeMayBeAmbiguous(err)) {
         try {
           const latest = await readItinerary(itinerary.id, nowISO ?? "");
-          applyItinerary(latest);
+          if (!applyItinerary(latest, itinerary.id, operation)) return;
           const checkStop =
             latest.stops.filter((stop) => stop.start_time)[disruptLeg + 1] ?? null;
           if (checkStop?.id) {
@@ -2313,6 +2364,7 @@ export default function Home() {
         }),
         parse: parseSwapPayload,
       });
+      if (!isCurrentOperation(operation, itinerary.id)) return;
       if (!data.swapped) {
         // A QUESTION, not a refusal: the push works, it just ends later than
         // they said. Nothing was written, so holding it open costs nothing.
@@ -2360,7 +2412,7 @@ export default function Home() {
           olds[stop.id] = oldById[stop.id] ?? null;
         }
       }
-      applyItinerary(updated);
+      if (!applyItinerary(updated, itinerary.id, operation)) return;
       setChangedIds(ids);
       setOldStarts(olds);
       setSelected(swapped.id ?? null);
@@ -2377,11 +2429,12 @@ export default function Home() {
           : `Swapped ${data.before.category}, ${data.reason}`
       );
     } catch (err) {
+      if (!isCurrentOperation(operation, itinerary.id)) return;
       const detail = clientErrorMessage(err);
       if (!mutationApplied && mutationOutcomeMayBeAmbiguous(err)) {
         try {
           const latest = await readItinerary(itinerary.id, nowISO ?? "");
-          applyItinerary(latest);
+          if (!applyItinerary(latest, itinerary.id, operation)) return;
           const refreshedId = latest.stops[stopIndex]?.id ?? null;
           setSelected(refreshedId);
           focusTargetId = refreshedId ?? focusTargetId;
@@ -2458,6 +2511,7 @@ export default function Home() {
         }),
         parse: parseRemovePayload,
       });
+      if (!isCurrentOperation(operation, itinerary.id)) return;
       if (!data.removed) {
         // An honest refusal — the last stop, a locked one, a venue the tail
         // can't be re-timed around. Nothing was written.
@@ -2482,7 +2536,7 @@ export default function Home() {
           olds[stop.id] = oldById[stop.id] ?? null;
         }
       }
-      applyItinerary(updated);
+      if (!applyItinerary(updated, itinerary.id, operation)) return;
       setChangedIds(ids);
       setOldStarts(olds);
       // Selection cannot survive its own stop. Prefer whatever now occupies
@@ -2495,11 +2549,12 @@ export default function Home() {
       setBannerPersist(false);
       setBanner(data.reason);
     } catch (err) {
+      if (!isCurrentOperation(operation, itinerary.id)) return;
       const detail = clientErrorMessage(err);
       if (!mutationApplied && mutationOutcomeMayBeAmbiguous(err)) {
         try {
           const latest = await readItinerary(itinerary.id, nowISO ?? "");
-          applyItinerary(latest);
+          if (!applyItinerary(latest, itinerary.id, operation)) return;
           // The stop may or may not still be there, so say so rather than
           // guessing: re-select whatever now sits at that position.
           const refreshedId = latest.stops[stopIndex]?.id ?? null;
@@ -2567,6 +2622,7 @@ export default function Home() {
         }),
         parse: parseModePayload,
       });
+      if (!isCurrentOperation(operation, itinerary.id)) return;
       if (!data.switched) {
         // An honest refusal — a venue that shuts at the new times, a day
         // already over, a route the provider wouldn't price. Nothing was
@@ -2588,7 +2644,7 @@ export default function Home() {
           olds[stop.id] = oldById[stop.id] ?? null;
         }
       }
-      applyItinerary(updated);
+      if (!applyItinerary(updated, itinerary.id, operation)) return;
       // The LANDING toggle follows the plan. It is the state a Replan builds
       // from, and it is the state the empty screen comes back to after this
       // plan ends — so leaving it behind would mean switching to driving and
@@ -2607,11 +2663,12 @@ export default function Home() {
       // shows the gap on the strip.
       setBanner(data.endNote ? `${data.reason} ${data.endNote}` : data.reason);
     } catch (err) {
+      if (!isCurrentOperation(operation, itinerary.id)) return;
       const detail = clientErrorMessage(err);
       if (!mutationApplied && mutationOutcomeMayBeAmbiguous(err)) {
         try {
           const latest = await readItinerary(itinerary.id, nowISO ?? "");
-          applyItinerary(latest);
+          if (!applyItinerary(latest, itinerary.id, operation)) return;
           setError(
             `The travel-mode response was interrupted, so the latest saved plan was refreshed. Check which mode it's in before retrying. (${detail})`
           );
@@ -2675,38 +2732,6 @@ export default function Home() {
         )}`
       : null,
   };
-
-  // Fold the live fix's position relative to the active stop into the
-  // session-local "arrived" state (Piece 3). Runs on the app's existing
-  // render cadence — a new device fix or the active stop advancing is what
-  // carries real new information in, and each forces a render; there is no
-  // ticker. `reduceArrival` is pure and folding a repeated sample is a fixed
-  // point, so React's double-invoked effects are harmless. A missing
-  // youMarker view means no usable fix -> `stale: true` so it can never
-  // confirm an arrival.
-  const activeStopIdNow =
-    itinerary?.stops.find((s) => s.status === "active")?.id ?? null;
-  const arrivalFixStale = youMarkerView ? youMarkerView.stale : true;
-  const arrivalFixAccuracyM = youMarkerView?.accuracyM ?? null;
-  useEffect(() => {
-    const next = reduceArrival(arrivalProgressRef.current, {
-      activeStopId: activeStopIdNow,
-      distanceM: youToActiveStopM,
-      accuracyM: arrivalFixAccuracyM,
-      stale: arrivalFixStale,
-      nowMs: displayNowMs,
-    });
-    arrivalProgressRef.current = next;
-    setArrivedStopId((current) =>
-      current === next.arrivedStopId ? current : next.arrivedStopId
-    );
-  }, [
-    activeStopIdNow,
-    youToActiveStopM,
-    arrivalFixAccuracyM,
-    arrivalFixStale,
-    displayNowMs,
-  ]);
 
   const mapHome = useMemo<MapHome | null>(() => {
     if (!homeLeg) return null;
@@ -2847,7 +2872,6 @@ export default function Home() {
       // swap should not wait for the next fix to do it.
       arrivalProgressRef.current = INITIAL_ARRIVAL_PROGRESS;
       setArrivedStopId(null);
-      setYouToActiveStopM(null);
       displayedItineraryId.current = nextId;
     }
   }, [itinerary?.id]);
@@ -3321,7 +3345,8 @@ export default function Home() {
         onSelect={selectAndFocusStop}
         focusRequest={mapFocusRequest}
         youMarker={youMarker}
-        onYouToActiveStopMeters={setYouToActiveStopM}
+        arrivalNowMs={displayNowMs}
+        onArrivalSample={onArrivalSample}
       />
 
       {/* Live-location toggle (Piece 2). Requests permission on the first
@@ -3488,7 +3513,9 @@ export default function Home() {
         <button
           type="button"
           className="topbar__stop"
+          disabled={busy}
           onClick={() => {
+            if (activeOperation.current) return;
             setStopError(null);
             setStopOpen(true);
           }}

@@ -4,7 +4,37 @@ import {
   dismissClarifyIfShown,
   planEvening,
   stripCard,
+  swapOn,
+  expectStripMatchesPin,
 } from "./helpers";
+
+test("@mock D7 End is disabled throughout an in-flight swap and enabled after it settles", async ({ page }) => {
+  await planEvening(page, "dinner and drinks at 7pm");
+  await expect(page.locator(".topbar__go")).toBeEnabled();
+  let release!: () => void;
+  let received!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const requested = new Promise<void>((resolve) => { received = resolve; });
+  await page.route(/\/api\/itinerary\/[^/]+\/swap$/, async (route) => {
+    received();
+    await held;
+    await route.continue();
+  });
+  const swapping = swapOn(page, "Velvet Fig", "somewhere cheaper");
+  try {
+    await requested;
+    await expect(page.locator(".topbar__stop")).toBeDisabled();
+    // A real disabled control cannot open the dialog, including a native
+    // click initiated without Playwright waiting for it to become enabled.
+    await page.locator(".topbar__stop").evaluate((button: HTMLButtonElement) => button.click());
+    await expect(page.locator(".stopdlg")).toHaveCount(0);
+  } finally {
+    release();
+    await swapping;
+  }
+  await expectStripMatchesPin(page, "The Corner Table");
+  await expect(page.locator(".topbar__stop")).toBeEnabled();
+});
 
 const INITIAL_PROMPT = "dinner and drinks at 7pm";
 
