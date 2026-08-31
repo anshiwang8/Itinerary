@@ -28,8 +28,11 @@ nodeRequire.cache[adminPath] = {
   loaded: true,
   exports: {
     isAdminConfigured: () => true,
-    verifyIdToken: async (token: string) =>
-      token === "owner-token" ? { uid: "owner", isAnonymous: false } : null,
+    verifyIdToken: async (token: string) => {
+      if (token === "owner-token") return { uid: "owner", isAnonymous: false };
+      if (token === "stranger-token") return { uid: "stranger", isAnonymous: false };
+      return null;
+    },
     getAdminFirestore: () => ({
       collection: (name: string) => {
         assert.equal(name, "users");
@@ -136,9 +139,14 @@ async function plan(past = false, overrides: Partial<Itinerary> = {}): Promise<I
   });
 }
 
-async function read(itinerary: Itinerary) {
+// The by-id read now requires verified ownership for an OWNED plan (R1). Every
+// existing lifecycle case reads a plan owned by "owner", so the helper
+// authenticates as the owner by default; pass "" for an unauthenticated read
+// or "stranger-token" for a different verified account.
+async function read(itinerary: Itinerary, token = "owner-token") {
   const after = new Date(new Date(itinerary.stops[0].end_time!).getTime() + 60_000).toISOString();
-  return readRoute(new NextRequest(`http://localhost/api/itinerary/${itinerary.id}?now=${encodeURIComponent(after)}`),
+  return readRoute(new NextRequest(`http://localhost/api/itinerary/${itinerary.id}?now=${encodeURIComponent(after)}`,
+    token ? { headers: { Authorization: `Bearer ${token}` } } : undefined),
     { params: Promise.resolve({ id: itinerary.id }) });
 }
 
@@ -391,6 +399,88 @@ for (const backend of ["memory", "redis"] as const) {
     assert.equal(archiveWrites.length, 0);
     assert.equal(await activeItineraryIdForOwner("owner"), itinerary.id);
   }]);
+
+  // ── R1: by-id GET requires verified ownership for an OWNED plan ──
+  // AUDIT_FINDINGS.md R1. The stored itinerary carries `home` (a typed street
+  // address + coordinates) and `ownerUid`; a stranger holding the link must
+  // learn nothing, not even that the id exists. Legacy/unowned plans keep the
+  // capability-by-id contract (mock e2e, the anonymous-sign-in race).
+
+  cases.push([`R1 ${backend}: the owner reads their own plan and gets the full contents`, async () => {
+    reset();
+    const itinerary = await plan();
+    const response = await read(itinerary, "owner-token");
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.id, itinerary.id);
+    assert.equal(body.ownerUid, "owner");
+    assert.equal(body.stops.length, 1);
+    assert.equal(response.headers.get("etag"), `"${body.version}"`);
+  }]);
+
+  cases.push([`R1 ${backend}: a verified caller reads an unowned/legacy plan`, async () => {
+    reset();
+    const itinerary = await plan(false, { ownerUid: undefined, ownerIsAnonymous: undefined });
+    const response = await read(itinerary, "owner-token");
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).id, itinerary.id);
+  }]);
+
+  cases.push([`R1 ${backend}: NO caller reads an unowned plan (mock e2e's core case)`, async () => {
+    reset();
+    const itinerary = await plan(false, { ownerUid: undefined, ownerIsAnonymous: undefined });
+    for (const token of ["", "not-a-real-token"]) {
+      const response = await read(itinerary, token);
+      assert.equal(response.status, 200, `token=${JSON.stringify(token)} must still read an unowned plan`);
+      assert.equal((await response.json()).id, itinerary.id);
+    }
+  }]);
+
+  cases.push([`R1 ${backend}: a different verified owner gets a 404 indistinguishable from missing`, async () => {
+    reset();
+    const itinerary = await plan();
+    const refused = await read(itinerary, "stranger-token");
+    const missing = await readRoute(
+      new NextRequest("http://localhost/api/itinerary/does-not-exist",
+        { headers: { Authorization: "Bearer stranger-token" } }),
+      { params: Promise.resolve({ id: "does-not-exist" }) }
+    );
+    assert.equal(refused.status, 404);
+    assert.equal(missing.status, 404);
+    const [refusedBody, missingBody] = [await refused.json(), await missing.json()];
+    assert.equal(refusedBody.code, "itinerary_not_found");
+    assert.equal(refusedBody.error, missingBody.error);
+    assert.deepEqual(Object.keys(refusedBody).sort(), Object.keys(missingBody).sort(),
+      "a refusal must not carry a field a genuine 404 lacks");
+    assert.equal(refused.headers.get("etag"), null, "no ETag on a refusal");
+    // The plan is untouched: an unauthorized read is a no-op.
+    assert.deepEqual(await loadItinerary(itinerary.id), itinerary);
+  }]);
+
+  cases.push([`R1 ${backend}: NO caller reading an OWNED plan is refused (the fix)`, async () => {
+    reset();
+    const itinerary = await plan();
+    const response = await read(itinerary, "");
+    assert.equal(response.status, 404, "an unauthenticated stranger can no longer read an owned plan");
+    assert.equal((await response.json()).code, "itinerary_not_found");
+    assert.deepEqual(await loadItinerary(itinerary.id), itinerary, "the plan is not disclosed and not mutated");
+  }]);
+
+  for (const probe of ["", "stranger-token"] as const) {
+    cases.push([`R1 ${backend}: an unauthorized ${probe || "anonymous"} probe of a concluded owned plan fires no side effect`, async () => {
+      reset();
+      // A PAST owned plan with a live resume pointer: an authorized read here
+      // would archive it (D5) and clear the pointer (D3). An unauthorized one
+      // must do neither, because it never reaches readItineraryWithLifecycle.
+      const itinerary = await plan(true);
+      await setActiveItineraryForOwner("owner", itinerary.id);
+      const response = await read(itinerary, probe);
+      assert.equal(response.status, 404);
+      assert.equal(archiveWrites.length, 0, "no archive on an unauthorized probe");
+      assert.equal(await activeItineraryIdForOwner("owner"), itinerary.id, "the owner pointer is untouched");
+      assert.deepEqual(await loadItinerary(itinerary.id), itinerary, "no status/lock was persisted");
+    }]);
+  }
 
   if (backend === "redis") {
     cases.push(["D4 redis: status CAS retries twice without losing concurrent edits", async () => {

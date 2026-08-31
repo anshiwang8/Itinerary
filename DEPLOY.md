@@ -121,13 +121,17 @@ persistence.
 Optional Google sign-in coexists with anonymous guest identity and guest planning.
 Server token verification, itinerary ownership, active-plan resume, account
 history/archive, and profile-based personalization are implemented. History and
-personalization require a verified non-anonymous account. `/end` verifies the
-caller and enforces ownership.
+personalization require a verified non-anonymous account. `/end` and the by-id
+`GET` verify the caller and enforce ownership: an owned plan is readable only by
+its verified owner; any other caller (including an unauthenticated one) gets a 404
+that is indistinguishable from a missing plan. Unowned/legacy plans — every plan
+created before ownership shipped, and every mock-e2e plan — stay readable by
+anyone holding the id.
 
-Authorization remains **partial**: the by-id `GET` and `/swap`, `/remove`, `/mode`,
-and `/reroute` do **no caller verification**; possession of an itinerary ID is
-enough to read or mutate that plan. Do not rely on complete owner-only access.
-The broader authorization/sharing contract remains an unresolved product decision.
+Authorization remains **partial**: `/swap`, `/remove`, `/mode`, and `/reroute` do
+**no caller verification**; possession of an itinerary ID is enough to mutate that
+plan. Do not rely on complete owner-only access. The broader authorization/sharing
+contract remains an unresolved product decision.
 
 ## Provider call envelope
 
@@ -212,8 +216,9 @@ deployment as abuse-resistant:
 - [ ] If Firebase sign-in is enabled, restrict its authorized domains to the
   intended production/preview hosts and verify guest mode with config absent.
   Also verify the three Admin credentials and the server identity features.
-  Authorization remains partial: `/end` enforces ownership, while most by-id
-  reads and mutations still accept the itinerary ID alone (see the boundary above).
+  Authorization remains partial: `/end` and the by-id `GET` enforce ownership on
+  owned plans, while `/swap`, `/remove`, `/mode` and `/reroute` still accept the
+  itinerary ID alone (see the boundary above).
 - [ ] Use separate server-side keys for Places, Routes, Weather, and
   Geocoding when that endpoint is enabled; API-restrict each key to its one
   service and never expose it through `NEXT_PUBLIC_`.
