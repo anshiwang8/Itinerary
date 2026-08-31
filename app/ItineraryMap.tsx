@@ -36,7 +36,6 @@ export interface MapStop {
   lng: number;
   startTime: string | null;
   endTime: string | null;
-  reason?: string;
   legModeToNext?: "transit" | "walk" | "driving" | "unknown";
   legIdToNext?: string | null;
   polylineToNext?: string | null;
@@ -54,7 +53,6 @@ export interface MapStop {
   changed?: boolean;
   /** pre-reroute start, shown struck-through while the change is fresh */
   oldStart?: string | null;
-  blockedReason?: string | null;
 }
 
 export interface MapHome {

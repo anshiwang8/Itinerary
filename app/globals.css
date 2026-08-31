@@ -145,7 +145,6 @@ button { font-family: var(--grot); cursor: pointer; }
   font-family: var(--disp); font-weight: 600; font-size: 19px;
   letter-spacing: -0.01em; color: var(--ink);
 }
-.empty__kicker { margin-bottom: 14px; }
 .empty__title {
   font-family: var(--disp); font-weight: 600;
   font-size: clamp(46px, 8vw, 92px); line-height: 1.0; letter-spacing: -0.025em;
@@ -248,8 +247,6 @@ button { font-family: var(--grot); cursor: pointer; }
 .prompt__go:hover { background: var(--accent-deep); }
 .prompt__go:active { transform: translateY(-50%) scale(0.96); }
 .prompt__go[disabled] { opacity: 0.45; cursor: default; }
-/* the button shows a spinner-ish label while the pipeline runs */
-.prompt__go .prompt__golabel { display: none; }
 
 .empty__err {
   margin-top: 18px; max-width: 46ch; font-family: var(--grot); font-size: 14px;
@@ -468,34 +465,6 @@ button { font-family: var(--grot); cursor: pointer; }
    camera sits still) keeps the normal eased catch-up. */
 .ov-layer--camera-moving .chip { transition: opacity 0.45s ease, border-color 0.4s ease; }
 
-/* NOTE: the .ecard* rules below are currently DEAD — the expanded editorial
-   card was replaced by the compact chip above and no component renders it
-   today. Restyled for consistency rather than deleted, since removing them
-   is a cleanup decision, not a re-skin one. */
-
-/* expanded editorial card */
-.ecard {
-  position: absolute; transform: translate(-50%, calc(-100% - 14px)); z-index: 12;
-  pointer-events: auto; cursor: pointer;
-  width: min(288px, 84vw);
-  background: var(--card); border: 1px solid var(--rule); border-radius: 18px;
-  padding: 16px 18px 17px;
-  box-shadow: var(--shadow-lift);
-  transition: left 0.55s ease, top 0.55s ease;
-}
-.ecard__cat { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
-.ecard__badge {
-  font-family: var(--grot); font-size: 10px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase;
-  background: var(--live); color: var(--ink); padding: 2px 8px; border-radius: 20px;
-}
-.ecard__name { font-family: var(--disp); font-weight: 600; font-size: 27px; line-height: 1.05; letter-spacing: -0.015em; font-optical-sizing: auto; margin-bottom: 7px; }
-.ecard__be { font-family: var(--grot); font-size: 13px; color: var(--ink); }
-.ecard__reason { font-family: var(--disp); font-weight: 400; font-style: italic; font-size: 15px; line-height: 1.55; color: var(--ink-soft); margin-top: 10px; }
-.ecard__meta { font-family: var(--grot); font-size: 12px; color: var(--ink-soft); margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--rule); }
-.ecard--live { border-color: var(--live); border-width: 1.5px; }
-.ecard--changed { border-color: var(--live); border-width: 1.5px; }
-.ecard--blocked .ecard__name { color: var(--ink-soft); }
-
 .old-time { text-decoration: line-through; color: var(--ink-faint); margin-right: 5px; }
 .new-time { color: var(--ink); font-weight: 500; background: var(--live); padding: 1px 6px; border-radius: 5px; }
 
@@ -507,7 +476,6 @@ button { font-family: var(--grot); cursor: pointer; }
   background: rgba(255,255,255,0.88); padding: 2px 7px; border-radius: 6px;
   transition: opacity 0.5s ease;
 }
-.leglab--dim { opacity: 0.3; }
 /* the strip's transfer bubbles at map scale — small circles in a pair
    are colour-only dots; singles keep the short line name */
 .leglab__bubbles { display: inline-flex; align-items: center; gap: 3px; }
@@ -615,11 +583,7 @@ button { font-family: var(--grot); cursor: pointer; }
   box-shadow: var(--shadow-card);
 }
 
-/* weather-blocked card variant */
-.wx-note { font-family: var(--grot); font-size: 12.5px; color: var(--ink-soft); font-style: normal; }
-
 /* ── city + starting-address inputs (plain queries, no location services) ── */
-.wherebar { display: flex; gap: 8px; width: min(520px, 92vw); margin-bottom: 10px; }
 .where__input {
   flex: 0 0 150px; min-width: 0; border: 1px solid var(--rule); border-radius: 8px;
   min-height: 44px; background: var(--card); padding: 9px 12px;
@@ -991,32 +955,6 @@ button { font-family: var(--grot); cursor: pointer; }
 }
 .weather__temp { font-family: var(--grot); font-size: 14px; font-weight: 500; color: var(--ink); }
 .weather__cond { font-family: var(--grot); font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
-
-/* ─── Swap prompt bar — revealed when an upcoming stop is selected ─── */
-.swapbar {
-  position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%);
-  z-index: 22; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  width: min(540px, 92vw);
-  background: var(--card); border: 1px solid var(--rule); border-radius: 999px;
-  padding: 9px 9px 9px 18px; box-shadow: var(--shadow-lift);
-}
-.swapbar__label { font-family: var(--grot); font-size: 13px; color: var(--ink-soft); white-space: nowrap; }
-.swapbar__label b { color: var(--ink); font-weight: 500; }
-.swapbar__input {
-  flex: 1; min-width: 120px; min-height: 44px; border: none; background: transparent;
-  font-family: var(--grot); font-size: 14px; color: var(--ink);
-}
-.swapbar__input::placeholder { color: var(--ink-faint); }
-.swapbar__go {
-  border: none; background: var(--accent); color: #FFFFFF;
-  min-width: 44px; min-height: 44px;
-  font-family: var(--grot); font-weight: 600; font-size: 13px;
-  padding: 8px 17px; border-radius: 999px; white-space: nowrap;
-  transition: background 0.18s ease;
-}
-.swapbar__go:hover { background: var(--accent-deep); }
-.swapbar__go[disabled] { opacity: 0.5; cursor: default; }
-.swapbar__err { flex-basis: 100%; font-family: var(--grot); font-size: 12px; color: var(--ink); }
 
 /* ─────────────────────────  Dev strip  ───────────────────────── */
 .dev {
@@ -1802,7 +1740,6 @@ button { font-family: var(--grot); cursor: pointer; }
   .banner, .stage__err, .clarify--stage { top: 76px; }
   .dev:not(.dev__collapsed) { left: 14px; right: 14px; width: auto; }
   .dev__collapsed { left: auto; right: 14px; width: auto; }
-  .swapbar { bottom: 14px; top: auto; }
   .lstrip { top: 76px; max-width: 100vw; }
   .stage--banner .lstrip { top: 136px; }
   .weather { left: 12px; bottom: 14px; padding: 5px 10px 5px 8px; }
@@ -1819,7 +1756,7 @@ button { font-family: var(--grot); cursor: pointer; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chip, .ecard, .mk__dot, .leglab, .banner { transition: opacity 0.2s ease !important; }
+  .chip, .mk__dot, .leglab, .banner { transition: opacity 0.2s ease !important; }
   /* The auto-dismiss timing stays (same timer, same total wait) — only the
      fade animation goes. The banner snaps straight to invisible instead of
      easing there. */

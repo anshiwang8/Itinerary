@@ -128,7 +128,7 @@ selected-place enrichment would add a Details request without a fact-safe cheape
 
 For real venues on your own machine. This calls paid/rate-limited APIs, so it needs keys.
 
-**Prerequisites:** Node.js **20.9+** (Next.js 16.2.11's declared minimum) and npm. The current
+**Prerequisites:** Node.js **22.12.0+** (the repository's `engines.node` minimum) and npm. The current
 application uses React / React DOM 19.2.8.
 
 ```bash
@@ -167,7 +167,7 @@ Where to get them:
   Restrict it (Cloud Console → the key → *Application restrictions → Websites*) to
   `http://localhost:3000/*` for local use.
 
-**Optional Google sign-in (Stage 1A).** Sign-in is not required and never gates the app. To
+**Optional Google sign-in.** Sign-in is not required and never gates the app. To
 enable it, add all six Firebase Web config values below; partial or missing configuration
 degrades to “sign-in unavailable” while guest planning keeps working. These are client config
 by design, not server secrets:
@@ -181,8 +181,20 @@ NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=...
 NEXT_PUBLIC_FIREBASE_APP_ID=...
 ```
 
-Stage 1A captures client auth state only. Current `main` has no server-side token verification,
-owner-only itinerary mutation, account history/archive, or sharing contract.
+For server token verification, also set `FIREBASE_ADMIN_PROJECT_ID`,
+`FIREBASE_ADMIN_CLIENT_EMAIL`, and `FIREBASE_ADMIN_PRIVATE_KEY` from the same Firebase
+project's service account (see `.env.example` and `DEPLOY.md`). These are **server-side
+secrets**, never browser config. Without all three, client sign-in can appear to work while
+the server treats callers as unauthenticated: ownership, resume, history, and personalization
+are unavailable, without a user-facing configuration error.
+
+Server token verification, itinerary ownership, active-plan resume, account history/archive,
+and profile-based personalization are implemented. Guests can receive an anonymous Firebase
+identity; account history and personalization require a non-anonymous identity. `/end`
+verifies the caller and enforces ownership. Authorization is still **partial**: the by-id
+`GET` and `/swap`, `/remove`, `/mode`, and `/reroute` do **no caller verification** and accept
+the itinerary ID alone. Do not treat owned plans as having complete access protection;
+the broader authorization/sharing contract remains unresolved.
 
 `.env` is gitignored, so your keys are never committed.
 
@@ -203,7 +215,7 @@ Not needed for local dev — listed so the full set is in one place.
 | `VERCEL` | `app/api/itinerary/store.ts` | Set by the platform. On Vercel **without** KV configured, the store refuses loudly instead of serving silent 404s. |
 | `NEXT_PUBLIC_ENABLE_DEV_CONTROLS` | `app/page.tsx` | Optional build-time flag. Production hides the time/disruption simulator unless this is exactly `true`; local development keeps it available. Rebuild after changing it. |
 | `OPENROUTER_MODELS_PLANNER` / `OPENROUTER_MODELS_SELECT` / `OPENROUTER_MODELS_SWAP` | `app/api/_shared/models.ts` | Optional comma-separated per-call model-chain overrides. Blank/unset uses the validated in-code defaults. |
-| `NEXT_PUBLIC_FIREBASE_*` (six values above) | `app/lib/firebase.ts` | Optional Firebase Web configuration for client-only Google sign-in. All six are required to enable it; they do not add server authorization. |
+| `NEXT_PUBLIC_FIREBASE_*` (six values above) | `app/lib/firebase.ts` | Optional public Web configuration for Google sign-in and anonymous guest identity. Set all six together; server identity features also require the Admin credentials described above. |
 | `E2E_MOCK` | `app/api/_mock/fixtures.ts` | `=1` swaps the pipeline's **data sources** (OpenRouter, Places, Routes, Weather, geocode) for deterministic fixtures. Playwright sets it on its own server; never set it for real use. |
 | `TZ` | Runtime compatibility / logs | Optional. Scheduling, hours checks, status math, and display are per-plan zone-aware and do not depend on the server wall clock. |
 

@@ -329,6 +329,31 @@ test("a replacement too far to reach pushes its slot and the stops after it @moc
 test("a push past a STATED end asks first: decline keeps the plan, accept applies it @mock", async ({
   page,
 }) => {
+  // Keep the planning clock inside the window, as in the "right away" test.
+  const fixedNow = "2026-07-16T17:05:00-04:00";
+  await page.addInitScript(`{
+    const RealDate = Date;
+    const fixed = new RealDate('${fixedNow}').getTime();
+    function FakeDate(...a) { return a.length ? new RealDate(...a) : new RealDate(fixed); }
+    FakeDate.now = () => fixed;
+    FakeDate.parse = RealDate.parse;
+    FakeDate.UTC = RealDate.UTC;
+    FakeDate.prototype = RealDate.prototype;
+    window.Date = FakeDate;
+  }`);
+  // The first read ratchets locks, and swaps use server time unless `now`
+  // is supplied. Pin BOTH through the existing request seams before any
+  // read can lock these stops against the machine's real date.
+  await page.route(/\/api\/itinerary\/[A-Za-z0-9-]+(?:\?.*)?$/, async (route) => {
+    const url = new URL(route.request().url());
+    url.searchParams.set("now", fixedNow);
+    await route.continue({ url: url.toString() });
+  });
+  await page.route(/\/api\/itinerary\/[A-Za-z0-9-]+\/swap$/, async (route) => {
+    await route.continue({
+      postData: JSON.stringify({ ...route.request().postDataJSON(), now: fixedNow }),
+    });
+  });
   // "from 5-8pm" is a stated FINISH, so the plan carries an end instant the
   // swap engine can check the push against. Without one there is no ceiling
   // and no question — that is the case the test above covers.
@@ -494,6 +519,17 @@ test.describe("@mock generic-category clarify", () => {
 // decides once the real travel legs are known ─────────────────────────────
 test.describe("@mock stated time windows", () => {
   test("a stated window plans multiple stops that end inside it @mock", async ({ page }) => {
+    // Only rendered times/counts are asserted here, not server statuses.
+    await page.addInitScript(`{
+      const RealDate = Date;
+      const fixed = new RealDate('2026-07-16T17:05:00-04:00').getTime();
+      function FakeDate(...a) { return a.length ? new RealDate(...a) : new RealDate(fixed); }
+      FakeDate.now = () => fixed;
+      FakeDate.parse = RealDate.parse;
+      FakeDate.UTC = RealDate.UTC;
+      FakeDate.prototype = RealDate.prototype;
+      window.Date = FakeDate;
+    }`);
     await planEvening(page, "dinner and drinks from 5-9pm");
 
     // both stops survive — nothing was dropped, so no window banner at all
@@ -517,6 +553,17 @@ test.describe("@mock stated time windows", () => {
   });
 
   test("an OVER-STUFFED window drops what doesn't fit and says so @mock", async ({ page }) => {
+    // Only window-fit copy/counts are asserted here, not server statuses.
+    await page.addInitScript(`{
+      const RealDate = Date;
+      const fixed = new RealDate('2026-07-16T19:05:00-04:00').getTime();
+      function FakeDate(...a) { return a.length ? new RealDate(...a) : new RealDate(fixed); }
+      FakeDate.now = () => fixed;
+      FakeDate.parse = RealDate.parse;
+      FakeDate.UTC = RealDate.UTC;
+      FakeDate.prototype = RealDate.prototype;
+      window.Date = FakeDate;
+    }`);
     // Three stops into a two-hour window. Dinner alone is 105 minutes, so
     // 7-9 fits exactly one of them once travel is counted — and the user
     // must be TOLD, never silently handed a plan running hours over.

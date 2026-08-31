@@ -1,5 +1,25 @@
 # Devlog — Itinerary
 
+## Fix: audit batch 1 — verified low-risk cleanup (2026-08-30)
+
+Goal: apply only the safe batch in `AUDIT_FINDINGS.md` section 5, including its authoritative verification amendments A1/E1, A2, C1/E2, C2, A4 (log only), and A3 (two isolated declarations only).
+
+What should be done: remove proven dead code and CSS, correct setup documentation to the actual partial authorization boundary, and make the three stated-window scenarios independent of the wall clock. Preserve live time pills, timeline classes, reduced-motion behavior, the root prototype, and every needs-care finding. Do not change scheduler logic, factual validation, policy values, or prompt semantics.
+
+What was done (technical):
+
+A1/E1: removed `parsedObj` and `travelLegs` state plus their three writes from `app/page.tsx`; removed `MapStop.reason` and its two map projections, and the never-assigned `MapStop.blockedReason` field. Live itinerary/strip reasons remain. Removed only the unused `t` parameter and sole argument of `nextItineraryStatus`; status derivation is unchanged. Lint now reports exactly five warnings, down from eight: the cleared warnings are `parsedObj`, `travelLegs`, and `t`; the five existing `swap.test.ts` warnings remain.
+
+A2: removed exactly these twenty dead CSS classes, including pseudo/descendant and mobile rules: `empty__kicker`, `prompt__golabel`, `wx-note`, `wherebar`, `leglab--dim`, `ecard`, `ecard__cat`, `ecard__badge`, `ecard__name`, `ecard__be`, `ecard__reason`, `ecard__meta`, `ecard--live`, `ecard--changed`, `ecard--blocked`, `swapbar`, `swapbar__label`, `swapbar__input`, `swapbar__go`, and `swapbar__err`. Removed their obsolete comments. `.old-time`/`.new-time` and all four generated timeline classes remain unchanged; reduced motion loses only `.ecard`, retaining `.chip`, `.mk__dot`, `.leglab`, and `.banner` with the same declarations.
+
+C1/E2: README and DEPLOY now describe verified identity, ownership, resume, history/archive and personalization while explicitly naming the unverified by-id GET, swap, remove, mode and reroute routes; `/end` enforces ownership. Added all three server-only `FIREBASE_ADMIN_*` credentials to `.env.example` and DEPLOY, separate from six public Firebase Web values, including the missing-Admin failure mode. Corrected the browser-key comment. Node prerequisites now match `>=22.12.0`; `@types/node` and its lockfile entry are on 22. Updated both CLAUDE and AGENTS timezone/persistence bullets to reflect DEPLOY's already-resolved optional compatibility/logging TZ default. No authorization behavior changed.
+
+C2: copied the existing `page.addInitScript` Date override into only the three named scenarios, fixing the 5–8 and 5–9 PM cases at 17:05 and the 7–9 PM case at 19:05 on 2026-07-16 in Toronto. The end-confirmation scenario also supplies that same instant through the existing by-id GET query and swap-body `now` seams before the first read, so the server's lock ratchet and swap floor agree with the browser. The other two assert rendered times/counts/window copy, not server statuses. Production time logic and scenario expectations are unchanged.
+
+A4/A3: deleted the tracked root `debug.log`, added the previously absent `*.log` ignore rule, and removed only the zero-reference `parsePromptBody` and `distributionOptions` declarations. `index.html`, the other A3 helpers/constants, and D1–D7/B1/R1–R3 remain untouched.
+
+Verification: ran the full `npm run check`: lint is 0 errors / 5 warnings, typechecking and all 62 unit suites passed, and the webpack production build passed. Mock e2e executed all 133 tests: 132 passed; the sole failure is the documented 768px mobile overlap (the map-warning dismiss button's centre hits `div.dev__title`), so the full check exits 1 only for that allowed exclusion. All three fixed scenarios passed in that run and each passed three more times with `--repeat-each=3` (9/9, exit 0). A source comparison confirms their Date overrides match the existing right-away seam apart from the fixed instant. A temporary Chromium check compared all surviving CSS rules against HEAD and rendered the time pills and reduced-motion members at 1280px and 390px with both motion settings: all four screenshot pairs were pixel-identical. Verification used an isolated temporary worktree with only its harness port changed to 3200 and dev server set to webpack for the dependency junction; no harness change enters this batch and port 3000 was untouched.
+
 ## Fix: a vague request ("something to do tonight") fell to the single-stop fallback because the model's clarifying question was missing or plan-level — code now GUARANTEES question coverage
 
 Goal: stop the app's stated PRIMARY use case degrading. A broad request is the NORMAL case (planner.ts: "a broad request ... is the NORMAL case"), and it should produce a full plan plus a couple of good questions, never the deterministic one-stop fallback.

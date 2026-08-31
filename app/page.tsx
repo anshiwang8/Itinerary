@@ -309,7 +309,6 @@ function stopsFromSchedule(sched: ScheduledStop[], pools: Pools): MapStop[] {
       lng: loc.longitude,
       startTime: st.start_time,
       endTime: st.end_time,
-      reason: st.reason,
       legModeToNext: st.travelToNext?.mode,
       legIdToNext: st.travelToNext?.legId ?? null,
       polylineToNext: st.travelToNext?.encodedPolyline ?? null,
@@ -332,7 +331,6 @@ function stopsFromItinerary(it: Itinerary): MapStop[] {
       lng: s.location!.longitude,
       startTime: s.start_time,
       endTime: s.end_time,
-      reason: s.reason,
       legModeToNext: s.travelToNext?.mode,
       legIdToNext: s.travelToNext?.legId ?? null,
       polylineToNext: s.travelToNext?.encodedPolyline ?? null,
@@ -596,9 +594,7 @@ export default function Home() {
   // the plan's resolved IANA zone — all scheduling + labels use it
   const [planZone, setPlanZone] = useState("America/Toronto");
   const [pools, setPools] = useState<Pools>({});
-  const [parsedObj, setParsedObj] = useState<ParsedPrompt | null>(null);
   const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
-  const [travelLegs, setTravelLegs] = useState<TravelLeg[]>([]);
   const [homeLeg, setHomeLeg] = useState<TravelLeg | null>(null);
   const [mapStops, setMapStops] = useState<MapStop[]>([]);
   const [itinerary, setItinerary] = useState<Itinerary | null>(null);
@@ -1046,7 +1042,6 @@ export default function Home() {
     // the forecast from the stored parse, and it must be the CITY's forecast
     // even when the start is a suburb an hour out
     parsed.cityCenter = place.cityLocation;
-    setParsedObj(parsed);
 
     // planner extracted nothing AND the prompt is degenerate → "couldn't
     // understand"; a sincere-but-vague prompt falls through to the general
@@ -1305,7 +1300,6 @@ export default function Home() {
     };
     try {
       setPools(pools);
-      setParsedObj(parseData);
       setLoadingText("Timing the route…");
 
       // Route + schedule ONE candidate selection set. Called twice at most:
@@ -1547,7 +1541,6 @@ export default function Home() {
       }
 
       setSchedule(stops);
-      setTravelLegs(legs);
       setHomeLeg(hl);
       const ms = stopsFromSchedule(stops, pools);
       setMapStops(ms);

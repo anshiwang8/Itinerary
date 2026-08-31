@@ -553,7 +553,7 @@ export function withStatuses(
       changed = true;
     }
   }
-  const itineraryStatus = nextItineraryStatus(itinerary, t);
+  const itineraryStatus = nextItineraryStatus(itinerary);
   if (itinerary.status !== itineraryStatus) changed = true;
   itinerary.status = itineraryStatus;
   if (out) out.changed = changed;
@@ -566,7 +566,7 @@ export function withStatuses(
  * freshly-created "planning" with "active", so a plan booked for tomorrow
  * evening reported itself as underway all day today (code-audit §7.4).
  */
-function nextItineraryStatus(itinerary: Itinerary, t: Date): ItineraryStatus {
+function nextItineraryStatus(itinerary: Itinerary): ItineraryStatus {
   const live = itinerary.stops.filter((s) => s.status !== "skipped");
   if (live.length > 0 && live.every((s) => s.status === "completed")) return "completed";
   if (itinerary.stops.every((s) => s.status === "completed" || s.status === "skipped")) {

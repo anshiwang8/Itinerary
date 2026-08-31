@@ -24,8 +24,8 @@ math, and display labels. Vercel's UTC wall clock does not drive those
 results. `TZ=America/Toronto` may remain as an optional compatibility/logging
 default, but it is not a correctness requirement for multi-city scheduling.
 
-Build with Node.js **20.9 or newer** (the declared minimum for the pinned
-Next.js 16.2.11). The current runtime is React / React DOM 19.2.8.
+Build with Node.js **22.12.0 or newer**, matching this repository's
+`engines.node` requirement. The current runtime is React / React DOM 19.2.8.
 
 ## Environment variables (Vercel → Project → Settings → Environment Variables)
 
@@ -40,7 +40,7 @@ Next.js 16.2.11). The current runtime is React / React DOM 19.2.8.
 | `GOOGLE_ROUTES_API_KEY` | Routes computeRoutes — server-side only |
 | `GOOGLE_WEATHER_API_KEY` | Weather hourly forecast — server-side only |
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Maps JS (browser-side by design — see referrer note) |
-| `NEXT_PUBLIC_FIREBASE_API_KEY` | OPTIONAL Firebase Web config for client-only Google sign-in; all six Firebase values are required together |
+| `NEXT_PUBLIC_FIREBASE_API_KEY` | OPTIONAL public Firebase Web config for Google sign-in and anonymous guest identity; all six Web values are required together |
 | `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | OPTIONAL Firebase Web config |
 | `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | OPTIONAL Firebase Web config |
 | `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | OPTIONAL Firebase Web config |
@@ -49,6 +49,22 @@ Next.js 16.2.11). The current runtime is React / React DOM 19.2.8.
 | `NEXT_PUBLIC_ENABLE_DEV_CONTROLS` | Optional build-time public flag. Leave unset/`false` to hide time travel and disruption simulation in production; set exactly `true` only for an intentional demo, then rebuild. |
 | `TZ` | Optional compatibility/logging default; scheduling correctness does not depend on it |
 | `KV_REST_API_URL` + `KV_REST_API_TOKEN` | injected automatically when you connect Upstash Redis / Vercel KV storage (the `UPSTASH_REDIS_REST_URL`/`_TOKEN` names work too) |
+
+**Firebase Admin — server-side secrets, separate from the public Web config above.**
+Set all three from the same Firebase project's service-account JSON when enabling
+ownership, resume, history, and personalization. Never expose them to the browser
+or prefix them with `NEXT_PUBLIC_`.
+
+| Variable | Value / purpose |
+| --- | --- |
+| `FIREBASE_ADMIN_PROJECT_ID` | SERVER-SIDE SECRET configuration: service-account `project_id` |
+| `FIREBASE_ADMIN_CLIENT_EMAIL` | SERVER-SIDE SECRET configuration: service-account `client_email` |
+| `FIREBASE_ADMIN_PRIVATE_KEY` | SERVER-SIDE SECRET: service-account `private_key` PEM; real newlines or literal `\n` escapes are supported |
+
+Missing Admin credentials do not stop guest planning or client sign-in. They make
+server verification unavailable, so callers are treated as unauthenticated and
+ownership/resume/history/personalization do not work. There is no user-facing
+configuration error; verify these server features as well as the sign-in UI.
 
 The three `OPENROUTER_MODELS_*` vars allow a chain to change without a build.
 Blank or unset falls back to the in-code defaults. Only upstream 429 and
@@ -77,8 +93,8 @@ Browser-visible configuration consists of the Maps JS key, the six optional
 Firebase Web values, and the optional development-control flag. Firebase Web
 values are client configuration by design; protect sign-in through Firebase
 authorized domains and Auth rules, not key secrecy. All OpenRouter and Google
-server-service credentials remain server-only. Never put `NEXT_PUBLIC_` on a
-server credential.
+server-service credentials and all Firebase Admin credentials remain server-only.
+Never put `NEXT_PUBLIC_` on a server credential.
 
 **Maps key referrer restriction (do this or the map breaks / the key leaks):**
 Google Cloud Console → APIs & Services → Credentials → the Maps JS key →
@@ -102,11 +118,16 @@ proposes semantics and bounded estimates; code owns IDs, hours, prices,
 coordinates, travel, arithmetic, window fit, hard-constraint evidence, and
 persistence.
 
-Optional Google sign-in on current `main` is Stage 1A only. Guest users retain
-the full app; signing in captures client auth state but does not add
-server-side token verification, itinerary ownership, owner-only mutation,
-history/archive, deletion, or sharing. Do not describe or rely on Stage 1B
-behavior until it is merged.
+Optional Google sign-in coexists with anonymous guest identity and guest planning.
+Server token verification, itinerary ownership, active-plan resume, account
+history/archive, and profile-based personalization are implemented. History and
+personalization require a verified non-anonymous account. `/end` verifies the
+caller and enforces ownership.
+
+Authorization remains **partial**: the by-id `GET` and `/swap`, `/remove`, `/mode`,
+and `/reroute` do **no caller verification**; possession of an itinerary ID is
+enough to read or mutate that plan. Do not rely on complete owner-only access.
+The broader authorization/sharing contract remains an unresolved product decision.
 
 ## Provider call envelope
 
@@ -190,7 +211,9 @@ deployment as abuse-resistant:
   API only.
 - [ ] If Firebase sign-in is enabled, restrict its authorized domains to the
   intended production/preview hosts and verify guest mode with config absent.
-  Remember that Stage 1A login does not authorize itinerary reads or writes.
+  Also verify the three Admin credentials and the server identity features.
+  Authorization remains partial: `/end` enforces ownership, while most by-id
+  reads and mutations still accept the itinerary ID alone (see the boundary above).
 - [ ] Use separate server-side keys for Places, Routes, Weather, and
   Geocoding when that endpoint is enabled; API-restrict each key to its one
   service and never expose it through `NEXT_PUBLIC_`.

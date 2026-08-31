@@ -54,11 +54,6 @@ function stringList(
   return value.map((item, index) => boundedString(item, `${field}[${index}]`));
 }
 
-export function parsePromptBody(value: unknown): string {
-  if (!isRecord(value)) badRequest("Request body must be a JSON object.");
-  return boundedString(value.prompt, "prompt", REQUEST_LIMITS.promptChars);
-}
-
 /** One answered clarifying question, echoed back for the second planner pass. */
 export interface PlannerAnswerInput {
   question: string;

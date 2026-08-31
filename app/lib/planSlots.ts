@@ -161,19 +161,3 @@ export function slotsFromDistributionAnswer(
   }
   return slots.length === stopCount ? slots : null;
 }
-
-export function distributionOptions(categories: string[], stopCount: number): string[] {
-  const allowed = [...new Set(cleanCategories(categories))];
-  if (!validStopCount(stopCount) || allowed.length < 2 || stopCount < allowed.length) {
-    return [];
-  }
-  const remaining = stopCount - allowed.length;
-  if (remaining === 0) {
-    return [allowed.map((category) => `1 ${category}`).join(" + ")];
-  }
-  return allowed.slice(0, 4).map((favored) =>
-    allowed
-      .map((category) => `${1 + (category === favored ? remaining : 0)} ${category}`)
-      .join(" + ")
-  );
-}
