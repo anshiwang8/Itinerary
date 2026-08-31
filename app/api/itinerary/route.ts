@@ -2,12 +2,11 @@ import { NextRequest } from "next/server";
 import {
   activeItineraryIdForOwner,
   createItinerary,
-  loadItinerary,
   saveItinerary,
   setActiveItineraryForOwner,
-  withStatuses,
 } from "./store";
-import { isResumable, ownsItinerary, stampOwner } from "./ownership";
+import { isResumable, stampOwner } from "./ownership";
+import { readItineraryWithLifecycle } from "./readLifecycle";
 import { verifyCaller } from "../_shared/caller";
 import { ScheduledStop } from "../schedule/schedule";
 import { TravelLeg } from "../schedule/travel";
@@ -126,19 +125,14 @@ export async function GET(request: NextRequest) {
     const activeId = await activeItineraryIdForOwner(caller.uid);
     if (!activeId) return apiJson(ctx, { itinerary: null });
 
-    const stored = await loadItinerary(activeId);
+    const settled = await readItineraryWithLifecycle(activeId, new Date(), caller);
     // A pointer can outlive its plan (TTL, manual deletion). Degrade to "no
     // active plan" rather than 404-ing a page load.
-    if (!stored) return apiJson(ctx, { itinerary: null });
+    // The shared read has already checked ownership, persisted statuses and
+    // handled conclusion. A concluded/ended plan still must not resume.
+    if (!settled || !isResumable(settled)) return apiJson(ctx, { itinerary: null });
 
-    // Statuses are derived against the real clock, exactly as the by-id read
-    // does it, so "is this still going" is answered by the same code.
-    const withDerived = withStatuses(stored, new Date());
-    if (!isResumable(withDerived)) return apiJson(ctx, { itinerary: null });
-    // Guard against a stale pointer to someone else's plan.
-    if (!ownsItinerary(withDerived, caller)) return apiJson(ctx, { itinerary: null });
-
-    return apiJson(ctx, { itinerary: withDerived });
+    return apiJson(ctx, { itinerary: settled });
   } catch (err) {
     return apiError(ctx, err);
   }

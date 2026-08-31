@@ -279,7 +279,7 @@ const cases: Array<[string, () => Promise<void>]> = [
     async () => {
       const itinerary = await saveItinerary(createItinerary(mkStops(), []));
       await setActiveItineraryForOwner("uid-delta", itinerary.id);
-      await clearActiveItineraryForOwner("uid-delta");
+      await clearActiveItineraryForOwner("uid-delta", itinerary.id);
       assert.strictEqual(await activeItineraryIdForOwner("uid-delta"), undefined);
       // the PLAN is untouched — only the pointer went away
       assert.ok(await loadItinerary(itinerary.id), "clearing the index must not delete the plan");

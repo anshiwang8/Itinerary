@@ -4,7 +4,7 @@ import {
   loadItinerary,
   updateItinerary,
 } from "../../store";
-import { hasBeenArchived, ownsItinerary } from "../../ownership";
+import { hasBeenArchived, hasBeenDiscarded, ownsItinerary } from "../../ownership";
 import { archiveConcludedPlan } from "../../history";
 import { isStopChoice, resolveStopOutcome } from "../../stopPlan";
 import { verifyCaller } from "../../../_shared/caller";
@@ -80,7 +80,7 @@ export async function POST(
     // reasoning as the end-time path: failing to keep a copy must not prevent
     // the user from ending the plan they asked to end.
     let archivedAt: string | null = null;
-    if (outcome.shouldArchive && !hasBeenArchived(existing)) {
+    if (outcome.shouldArchive && !hasBeenDiscarded(existing) && !hasBeenArchived(existing)) {
       archivedAt = await archiveConcludedPlan(existing);
       if (!archivedAt) {
         logEvent("error", "stop_archive_failed", { itineraryId: id });
@@ -94,6 +94,7 @@ export async function POST(
         // Idempotent: ending an already-ended plan changes nothing.
         if (proposal.endedAt) return { value: null, changed: false };
         proposal.endedAt = endedAt;
+        if (body.choice === "discard-end") proposal.discardedAt = endedAt;
         if (archivedAt && !proposal.archivedAt) proposal.archivedAt = archivedAt;
         return { value: null, changed: true };
       },
@@ -105,7 +106,7 @@ export async function POST(
     // second of two independent guards rather than the only one — which is
     // why a failure here is logged and swallowed instead of failing the call.
     try {
-      await clearActiveItineraryForOwner(caller.uid);
+      await clearActiveItineraryForOwner(caller.uid, id);
     } catch (error) {
       logEvent("error", "stop_index_clear_failed", {
         itineraryId: id,

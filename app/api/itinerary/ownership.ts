@@ -78,10 +78,17 @@ export function hasBeenEnded(itinerary: Itinerary): boolean {
   return typeof itinerary.endedAt === "string" && itinerary.endedAt.trim().length > 0;
 }
 
+/** A deliberate discard stays discarded even after its stop times elapse. */
+export function hasBeenDiscarded(itinerary: Itinerary): boolean {
+  return typeof itinerary.discardedAt === "string" && itinerary.discardedAt.trim().length > 0;
+}
+
 /**
  * Does this concluded plan get written to history?
  *
- * Four conditions, and every one of them has a reason:
+ * Five conditions, and every one of them has a reason:
+ *  - NOT DISCARDED. Ending without saving is a durable user decision, not
+ *    an archive failure. Legacy plans without a disposition keep working.
  *  - CONCLUDED. History is for finished outings; an active plan lives in
  *    Redis and is still changing.
  *  - HAS AN OWNER. Nobody to file it under otherwise.
@@ -93,6 +100,7 @@ export function hasBeenEnded(itinerary: Itinerary): boolean {
  *    once, so without this a completed plan would re-archive on every poll.
  */
 export function shouldArchive(itinerary: Itinerary): boolean {
+  if (hasBeenDiscarded(itinerary)) return false;
   if (itinerary.status !== "completed") return false;
   if (ownerUidOf(itinerary) === null) return false;
   if (itinerary.ownerIsAnonymous !== false) return false;

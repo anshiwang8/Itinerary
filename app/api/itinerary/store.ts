@@ -112,6 +112,10 @@ export interface Itinerary {
    * was over", and `isResumable` reads it so an ended plan cannot come back.
    */
   endedAt?: string;
+  /** The user chose discard-end. Permanent archive veto, independent of
+   *  clock-derived status. Absent on legacy/naturally completed plans and
+   *  save-end attempts, including saves whose archive write failed. */
+  discardedAt?: string;
 }
 
 // Survive Next dev hot-reloads: module state resets on recompile, the
@@ -195,6 +199,15 @@ const kvKey = (id: string) => `itin:${id}`;
 // sitting in Redis. Storing the id under the user is the missing link, not
 // more persistence for the plan.
 const ownerKey = (uid: string) => `owner:${uid}:active`;
+
+// Compare and delete in ONE Redis operation: a newer plan may have replaced
+// this pointer while an old tab was concluding the previous plan.
+const CLEAR_ACTIVE_LUA = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0
+`.trim();
 
 // Redis compares the stored version and writes the complete proposal in one
 // server-side operation. KEEPTTL is load-bearing: a mutation must not refresh
@@ -316,16 +329,17 @@ export async function activeItineraryIdForOwner(uid: string): Promise<string | u
   return ownerIndex.get(owner);
 }
 
-/** Drop the pointer once its plan has concluded, so a finished outing does
- *  not keep resuming over the landing page. The plan itself is untouched. */
-export async function clearActiveItineraryForOwner(uid: string): Promise<void> {
+/** Drop only the concluding plan's pointer. An owner's newer plan and the
+ *  concluding plan's stored contents must both remain untouched. */
+export async function clearActiveItineraryForOwner(uid: string, id: string): Promise<void> {
   const owner = uid.trim();
   if (owner.length === 0) return;
   if (kvConfigured()) {
-    await redis(["DEL", ownerKey(owner)]);
+    await redis(["EVAL", CLEAR_ACTIVE_LUA, 1, ownerKey(owner), id]);
     return;
   }
-  ownerIndex.delete(owner);
+  // No await between comparison and deletion, matching Redis atomicity.
+  if (ownerIndex.get(owner) === id) ownerIndex.delete(owner);
 }
 
 /** Atomically replace exactly one known version and preserve its TTL. */
