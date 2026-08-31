@@ -2,10 +2,11 @@ import { readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 const projectRoot = process.cwd();
 const require = createRequire(import.meta.url);
-const tsxCli = require.resolve("tsx/cli");
+const tsxLoader = pathToFileURL(require.resolve("tsx")).href;
 
 function testFilesUnder(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -27,7 +28,10 @@ console.log(`Running ${tests.length} unit suites`);
 for (const test of tests) {
   const displayPath = relative(projectRoot, test);
   console.log(`\n===== ${displayPath} =====`);
-  const result = spawnSync(process.execPath, [tsxCli, test], {
+  const result = spawnSync(process.execPath, [
+    "--require", join(projectRoot, "scripts/register-server-only.cjs"),
+    "--import", tsxLoader, test,
+  ], {
     cwd: projectRoot,
     env: process.env,
     stdio: "inherit",

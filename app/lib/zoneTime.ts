@@ -1,27 +1,14 @@
-// Zone-aware time primitives — the single place luxon + tz-lookup are
+// Client-safe zone-aware time primitives — the single place luxon is
 // wrapped, so the rest of the pipeline never hand-rolls Intl.DateTimeFormat
 // parsing again (that ad-hoc arithmetic caused multiple TZ/meridiem bugs
 // earlier in this project). Every plan carries ONE resolved IANA zone; all
 // scheduling math and every display label render against THAT zone, not the
 // server's and not the viewer's.
 import { DateTime } from "luxon";
-import tzlookup from "tz-lookup";
 
 /** The prototype's original anchor — the default when a plan has no city,
  *  an unresolvable city, or is pre-multi-city (Toronto plans, all tests). */
 export const DEFAULT_ZONE = "America/Toronto";
-
-/** lat/lng → IANA zone via an OFFLINE lookup (tz-lookup, ~150KB, no API
- *  key, fits Vercel serverless). Never throws — bad coords fall back to
- *  the default zone so a zone lookup can't block a whole plan. */
-export function zoneFromLatLng(lat: number, lng: number): string {
-  try {
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return DEFAULT_ZONE;
-    return tzlookup(lat, lng);
-  } catch {
-    return DEFAULT_ZONE;
-  }
-}
 
 /** A known IANA zone name, else the default (guards persisted/user data). */
 export function normalizeZone(timeZone: string | undefined | null): string {

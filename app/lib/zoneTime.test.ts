@@ -11,19 +11,9 @@ import {
   normalizeZone,
   toZonedISO,
   wallClockParts,
-  zoneFromLatLng,
 } from "./zoneTime";
 
 const cases: Array<[string, () => void]> = [
-  [
-    "zoneFromLatLng: real cities, bad coords fall back to default",
-    () => {
-      assert.strictEqual(zoneFromLatLng(43.6547, -79.3862), "America/Toronto");
-      assert.strictEqual(zoneFromLatLng(49.2827, -123.1207), "America/Vancouver");
-      assert.strictEqual(zoneFromLatLng(51.5074, -0.1278), "Europe/London");
-      assert.strictEqual(zoneFromLatLng(NaN, NaN), DEFAULT_ZONE);
-    },
-  ],
   [
     "normalizeZone: junk → default, valid → itself",
     () => {

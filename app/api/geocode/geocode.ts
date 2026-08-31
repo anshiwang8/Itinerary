@@ -1,4 +1,4 @@
-import { zoneFromLatLng } from "../../lib/zoneTime";
+import { zoneFromLatLng } from "./zoneLookup";
 import {
   ApiError,
   REQUEST_LIMITS,

@@ -30,6 +30,7 @@ import {
   parseParsedPrompt,
   parseScheduledStops,
   parseTravelLegs,
+  reconcileStopTravelLegs,
   validateTravelIdentityTopology,
 } from "../_shared/schemas";
 
@@ -54,6 +55,7 @@ export async function POST(request: NextRequest) {
       [...(homeLeg ? [homeLeg] : []), ...legs],
       "homeLeg/legs"
     );
+    reconcileStopTravelLegs(stops, legs, homeLeg);
     const home: HomePoint | undefined = parseHomePoint(body.home);
     const timeZone = parseOptionalTimeZone(body.timeZone);
     // The end the user STATED, if they stated one. Optional on purpose: most

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
 import type { LatLng } from "../schedule/travel";
 import type { PathSegment, PlanTravelMode, TravelLeg } from "../schedule/travel";
@@ -10,7 +11,7 @@ import {
   isPlanTravelMode,
 } from "../schedule/travel";
 import type { ScheduledStop } from "../schedule/schedule";
-import type { HomePoint } from "../schedule/home";
+import { HOME_LEG_INDEX, type HomePoint } from "../schedule/home";
 import { normalizeStopCountSlots } from "../../lib/planSlots";
 import {
   REQUEST_LIMITS,
@@ -374,8 +375,60 @@ export function parseScheduledStops(value: unknown): ScheduledStop[] {
         }
       }
     }
-    return { ...(entry as unknown as ScheduledStop), id, category };
+    const stop = { ...(entry as unknown as ScheduledStop), id, category };
+    if (entry.travelToNext !== undefined) {
+      // This copy is later promoted by rebuildLegs. It must pass the SAME
+      // facts/identity checks and decorative-path sanitizer as top-level legs.
+      stop.travelToNext = parseTravelLegs(
+        [entry.travelToNext],
+        `stops[${index}].travelToNext`
+      )[0];
+    }
+    return stop;
   });
+}
+
+/** Reconcile validated copies before the first save. Like buildSchedule,
+ * fromIndex counts TIMED stops, not rows (empty picks occupy no leg index).
+ * Missing legs remain allowed. Facts must agree; decorative paths come from
+ * the top-level topology AFTER its home/inter-stop sanitization, so a path
+ * dropped there cannot return through a stop on the next rebuildLegs call.
+ * No identity is inferred or minted, including for all-absent legacy legs. */
+export function reconcileStopTravelLegs(
+  stops: ScheduledStop[],
+  legs: TravelLeg[],
+  homeLeg?: TravelLeg
+): void {
+  const timed = stops.filter((stop) => stop.start_time !== null);
+  if (homeLeg && (homeLeg.fromIndex !== HOME_LEG_INDEX || timed.length === 0)) {
+    badRequest("`homeLeg` must lead from home to the first timed stop.");
+  }
+  const byOrigin = new Map<number, TravelLeg>();
+  for (const leg of legs) {
+    if (leg.fromIndex < 0 || leg.fromIndex >= timed.length - 1) {
+      badRequest("`legs` must connect consecutive timed stops.");
+    }
+    if (byOrigin.has(leg.fromIndex)) {
+      badRequest("`legs` contains more than one leg from the same timed stop.");
+    }
+    byOrigin.set(leg.fromIndex, leg);
+  }
+
+  const facts = (leg: TravelLeg): Omit<TravelLeg, "pathSegments"> => {
+    const copy = { ...leg };
+    delete copy.pathSegments;
+    return copy;
+  };
+  let timedIndex = 0;
+  for (const [index, stop] of stops.entries()) {
+    const leg = stop.start_time === null ? undefined : byOrigin.get(timedIndex++);
+    if (stop.travelToNext && (!leg || !isDeepStrictEqual(facts(stop.travelToNext), facts(leg)))) {
+      badRequest(`\`stops[${index}].travelToNext\` must match its top-level leg.`);
+    }
+    // A missing compatibility copy can use the validated leg without guessing
+    // any facts. Reuse that exact object, including sanitized/omitted paths.
+    if (leg) stop.travelToNext = leg;
+  }
 }
 
 /** New ride identity is atomic: new facts carry all three values, while a
