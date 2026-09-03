@@ -19,6 +19,7 @@ import { travelLegVisible } from "./lib/travelLegVisibility";
 import { startCameraTween, type CameraPoint, type CameraTweenHandle } from "./lib/cameraTween";
 import type { YouMarkerView } from "./lib/youMarker";
 import type { ArrivalSample } from "./lib/arrivalDetection";
+import { roadHierarchyBand, roadHierarchyStyles } from "./lib/mapRoadHierarchy";
 
 /** `YouMarkerView` plus the "Last known 7:42 PM" label the caller formats in
  *  the plan's timezone (shown only while the fix is stale). */
@@ -100,6 +101,16 @@ const PAPER_STYLE: google.maps.MapTypeStyle[] = [
   { featureType: "administrative", elementType: "geometry", stylers: [{ visibility: "off" }] },
   { featureType: "water", elementType: "geometry", stylers: [{ color: "#bcdcea" }] },
 ];
+
+// Zoom-dependent road hierarchy (mobile map styling, Part B step 8): a
+// static MapTypeStyle array has no zoom field of its own, so genuine
+// zoom-dependence is achieved by listening to the map's own `zoom_changed`
+// and swapping which composed array is active — see mapRoadHierarchy.ts for
+// why this needs no Map ID. Road overrides are appended AFTER the base
+// array so they win for the feature/element pairs they touch.
+function mapStylesForZoom(zoom: number): google.maps.MapTypeStyle[] {
+  return [...PAPER_STYLE, ...roadHierarchyStyles(roadHierarchyBand(zoom))];
+}
 
 // Route lines: a deep teal that reads on the pale map. It is the fallback
 // when an agency does not publish a usable transit-line colour.
@@ -266,6 +277,10 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
   // its current position, via the map's own getCenter/getZoom) whenever a
   // new focus request arrives before the previous one finishes.
   const cameraTweenRef = useRef<CameraTweenHandle | null>(null);
+  // The road-hierarchy band actually applied to the map's styles, so the
+  // zoom_changed listener only calls setOptions on a genuine band CROSSING
+  // rather than on every zoom tick within the same band.
+  const roadBandRef = useRef<"high" | "low" | null>(null);
   const [, setTick] = useState(0);
   const [mapState, setMapState] = useState<"loading" | "ready" | "failed">("loading");
   const [retryCount, setRetryCount] = useState(0);
@@ -284,14 +299,30 @@ export default function ItineraryMap({ stops, home, selected, timeZone = "Americ
         const [maps] = await loadMapLibs();
         if (cancelled || !mapDivRef.current) return;
         if (!mapRef.current) {
+          const initialZoom = 14;
+          roadBandRef.current = roadHierarchyBand(initialZoom);
           mapRef.current = new maps.Map(mapDivRef.current, {
             center: { lat: 43.6497, lng: -79.4197 },
-            zoom: 14,
-            styles: PAPER_STYLE,
+            zoom: initialZoom,
+            styles: mapStylesForZoom(initialZoom),
             disableDefaultUI: true,
             gestureHandling: "greedy",
             backgroundColor: "#e9e6df",
             clickableIcons: false,
+          });
+          // Zoom-dependent road hierarchy: re-style ONLY on a band crossing
+          // (roadBandRef), not on every zoom_changed tick — fitBounds, the
+          // stop-focus tween and manual pinch/scroll all fire this the same
+          // way, so one listener covers every way the zoom can move.
+          mapRef.current.addListener("zoom_changed", () => {
+            const map = mapRef.current;
+            if (!map) return;
+            const zoom = map.getZoom();
+            if (zoom == null) return;
+            const band = roadHierarchyBand(zoom);
+            if (band === roadBandRef.current) return;
+            roadBandRef.current = band;
+            map.setOptions({ styles: mapStylesForZoom(zoom) });
           });
           // The chip-ease suppression must cover EVERY camera-changing source,
           // not just our own focus tween (which also sets the flag below, now

@@ -32,9 +32,15 @@ export async function planEvening(
   // default pipeline (same behavior these specs always exercised)
   await dismissClarifyIfShown(page);
 
-  // success renders the strip; failure renders an error block — wait for
-  // whichever comes first so failures are fast and carry the real reason
-  await expect(page.locator(".lstrip, .empty__err, .stage__err").first()).toBeVisible({
+  // success renders the strip (desktop) or the mobile sheet (mobile viewport
+  // widths, CSS-gated at max-width: 768px — see globals.css's .msheet rules);
+  // failure renders an error block. Wait for whichever comes first, and use
+  // Playwright's `:visible` so the CSS-hidden one of .lstrip/.msheet (both
+  // are always mounted; only one is ever visible per viewport) never wins
+  // `.first()` over the genuinely visible surface.
+  await expect(
+    page.locator(".lstrip:visible, .msheet:visible, .empty__err, .stage__err").first()
+  ).toBeVisible({
     timeout: 90_000,
   });
   const err = page.locator(".empty__err, .stage__err").first();
@@ -52,7 +58,9 @@ export async function planEvening(
  *  recovery panel's "Plan without it" shares .clarify__skip, and clicking
  *  THAT here would silently drop a stop mid-test. */
 export async function dismissClarifyIfShown(page: Page): Promise<void> {
-  const outcome = page.locator(".clarify, .lstrip, .empty__err, .stage__err").first();
+  const outcome = page
+    .locator(".clarify:visible, .lstrip:visible, .msheet:visible, .empty__err, .stage__err")
+    .first();
   await expect(outcome).toBeVisible({ timeout: 90_000 });
   const skip = page.getByRole("button", { name: "Skip, just plan it" });
   if (await skip.isVisible()) await skip.click();

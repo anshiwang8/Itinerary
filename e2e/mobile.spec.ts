@@ -194,25 +194,26 @@ for (const width of VIEWPORT_WIDTHS) {
       "weather and the primary replan bar must not overlap"
     ).toBeLessThanOrEqual(EDGE_TOLERANCE_PX);
 
-    const strip = page.locator(".lstrip");
-    await expect(strip).toBeVisible();
-    const stripOverflow = await strip.evaluate((element) => ({
-      clientWidth: element.clientWidth,
-      scrollWidth: element.scrollWidth,
-    }));
+    // On mobile the top ItineraryStrip is replaced by the bottom sheet
+    // (.msheet, CSS-gated at max-width: 768px in globals.css) — both
+    // components always mount, so this pins that exactly one is ever
+    // visible, never both, at every one of this file's widths.
+    await expect(page.locator(".lstrip")).toHaveCount(1);
+    await expect(page.locator(".lstrip")).not.toBeVisible();
+    const sheet = page.locator(".msheet");
+    await expect(sheet).toBeVisible();
+    // Starts at PEEK: a drag handle + one line, and — the whole point of a
+    // non-modal sheet — compact enough that most of the viewport (the map)
+    // stays visible around it, not covered.
+    await expect(sheet).toHaveClass(/msheet--peek/);
+    const peekBox = await rect(sheet);
     expect(
-      stripOverflow.scrollWidth,
-      "the itinerary should retain its intentional horizontal strip"
-    ).toBeGreaterThan(stripOverflow.clientWidth + EDGE_TOLERANCE_PX);
-
-    await strip.evaluate((element) => {
-      element.scrollLeft = 0;
-    });
-    await strip.hover();
-    await page.mouse.wheel(400, 0);
-    await expect
-      .poll(() => strip.evaluate((element) => element.scrollLeft))
-      .toBeGreaterThan(0);
+      peekBox.height,
+      "peek state should be compact, leaving the map visible above it"
+    ).toBeLessThan(viewport.height * 0.3);
+    await expect(page.locator(".msheet__grip")).toBeVisible();
+    await expect(page.locator(".msheet__peekname")).toBeVisible();
+    await expectWithinViewport(sheet, viewport, "mobile sheet (peek)");
 
     // These are the visible primary actions on the planned stage. Dev-only
     // controls are intentionally excluded: Batch I gates them separately.
@@ -225,6 +226,7 @@ for (const width of VIEWPORT_WIDTHS) {
         ".mapfallback button",
         '.lstrip button:not([aria-hidden="true"])',
         '.lstrip [role="button"]',
+        ".msheet__draghandle",
       ].join(", ")
     );
     const targetCount = await primaryTargets.count();

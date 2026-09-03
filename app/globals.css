@@ -59,6 +59,15 @@
 
   --shadow-card: 0 6px 20px rgba(30, 58, 76, 0.09);
   --shadow-lift: 0 12px 30px rgba(30, 58, 76, 0.15);
+  /* "elevation": a tight contact shadow (reads as the dot sitting just above
+     the map surface) plus a softer ambient blur underneath it — two layers
+     rather than one, the way a real cast shadow has a hard core and a soft
+     penumbra. Paint-only: never referenced by anything positional, so it
+     cannot move a marker's anchor (see the marker-anchor invariant). */
+  --shadow-marker: 0 1px 2px rgba(30, 58, 76, 0.38), 0 4px 10px rgba(30, 58, 76, 0.22);
+  /* the mobile bottom sheet's top-edge shadow — it needs to read as sitting
+     ABOVE the map, so the blur sits on the upward side only */
+  --shadow-sheet: 0 -6px 24px rgba(30, 58, 76, 0.18);
 }
 
 html, body { height: 100%; }
@@ -346,7 +355,7 @@ button { font-family: var(--grot); cursor: pointer; }
 .mk__dot {
   width: 15px; height: 15px; border-radius: 50%;
   background: var(--accent-deep); border: 2.5px solid #FFFFFF;
-  box-shadow: 0 1px 5px rgba(30,58,76,0.30);
+  box-shadow: var(--shadow-marker);
   transition: background 0.5s ease, transform 0.5s ease, box-shadow 0.5s ease;
 }
 .mk--home .mk__dot {
@@ -939,6 +948,183 @@ button { font-family: var(--grot); cursor: pointer; }
 .lstrip__walkwarning {
   font-family: var(--grot); font-size: 11px; font-weight: 500; line-height: 1.35;
   color: var(--ink); margin-top: 6px;
+}
+
+/* ─── Mobile bottom sheet — the .lstrip's mobile-only replacement ───
+   Hidden by default (desktop keeps the top strip); shown, and .lstrip
+   hidden, under the max-width: 768px breakpoint below — matching the width
+   mobile.spec.ts already treats as one "mobile" bucket (320/375/390/768).
+   Height is driven by MobileItinerarySheet.tsx as an inline `height` style
+   in px (peek/half/full, or a live drag value) — see app/lib/bottomSheet.ts
+   for the math. CSS only owns the resting-state transition, the two
+   background layers' crossfade, and the three content panels' own layout. */
+.msheet {
+  display: none;
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  flex-direction: column;
+  border-radius: 20px 20px 0 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  box-shadow: var(--shadow-sheet);
+  /* keeps the peek/half content clear of a home-indicator device; see the
+     dvh/safe-area note in bottomSheet.ts (resolveSheetHeights already adds
+     this same inset to the peek height in JS, so this padding sits INSIDE
+     that height rather than shrinking the usable content area). */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  /* vh first as the fallback, dvh second so a browser that understands it
+     overrides — dvh tracks Mobile Safari's live (address-bar-aware)
+     viewport, vh does not. JS also clamps the fraction-based snap heights,
+     so this is a belt-and-suspenders ceiling, not the primary bound. */
+  max-height: 92vh;
+  max-height: 92dvh;
+  transition: height 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+}
+/* while a finger is down the height must track 1:1 with the touch, never
+   eased — the drag handler sets `height` every touchmove */
+.msheet--dragging { transition: none; }
+
+.msheet__bg { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+/* peek + half: frosted glass, so the map reads through underneath */
+.msheet__bg--frost {
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+/* full: solid, matching the desktop strip's own card background — opacity is
+   set inline per render from backgroundOpacityFor(), fading in only across
+   the half->full range (see bottomSheet.ts) */
+.msheet__bg--opaque {
+  background: var(--card);
+  opacity: 0;
+  transition: opacity 0.32s ease;
+}
+.msheet--dragging .msheet__bg--opaque { transition: none; }
+
+/* The vertical drag-to-resize surface. Deliberately the ONLY element with
+   touch-action: none — setting that on `.msheet` itself would intersect
+   with every descendant's own touch-action (the used value is the most
+   restrictive across the ancestor chain), which would silently break the
+   carousel's horizontal scroll and the full list's vertical scroll too. */
+.msheet__draghandle {
+  position: relative; z-index: 1; flex: 0 0 auto;
+  display: flex; flex-direction: column; align-items: center;
+  /* min-height keeps the grip-only zone (half/full states) at the app's own
+     44px target floor even though the visible grip bar is 4px tall — the
+     WHOLE handle div carries the touch listeners, not just the grip span */
+  min-height: 44px; justify-content: center;
+  padding: 8px 0 6px;
+  touch-action: none;
+}
+.msheet__grip {
+  width: 36px; height: 4px; border-radius: 2px;
+  background: var(--rule-strong);
+}
+
+/* ── PEEK: one line, current/next stop ── */
+.msheet__peek {
+  position: relative; z-index: 1; flex: 1 1 auto; min-height: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 18px 12px; font-family: var(--grot);
+}
+.msheet__peekicon { flex: 0 0 auto; width: 20px; height: 20px; fill: var(--accent); }
+.msheet__peekbody { flex: 1 1 auto; min-width: 0; }
+.msheet__peekname {
+  font-family: var(--disp); font-weight: 600; font-size: 16px; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.msheet__peekwhen { font-size: 12px; color: var(--ink-soft); margin-top: 1px; }
+.msheet__peeknow {
+  flex: 0 0 auto;
+  font-family: var(--grot); font-size: 10px; font-weight: 500; letter-spacing: 0.1em;
+  text-transform: uppercase; background: var(--live); color: var(--ink);
+  padding: 2px 8px; border-radius: 20px;
+}
+
+/* ── HALF: swipeable horizontal carousel, transit-page/stop-page alternating ── */
+.msheet__half {
+  position: relative; z-index: 1; flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+}
+.msheet__track {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; align-items: stretch; gap: 12px;
+  overflow-x: auto; overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
+  /* side padding = half the gap left over by an 82%-wide page, so the
+     FIRST and LAST pages can still scroll-snap to dead centre, with the
+     next page's edge bleeding in on the far side */
+  padding: 2px 9% 14px;
+  scrollbar-width: none;
+}
+.msheet__track::-webkit-scrollbar { display: none; }
+.msheet__page {
+  flex: 0 0 82%;
+  scroll-snap-align: center;
+  background: var(--card); border: 1px solid var(--rule); border-radius: 16px;
+  box-shadow: var(--shadow-card);
+  display: flex; flex-direction: column; justify-content: center;
+  overflow: hidden;
+}
+.msheet__page--leg {
+  flex-basis: 58%;
+  background: var(--card-2);
+}
+.msheet__pageselect {
+  display: block; width: 100%; min-height: 44px; border: 0; padding: 14px 16px;
+  background: transparent; color: inherit; text-align: left; font-family: var(--grot);
+}
+.msheet__stophead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.msheet__pagename {
+  display: block;
+  font-family: var(--disp); font-weight: 600; font-size: 18px; line-height: 1.15;
+  color: var(--ink); margin-bottom: 4px;
+}
+
+/* ── FULL: vertical list, tap-to-select, transit rows visually distinct ── */
+.msheet__full {
+  position: relative; z-index: 1; flex: 1 1 auto; min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  padding: 2px 16px 14px;
+}
+.msheet__row {
+  display: flex; width: 100%; align-items: center; gap: 12px;
+  min-height: 44px; padding: 11px 6px;
+  border: 0; border-bottom: 1px solid var(--rule); border-radius: 10px;
+  background: transparent; text-align: left; font-family: var(--grot);
+}
+.msheet__row--sel { background: var(--accent-soft); }
+.msheet__rowbody { flex: 1 1 auto; min-width: 0; }
+.msheet__rowname {
+  font-family: var(--disp); font-weight: 600; font-size: 15px; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.msheet__rowwhen { font-size: 11.5px; color: var(--ink-soft); margin-top: 1px; }
+/* the transit row: a compact, visibly non-destination pill BETWEEN two stop
+   rows — dashed border + muted pill shape, so at a glance it reads as
+   "travel", never as a place you're going */
+.msheet__legrow {
+  display: flex; align-items: center; gap: 8px;
+  margin: 2px 6px 2px 34px; padding: 6px 12px;
+  border: 1px dashed var(--rule-strong); border-radius: 999px;
+  background: var(--paper-2);
+  font-family: var(--grot); font-size: 11.5px; color: var(--ink-soft);
+}
+.msheet__legrow svg { width: 13px; height: 13px; fill: var(--ink-soft); flex: 0 0 auto; }
+
+/* shared stop-facts row (rating/price), reused across peek/half/full at a
+   consistent small scale */
+.msheet__facts {
+  display: flex; gap: 8px; align-items: center; margin-top: 4px;
+  font-family: var(--grot); font-size: 11.5px; color: var(--ink-soft);
+}
+
+@media (max-width: 768px) {
+  .lstrip { display: none; }
+  .msheet { display: flex; }
 }
 
 /* ─── Weather chip — ambient, tucked in a corner ─── */
@@ -1767,6 +1953,10 @@ button { font-family: var(--grot); cursor: pointer; }
      position, the same "no ticker, correct as of last render" contract the
      rest of the app already keeps. */
   .lstrip__triangle { animation: none !important; }
+  /* The sheet still SNAPS to the target state — same contract as the
+     banner's fade above: the height jumps straight to its resting value
+     instead of easing there, and the background crossfade jumps too. */
+  .msheet, .msheet__bg--opaque { transition: none !important; }
   .auth, .auth__card { animation: none !important; }
   .acct__signin, .auth__google, .auth__guest { transition: none !important; }
   .acctmenu__pop { animation: none !important; }

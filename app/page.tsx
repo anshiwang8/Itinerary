@@ -95,6 +95,7 @@ import ItineraryStrip, {
   StripStop,
   TransitIcon,
 } from "./ItineraryStrip";
+import MobileItinerarySheet from "./MobileItinerarySheet";
 import {
   automaticTravelLegId,
   hasLegacyTransitLeg,
@@ -3455,6 +3456,20 @@ export default function Home() {
           // drift.
           canRemove: canSwap,
         }}
+      />
+
+      {/* Mobile-only replacement for the strip above (CSS-gated at
+          max-width: 768px in globals.css — both components mount here
+          unconditionally, exactly one is ever visible). Reuses the SAME
+          stripHome/stripStops/selected/displayZone values, no new data
+          plumbing. Swap/remove and the transit-leg timeline are intentionally
+          not reachable from this surface yet — see MobileItinerarySheet.tsx. */}
+      <MobileItinerarySheet
+        home={stripHome}
+        stops={stripStops}
+        selected={selected}
+        timeZone={displayZone}
+        onSelect={selectAndFocusStop}
       />
 
       <form
