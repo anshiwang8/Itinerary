@@ -8,12 +8,7 @@ export const metadata: Metadata = {
   description: "Plan your day, weather included.",
 };
 
-// `viewportFit: "cover"` is required for `env(safe-area-inset-bottom)` to
-// resolve to anything other than 0 on iOS — without it the mobile bottom
-// sheet's peek content would sit flush under a notched device's home
-// indicator (see MobileItinerarySheet.tsx's readSafeAreaBottomPx and the
-// .msheet padding-bottom in globals.css). No other effect: on every other
-// device this is a no-op.
+
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,

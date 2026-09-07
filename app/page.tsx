@@ -3126,9 +3126,10 @@ export default function Home() {
   if (!itinerary) {
     return (
       <main className="empty">
-        {/* decorative sky layers — the horizon curve and reflection band
-            live in CSS (.empty::before/::after); this is the wordmark glow */}
-        <div className="empty__glow" aria-hidden="true" />
+        {/* The full-bleed background photo (a placeholder gradient for now)
+            and the bottom-heavy dark scrim are both fixed CSS layers on
+            .empty::before / .empty::after. The content below sits above
+            them. */}
         <div className="empty__mark" aria-hidden="true">Itinerary</div>
         {/* Account corner — mirrors the wordmark across the hero. It is an
             ENTRY POINT, never a gate: the app has always worked with no
