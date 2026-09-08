@@ -9,7 +9,7 @@ import { test, expect } from "./test";
 // simAt: a datetime-local value on the PLAN's day — shared with the other
 // specs that drive the dev time-sim input (it moved to helpers.ts when the
 // fixture spec needed the same clock).
-import { planEvening, simAt, stripCard, swapOn, expectStripMatchesPin } from "./helpers";
+import { planEvening, simAt, stripCard, swapOn, expectStripMatchesPin, expandDesktopItinerary } from "./helpers";
 
 test("price refresh: a 'cheaper' swap moves the dollar signs $$$ → $$ @mock", async ({ page }) => {
   await planEvening(page, "dinner and drinks");
@@ -161,6 +161,7 @@ test("vague-but-sincere prompt: clarify shows, answering lands a general itinera
 
   // the general "things to do" pool serves the itinerary — a real plan,
   // not an error, and not food-biased (the fixture general pool)
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
   await expect(stripCard(page, "Fixture General One")).toBeVisible();
   await expectStripMatchesPin(page, "Fixture General One");
@@ -185,6 +186,7 @@ test("an exact stop count produces every stop, whether or not the kind is answer
 
   // SKIPPING still plans — three stops from the general pool
   await clarify.locator(".clarify__skip").click();
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
   const skipped = await page.locator(".lstrip__stop .lstrip__name").allInnerTexts();
   expect(skipped).toHaveLength(3);
@@ -198,6 +200,7 @@ test("an exact stop count produces every stop, whether or not the kind is answer
   await clarify.getByRole("button", { name: "something to do", exact: true }).click();
   await clarify.getByRole("button", { name: "Go", exact: true }).click();
 
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
   const answered = await page.locator(".lstrip__stop .lstrip__name").allInnerTexts();
   expect(answered).toHaveLength(3);
@@ -218,6 +221,7 @@ test("clarify: the KIND answer steers the plan, and repeated answers don't leak 
   await clarify.getByRole("button", { name: "Go", exact: true }).click();
 
   // "drinks" → the bar pool, NOT the general fixture pool
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator(".lstrip__stop .eyebrow").first()).toHaveText(/drinks|bar/i);
   await expect(stripCard(page, "Fixture General One")).toHaveCount(0);
@@ -493,6 +497,7 @@ test.describe("@mock generic-category clarify", () => {
     await clarify.getByRole("button", { name: "Italian", exact: true }).click();
     await clarify.getByRole("button", { name: "Go", exact: true }).click();
 
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     // the answer folded onto the category: the stop's eyebrow carries it
     // (cuisine is a PREFIX — "Italian dinner" is still a dinner, so the
@@ -509,6 +514,7 @@ test.describe("@mock generic-category clarify", () => {
     await page.locator(".prompt__go").click();
 
     // the plan lands without the clarify step ever appearing
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".clarify")).toHaveCount(0);
     await expect(page.locator(".lstrip__stop .eyebrow").first()).toHaveText(/sushi/i);
@@ -613,6 +619,7 @@ test("'right away' plans TONIGHT's next full hour, never tomorrow @mock", async 
   await expect(clarify).not.toContainText("When?");
   await page.getByRole("button", { name: "Skip, just plan it" }).click();
 
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
   const be = page.locator(".lstrip__stop .lstrip__be").first();
   // TONIGHT: leave home at the 22:00 slot, arrive within the 10 PM hour

@@ -190,6 +190,10 @@ for (const width of VIEWPORT_WIDTHS) {
     await expect(topbar).toBeVisible();
     await expect(weather).toBeVisible();
     expect(
+      (await rect(weather)).height,
+      "weather remains a compact pill when repositioned below mobile controls"
+    ).toBeLessThanOrEqual(48);
+    expect(
       intersectionArea(await rect(topbar), await rect(weather)),
       "weather and the primary replan bar must not overlap"
     ).toBeLessThanOrEqual(EDGE_TOLERANCE_PX);
@@ -207,13 +211,23 @@ for (const width of VIEWPORT_WIDTHS) {
     // stays visible around it, not covered.
     await expect(sheet).toHaveClass(/msheet--peek/);
     const peekBox = await rect(sheet);
+    // The compositor shell extends below the viewport so its transform can
+    // carry every snap without relaying out the sheet on every touchmove.
+    // Only its visible slice is the peek surface the user can see or touch.
+    const visiblePeekHeight = Math.max(
+      0,
+      Math.min(peekBox.bottom, viewport.height) - Math.max(peekBox.y, 0)
+    );
     expect(
-      peekBox.height,
+      visiblePeekHeight,
       "peek state should be compact, leaving the map visible above it"
     ).toBeLessThan(viewport.height * 0.3);
+    expect(visiblePeekHeight, "the peek surface should remain on screen").toBeGreaterThan(0);
     await expect(page.locator(".msheet__grip")).toBeVisible();
     await expect(page.locator(".msheet__peekname")).toBeVisible();
-    await expectWithinViewport(sheet, viewport, "mobile sheet (peek)");
+    expect(peekBox.x, "peek left edge").toBeGreaterThanOrEqual(-EDGE_TOLERANCE_PX);
+    expect(peekBox.right, "peek right edge").toBeLessThanOrEqual(viewport.width + EDGE_TOLERANCE_PX);
+    expect(peekBox.y, "peek top edge").toBeGreaterThanOrEqual(-EDGE_TOLERANCE_PX);
 
     // These are the visible primary actions on the planned stage. Dev-only
     // controls are intentionally excluded: Batch I gates them separately.

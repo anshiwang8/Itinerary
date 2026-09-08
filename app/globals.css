@@ -135,7 +135,8 @@ button { font-family: var(--grot); cursor: pointer; }
   min-height: 100vh;
   min-height: 100dvh;
   display: flex; flex-direction: column; align-items: center;
-  /* bottom-heavy: the hero block and card ride low over the scrim. When the
+  /* Mobile/default placement; uiLayout.css centres the desktop group.
+     The hero block and card ride low over the scrim. When the
      content is taller than the viewport (a recovery panel, a long error)
      the column simply grows and the page scrolls, so the top stays
      reachable — .empty is deliberately NOT a scroll container. */
@@ -1015,10 +1016,9 @@ button { font-family: var(--grot); cursor: pointer; }
    Hidden by default (desktop keeps the top strip); shown, and .lstrip
    hidden, under the max-width: 768px breakpoint below — matching the width
    mobile.spec.ts already treats as one "mobile" bucket (320/375/390/768).
-   Height is driven by MobileItinerarySheet.tsx as an inline `height` style
-   in px (peek/half/full, or a live drag value) — see app/lib/bottomSheet.ts
-   for the math. CSS only owns the resting-state transition, the two
-   background layers' crossfade, and the three content panels' own layout. */
+   These are base styles. mobileItinerary.css supplies the approved views
+   and transform transition; MobileItinerarySheet.tsx paints live motion
+   and sizes the settled content viewport with app/lib/bottomSheet.ts. */
 .msheet {
   display: none;
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
@@ -1040,8 +1040,8 @@ button { font-family: var(--grot); cursor: pointer; }
   max-height: 92dvh;
   transition: height 0.32s cubic-bezier(0.32, 0.72, 0, 1);
 }
-/* while a finger is down the height must track 1:1 with the touch, never
-   eased — the drag handler sets `height` every touchmove */
+/* Legacy base layout below; mobileItinerary.css supplies transform motion
+   and content sizing. A drag follows the finger without CSS easing. */
 .msheet--dragging { transition: none; }
 
 .msheet__bg { position: absolute; inset: 0; z-index: 0; pointer-events: none; }

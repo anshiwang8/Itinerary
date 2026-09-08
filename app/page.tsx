@@ -3418,6 +3418,99 @@ export default function Home() {
       )}
 
       <ItineraryStrip
+        controls={
+          <form
+            className="topbar"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void runPipeline();
+            }}
+          >
+            <span className="topbar__mark">Itinerary</span>
+            <span className="topbar__rule" aria-hidden="true" />
+            <input
+              className="topbar__input"
+              disabled={busy}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              aria-label="Describe your evening"
+            />
+            {/* HOW THIS PLAN TRAVELS — the same radiogroup the landing pill
+                carries, so the control the user chose the mode with is the
+                control they change it with. It shows the CURRENT mode (the
+                checked half) before it offers the other, because a switch you
+                cannot see the starting point of is a guess.
+
+                type="button" is load-bearing: these sit inside the replan form,
+                where a default submit would replan instead of switch. */}
+            <div
+              className="topbar__mode"
+              role="radiogroup"
+              aria-label="How this plan gets around"
+              aria-busy={switchingMode !== null}
+            >
+              {(["transit", "driving"] as const).map((mode) => {
+                const current = (itinerary.travelMode ?? "transit") === mode;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="radio"
+                    className={
+                      "topbar__modeopt" +
+                      (current ? " topbar__modeopt--on" : "") +
+                      (switchingMode === mode ? " topbar__modeopt--pending" : "")
+                    }
+                    aria-checked={current}
+                    // Both halves go down together: the request is in flight and
+                    // the plan it would act on is the one being rewritten.
+                    disabled={busy || switchingMode !== null}
+                    title={
+                      current
+                        ? `This plan gets around by ${mode === "driving" ? "driving" : "transit"}`
+                        : `Switch this plan to ${mode === "driving" ? "driving" : "transit"}: every stop stays, the times re-route`
+                    }
+                    onClick={() => void doModeSwitch(mode)}
+                  >
+                    {/* The glyph the plan's own legs are drawn with, so the
+                        control and the route say the same thing. It carries the
+                        label alone at narrow widths, where the words do not
+                        fit beside Replan and End — the accessible name comes
+                        from the text span, which stays in the DOM. */}
+                    <TransitIcon mode={mode === "driving" ? "driving" : "transit"} />
+                    <span className="topbar__modetext">
+                      {mode === "transit" ? "Transit" : "Drive"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {switchingMode
+                ? `Re-routing your plan for ${switchingMode === "driving" ? "driving" : "transit"}…`
+                : ""}
+            </span>
+            <button type="submit" className="topbar__go" disabled={busy || !prompt.trim()}>
+              {busy ? "…" : "Replan"}
+            </button>
+            {/* Ending is a real outcome, not a destructive edge case, so it sits
+                beside Replan rather than hidden in a menu — but styled quieter,
+                because it is the rarer of the two. type="button" is load-bearing:
+                inside this form a default submit would replan instead. */}
+            <button
+              type="button"
+              className="topbar__stop"
+              disabled={busy}
+              onClick={() => {
+                if (activeOperation.current) return;
+                setStopError(null);
+                setStopOpen(true);
+              }}
+            >
+              End
+            </button>
+          </form>
+        }
         home={stripHome}
         stops={stripStops}
         selected={selected}
@@ -3463,107 +3556,19 @@ export default function Home() {
           max-width: 768px in globals.css — both components mount here
           unconditionally, exactly one is ever visible). Reuses the SAME
           stripHome/stripStops/selected/displayZone values, no new data
-          plumbing. Swap/remove and the transit-leg timeline are intentionally
-          not reachable from this surface yet — see MobileItinerarySheet.tsx. */}
+          plumbing. Editing stays on desktop; mobile shares the guarded
+          transit timeline and the active/arrived stop presentation. */}
       <MobileItinerarySheet
         home={stripHome}
         stops={stripStops}
         selected={selected}
         timeZone={displayZone}
+        now={displayNow}
+        arrivedStopId={arrivedStopId}
         onSelect={selectAndFocusStop}
       />
 
-      <form
-        className="topbar"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void runPipeline();
-        }}
-      >
-        <span className="topbar__mark">Itinerary</span>
-        <span className="topbar__rule" aria-hidden="true" />
-        <input
-          className="topbar__input"
-          disabled={busy}
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          aria-label="Describe your evening"
-        />
-        {/* HOW THIS PLAN TRAVELS — the same radiogroup the landing pill
-            carries, so the control the user chose the mode with is the
-            control they change it with. It shows the CURRENT mode (the
-            checked half) before it offers the other, because a switch you
-            cannot see the starting point of is a guess.
 
-            type="button" is load-bearing: these sit inside the replan form,
-            where a default submit would replan instead of switch. */}
-        <div
-          className="topbar__mode"
-          role="radiogroup"
-          aria-label="How this plan gets around"
-          aria-busy={switchingMode !== null}
-        >
-          {(["transit", "driving"] as const).map((mode) => {
-            const current = (itinerary.travelMode ?? "transit") === mode;
-            return (
-              <button
-                key={mode}
-                type="button"
-                role="radio"
-                className={
-                  "topbar__modeopt" +
-                  (current ? " topbar__modeopt--on" : "") +
-                  (switchingMode === mode ? " topbar__modeopt--pending" : "")
-                }
-                aria-checked={current}
-                // Both halves go down together: the request is in flight and
-                // the plan it would act on is the one being rewritten.
-                disabled={busy || switchingMode !== null}
-                title={
-                  current
-                    ? `This plan gets around by ${mode === "driving" ? "driving" : "transit"}`
-                    : `Switch this plan to ${mode === "driving" ? "driving" : "transit"}: every stop stays, the times re-route`
-                }
-                onClick={() => void doModeSwitch(mode)}
-              >
-                {/* The glyph the plan's own legs are drawn with, so the
-                    control and the route say the same thing. It carries the
-                    label alone at narrow widths, where the words do not
-                    fit beside Replan and End — the accessible name comes
-                    from the text span, which stays in the DOM. */}
-                <TransitIcon mode={mode === "driving" ? "driving" : "transit"} />
-                <span className="topbar__modetext">
-                  {mode === "transit" ? "Transit" : "Drive"}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {switchingMode
-            ? `Re-routing your plan for ${switchingMode === "driving" ? "driving" : "transit"}…`
-            : ""}
-        </span>
-        <button type="submit" className="topbar__go" disabled={busy || !prompt.trim()}>
-          {busy ? "…" : "Replan"}
-        </button>
-        {/* Ending is a real outcome, not a destructive edge case, so it sits
-            beside Replan rather than hidden in a menu — but styled quieter,
-            because it is the rarer of the two. type="button" is load-bearing:
-            inside this form a default submit would replan instead. */}
-        <button
-          type="button"
-          className="topbar__stop"
-          disabled={busy}
-          onClick={() => {
-            if (activeOperation.current) return;
-            setStopError(null);
-            setStopOpen(true);
-          }}
-        >
-          End
-        </button>
-      </form>
 
       {stopOpen && (
         <StopItineraryDialog

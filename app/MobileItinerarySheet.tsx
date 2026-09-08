@@ -1,446 +1,270 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { formatStopRange, formatStopTime } from "./lib/timeLabels";
-import { TransitIcon, type StripHome, type StripLeg, type StripStop } from "./ItineraryStrip";
-import { buildSheetEntries, pickPeekStop, type SheetEntry } from "./lib/mobileSheetLayout";
-import {
-  backgroundOpacityFor,
-  clampDragHeight,
-  contentStateFor,
-  resolveSheetHeights,
-  resolveSnapTarget,
-  sheetHeightFor,
-  type SheetHeights,
-  type SheetSnap,
-} from "./lib/bottomSheet";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import type { StripHome, StripStop } from "./ItineraryStrip";
+import { FullRow, HalfPage, PeekLine } from "./MobileSheetContent";
+import { buildSheetEntries, pickPeekStop } from "./lib/mobileSheetLayout";
+import { backgroundOpacityFor, clampDragHeight, resolveSheetHeights, resolveSnapTarget, sheetReleaseVelocity, SNAP_ORDER, type SheetSnap } from "./lib/bottomSheet";
+import { DEFAULT_ZONE } from "./lib/zoneTime";
 
-// The mobile-only replacement for the top ItineraryStrip (desktop keeps that
-// component completely unchanged — see globals.css's `.msheet`/`.lstrip`
-// rules under the max-width: 768px breakpoint, which is the ONLY thing that
-// decides which one is visible). This component receives the exact same
-// home/stops/selected/now/arrivedStopId values page.tsx already computes for
-// ItineraryStrip — no new data plumbing, no re-fetching.
-//
-// Scope note: unlike the desktop strip, this component does not render the
-// swap/remove inline forms or the expandable transit board/alight timeline —
-// neither was in the task's reuse list (selected stop, active/live status,
-// the "now" indicator, transit segment data), and the transit-leg spec here
-// asks for "compact strips", not the desktop's full timeline disclosure.
-// Editing a stop from the sheet is a deliberate follow-up, not a gap.
+const MOTION_MS = 280;
+const SURFACE_EXTENSION = 80;
+const INITIAL_GEOMETRY = { heights: resolveSheetHeights(800, 0, 144), viewportBottom: 800, bottomInset: 0, safeArea: 0 };
 
-const FALLBACK_VIEWPORT_HEIGHT_PX = 800;
-
-const PRICE_LABEL: Record<string, string> = {
-  PRICE_LEVEL_INEXPENSIVE: "$",
-  PRICE_LEVEL_MODERATE: "$$",
-  PRICE_LEVEL_EXPENSIVE: "$$$",
-  PRICE_LEVEL_VERY_EXPENSIVE: "$$$$",
-};
-
-/** Reads the device's actual safe-area-inset-bottom in px. A common, minimal
- *  DOM-probe technique: `env()` only resolves inside real CSS, so a
- *  throwaway element applies it and getComputedStyle reads the resolved
- *  pixel value back. 0 on every non-notched device and in any environment
- *  without `viewport-fit=cover` (see app/layout.tsx's `viewport` export). */
-function readSafeAreaBottomPx(): number {
-  if (typeof document === "undefined") return 0;
+function readSafeAreaBottom(): number {
   const probe = document.createElement("div");
-  probe.style.position = "absolute";
-  probe.style.visibility = "hidden";
-  probe.style.paddingBottom = "env(safe-area-inset-bottom, 0px)";
+  probe.style.cssText = "position:absolute;visibility:hidden;padding-bottom:env(safe-area-inset-bottom,0px)";
   document.body.appendChild(probe);
   const value = Number.parseFloat(getComputedStyle(probe).paddingBottom) || 0;
-  document.body.removeChild(probe);
+  probe.remove();
   return value;
 }
 
-/** The live/dynamic viewport height — visualViewport tracks Mobile Safari's
- *  address-bar-aware height (the JS analogue of CSS's `dvh`); innerHeight is
- *  the fallback for browsers without it. */
-function readViewportHeightPx(): number {
-  if (typeof window === "undefined") return FALLBACK_VIEWPORT_HEIGHT_PX;
-  return window.visualViewport?.height ?? window.innerHeight;
-}
-
-function legSummaryText(leg: StripLeg): string {
-  if (leg.mode === "walk") return "Walk";
-  if (leg.mode === "driving") return "Drive";
-  if (leg.mode === "unknown") return "Travel time unavailable";
-  return leg.lineName ?? "Transit";
-}
-
-function StopFacts({ stop }: { stop: StripStop }) {
-  const price = stop.price ? PRICE_LABEL[stop.price] ?? null : null;
-  if (stop.rating == null && !price) return null;
-  return (
-    <span className="msheet__facts">
-      {stop.rating != null && <span>★ {stop.rating.toFixed(1)}</span>}
-      {price && <span>{price}</span>}
-    </span>
-  );
-}
-
-function LegSummary({ leg, timeZone }: { leg: StripLeg; timeZone: string }) {
-  return (
-    <>
-      <TransitIcon mode={leg.mode} />
-      <span>{legSummaryText(leg)}</span>
-      <span>· {leg.totalMinutes} min</span>
-      {leg.leaveISO && (
-        <span>· leave {formatStopTime(leg.leaveISO, new Date(), timeZone)}</span>
-      )}
-    </>
-  );
-}
-
-function PeekLine({
-  stop,
-  timeZone,
-}: {
-  stop: StripStop;
-  timeZone: string;
-}) {
-  return (
-    <div className="msheet__peek">
-      <svg className="msheet__peekicon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 21s-7-6.2-7-11.6A7 7 0 0 1 19 9.4C19 14.8 12 21 12 21zm0-9.4a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4z" />
-      </svg>
-      <span className="msheet__peekbody">
-        <span className="msheet__peekname">{stop.name}</span>
-        {stop.start && stop.end && (
-          <span className="msheet__peekwhen">
-            {formatStopRange(stop.start, stop.end, new Date(), timeZone)}
-          </span>
-        )}
-      </span>
-      {stop.status === "active" && <span className="msheet__peeknow">now</span>}
-    </div>
-  );
-}
-
-function HalfPage({
-  entry,
-  selected,
-  onSelect,
-  timeZone,
-}: {
-  entry: SheetEntry;
-  selected: string | null;
-  onSelect: (stopId: string) => void;
-  timeZone: string;
-}) {
-  if (entry.kind === "home") {
-    return (
-      <div className="msheet__page msheet__page--leg">
-        <div className="eyebrow">home</div>
-        <div className="msheet__rowname">{entry.home.label}</div>
-        {entry.home.leaveBy && (
-          <span className="msheet__peekwhen">leave by {entry.home.leaveBy}</span>
-        )}
-      </div>
-    );
-  }
-  if (entry.kind === "leg") {
-    return (
-      <div className="msheet__page msheet__page--leg">
-        <LegSummary leg={entry.leg} timeZone={timeZone} />
-      </div>
-    );
-  }
-  const stop = entry.stop;
-  return (
-    <div className="msheet__page">
-      <button
-        type="button"
-        className="msheet__pageselect"
-        aria-pressed={selected === stop.id}
-        onClick={() => onSelect(stop.id)}
-      >
-        <span className="msheet__stophead">
-          <span className="eyebrow">{stop.category}</span>
-          {stop.status === "active" && <span className="msheet__peeknow">now</span>}
-        </span>
-        <span className="msheet__pagename">{stop.name}</span>
-        {stop.start && stop.end && (
-          <span className="msheet__peekwhen">
-            be here {formatStopRange(stop.start, stop.end, new Date(), timeZone)}
-          </span>
-        )}
-        <StopFacts stop={stop} />
-      </button>
-    </div>
-  );
-}
-
-function FullRow({
-  entry,
-  selected,
-  onSelect,
-  timeZone,
-}: {
-  entry: SheetEntry;
-  selected: string | null;
-  onSelect: (stopId: string) => void;
-  timeZone: string;
-}) {
-  if (entry.kind === "home") {
-    return (
-      <div className="msheet__row">
-        <span className="msheet__rowbody">
-          <span className="eyebrow">home</span>
-          <span className="msheet__rowname">{entry.home.label}</span>
-        </span>
-      </div>
-    );
-  }
-  if (entry.kind === "leg") {
-    return (
-      <div className="msheet__legrow">
-        <LegSummary leg={entry.leg} timeZone={timeZone} />
-      </div>
-    );
-  }
-  const stop = entry.stop;
-  const isSel = selected === stop.id;
-  return (
-    <button
-      type="button"
-      className={"msheet__row" + (isSel ? " msheet__row--sel" : "")}
-      aria-pressed={isSel}
-      onClick={() => onSelect(stop.id)}
-    >
-      <span className="msheet__rowbody">
-        <span className="eyebrow">
-          {stop.category}
-          {stop.status === "active" ? " · now" : ""}
-        </span>
-        <span className="msheet__rowname">{stop.name}</span>
-        {stop.start && stop.end && (
-          <span className="msheet__rowwhen">
-            {formatStopRange(stop.start, stop.end, new Date(), timeZone)}
-          </span>
-        )}
-      </span>
-    </button>
-  );
-}
-
-export interface MobileItinerarySheetProps {
-  home?: StripHome | null;
+/** Only the grip owns sheet dragging. Content keeps native scrolling; the map
+ *  keeps its own gestures. Both layouts stay mounted so their scroll survives. */
+export default function MobileItinerarySheet({ home, stops, selected, onSelect, timeZone = DEFAULT_ZONE, now, arrivedStopId }: {
+  home: StripHome | null;
   stops: StripStop[];
   selected: string | null;
-  /** selects by VENUE ID — same contract as ItineraryStrip's onSelect */
-  onSelect: (stopId: string) => void;
+  onSelect: (id: string) => void;
   timeZone?: string;
-}
-
-export default function MobileItinerarySheet({
-  home,
-  stops,
-  selected,
-  onSelect,
-  timeZone = "America/Toronto",
-}: MobileItinerarySheetProps) {
+  now?: Date;
+  arrivedStopId?: string | null;
+}) {
+  const panelId = useId();
+  const peekId = useId();
   const sheetRef = useRef<HTMLDivElement>(null);
-  const handleRef = useRef<HTMLDivElement>(null);
-
-  const [snap, setSnap] = useState<SheetSnap>("peek");
-  const [dragging, setDragging] = useState(false);
-  const [dragHeight, setDragHeight] = useState<number | null>(null);
-  const [heights, setHeights] = useState<SheetHeights>(() =>
-    resolveSheetHeights(FALLBACK_VIEWPORT_HEIGHT_PX, 0)
-  );
-
-  // Real viewport height and safe-area inset are browser-only facts — measured
-  // after mount (never during the server render, which has neither) and
-  // re-measured on resize/orientation change. Same "degrade safely on the
-  // server, correct after mount" shape as this app's other browser-only reads
-  // (see e.g. app/lib/firebase.ts's SSR bail-out).
-  useEffect(() => {
-    const measure = () => {
-      setHeights(resolveSheetHeights(readViewportHeightPx(), readSafeAreaBottomPx()));
-    };
-    measure();
-    window.addEventListener("resize", measure);
-    window.visualViewport?.addEventListener("resize", measure);
-    window.addEventListener("orientationchange", measure);
-    return () => {
-      window.removeEventListener("resize", measure);
-      window.visualViewport?.removeEventListener("resize", measure);
-      window.removeEventListener("orientationchange", measure);
-    };
-  }, []);
-
-  // Refs mirroring the live state so the native (non-React) touch listeners,
-  // attached once, always read the current values without a stale closure.
-  // Synced in an effect (never written during render) so each commit's
-  // values are current by the time any later event fires.
-  const heightsRef = useRef(heights);
-  const snapRef = useRef(snap);
-  useEffect(() => {
-    heightsRef.current = heights;
-    snapRef.current = snap;
-  }, [heights, snap]);
-
-  const dragTouchId = useRef<number | null>(null);
-  const dragStartY = useRef(0);
-  const dragStartHeight = useRef(0);
+  const handleRef = useRef<HTMLButtonElement>(null);
+  const opaqueRef = useRef<HTMLDivElement>(null);
+  const geometryRef = useRef(INITIAL_GEOMETRY);
+  const snapRef = useRef<SheetSnap>("peek");
+  const touchId = useRef<number | null>(null);
+  const startY = useRef(0);
+  const startHeight = useRef(INITIAL_GEOMETRY.heights.peek);
+  const latestHeight = useRef(INITIAL_GEOMETRY.heights.peek);
   const lastY = useRef(0);
-  const lastT = useRef(0);
+  const lastMoveAt = useRef(0);
   const velocity = useRef(0);
+  const paintFrame = useRef<number | null>(null);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ignoreClickUntil = useRef(0);
+  const [geometry, setGeometry] = useState(INITIAL_GEOMETRY);
+  const [snap, setSnap] = useState<SheetSnap>("peek");
+  const [contentSnap, setContentSnap] = useState<SheetSnap>("peek");
 
-  const endDrag = useCallback((finalHeight: number) => {
-    const target = resolveSnapTarget(finalHeight, velocity.current, heightsRef.current);
-    setSnap(target);
-    setDragging(false);
-    setDragHeight(null);
-    dragTouchId.current = null;
+  const cancelPending = useCallback(() => {
+    if (paintFrame.current != null) cancelAnimationFrame(paintFrame.current);
+    if (settleTimer.current != null) clearTimeout(settleTimer.current);
+    paintFrame.current = null;
+    settleTimer.current = null;
   }, []);
 
-  // The touch handlers are native (not React's synthetic onTouch* props) for
-  // one reason: touchmove needs `{ passive: false }` to reliably call
-  // preventDefault and stop the page from doing anything else with the
-  // gesture, which React's synthetic touch handling does not guarantee. Same
-  // "native browser API behind a thin binding" shape as createLiveTracker /
-  // cameraTween elsewhere in this app.
+  const paint = useCallback((height: number) => {
+    const { heights } = geometryRef.current;
+    if (sheetRef.current) sheetRef.current.style.transform = `translate3d(0,${heights.full - height}px,0)`;
+    if (opaqueRef.current) opaqueRef.current.style.opacity = String(backgroundOpacityFor(height, heights));
+    latestHeight.current = height;
+  }, []);
+
+  const finish = useCallback(() => {
+    if (touchId.current != null) return;
+    if (settleTimer.current != null) clearTimeout(settleTimer.current);
+    settleTimer.current = null;
+    if (snapRef.current !== "peek" && sheetRef.current?.querySelector(".msheet__peekline")?.contains(document.activeElement)) {
+      handleRef.current?.focus({ preventScroll: true });
+    }
+    setContentSnap(snapRef.current);
+  }, []);
+
+  const animateTo = useCallback((target: SheetSnap) => {
+    cancelPending();
+    const sheet = sheetRef.current;
+    // Sample the painted position, including an interrupted CSS transition.
+    const current = sheet ? geometryRef.current.viewportBottom - sheet.getBoundingClientRect().top : latestHeight.current;
+    sheet?.classList.add("msheet--dragging");
+    paint(current);
+    sheet?.getBoundingClientRect();
+    touchId.current = null;
+    snapRef.current = target;
+    sheet?.classList.remove("msheet--dragging");
+    if (sheet) sheet.dataset.dragging = "false";
+    setSnap(target);
+    paint(geometryRef.current.heights[target]);
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) finish();
+    else settleTimer.current = setTimeout(finish, MOTION_MS + 40);
+  }, [cancelPending, finish, paint]);
+
   useEffect(() => {
-    const handle = handleRef.current;
-    if (!handle) return;
-
-    const onTouchStart = (e: TouchEvent) => {
-      if (dragTouchId.current != null) return; // already tracking a touch
-      const touch = e.touches[0];
-      if (!touch) return;
-      dragTouchId.current = touch.identifier;
-      dragStartY.current = touch.clientY;
-      // The TRUE current rendered height, not the nominal snap height — a
-      // new drag can start mid-transition (a quick re-grab), and starting
-      // from the actual painted position avoids a visible jump.
-      dragStartHeight.current =
-        sheetRef.current?.getBoundingClientRect().height ?? heightsRef.current[snapRef.current];
-      lastY.current = touch.clientY;
-      lastT.current = performance.now();
-      velocity.current = 0;
-      setDragging(true);
-      setDragHeight(dragStartHeight.current);
-      // Belt-and-suspenders: touch-priority is spatial by DOM hit-testing
-      // already (the map is a separate subtree beneath this overlay), but a
-      // sheet-internal drag must also never bubble into any document-level
-      // listener (e.g. an armed remove control's outside-press disarm).
-      e.stopPropagation();
+    const sheet = sheetRef.current;
+    const stage = sheet?.closest<HTMLElement>(".stage");
+    if (!sheet || !stage) return;
+    const measure = () => {
+      const viewport = window.visualViewport;
+      const height = viewport?.height ?? window.innerHeight;
+      const offset = viewport?.offsetTop ?? 0;
+      const viewportBottom = offset + height;
+      const bottomInset = Math.max(0, window.innerHeight - viewportBottom);
+      const safeArea = readSafeAreaBottom();
+      const bottomOf = (selector: string, floor: number) => Array.from(stage.querySelectorAll<HTMLElement>(selector)).reduce((bottom, el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.height > 0 ? Math.max(bottom, rect.bottom + 12) : bottom;
+      }, floor);
+      const chromeBottom = bottomOf(".topbar", offset + 12);
+      stage.style.setProperty("--plan-chrome-bottom", `${chromeBottom}px`);
+      const noticeBottom = bottomOf(".banner,.stage__err,.clarify--stage", chromeBottom);
+      stage.style.setProperty("--plan-notice-bottom", `${noticeBottom}px`);
+      const obstructionBottom = bottomOf(".mapfallback", noticeBottom);
+      stage.style.setProperty("--plan-obstruction-bottom", `${obstructionBottom}px`);
+      const dev = stage.querySelector<HTMLElement>(".dev");
+      stage.style.setProperty("--plan-lower-controls-top", `${dev ? dev.getBoundingClientRect().top : viewportBottom - 22}px`);
+      const next = { heights: resolveSheetHeights(height, safeArea, obstructionBottom - offset), viewportBottom, bottomInset, safeArea };
+      if (JSON.stringify(next) === JSON.stringify(geometryRef.current)) return;
+      cancelPending();
+      touchId.current = null;
+      geometryRef.current = next;
+      sheet.classList.remove("msheet--dragging");
+      sheet.dataset.dragging = "false";
+      setGeometry(next);
+      setContentSnap(snapRef.current);
     };
-
-    const onTouchMove = (e: TouchEvent) => {
-      if (dragTouchId.current == null) return;
-      const touch = Array.from(e.touches).find((t) => t.identifier === dragTouchId.current);
-      if (!touch) return;
-      const deltaY = dragStartY.current - touch.clientY; // up = positive = expanding
-      const raw = dragStartHeight.current + deltaY;
-      const clamped = clampDragHeight(raw, heightsRef.current);
-      setDragHeight(clamped);
-
-      const now = performance.now();
-      const dt = now - lastT.current;
-      if (dt > 0) velocity.current = (lastY.current - touch.clientY) / dt;
-      lastY.current = touch.clientY;
-      lastT.current = now;
-
-      e.preventDefault();
-      e.stopPropagation();
+    const resize = new ResizeObserver(measure);
+    const observeChrome = () => {
+      resize.disconnect();
+      stage.querySelectorAll(".topbar,.banner,.stage__err,.clarify--stage,.mapfallback,.dev").forEach(el => resize.observe(el));
+      measure();
     };
-
-    const onTouchEnd = (e: TouchEvent) => {
-      if (dragTouchId.current == null) return;
-      const touch = Array.from(e.changedTouches).find(
-        (t) => t.identifier === dragTouchId.current
-      );
-      e.stopPropagation();
-      if (!touch) {
-        endDrag(dragStartHeight.current);
-        return;
-      }
-      const deltaY = dragStartY.current - touch.clientY;
-      const raw = dragStartHeight.current + deltaY;
-      endDrag(clampDragHeight(raw, heightsRef.current));
-    };
-
-    handle.addEventListener("touchstart", onTouchStart, { passive: true });
-    handle.addEventListener("touchmove", onTouchMove, { passive: false });
-    handle.addEventListener("touchend", onTouchEnd, { passive: true });
-    handle.addEventListener("touchcancel", onTouchEnd, { passive: true });
+    const mutation = new MutationObserver(observeChrome);
+    mutation.observe(stage, { childList: true });
+    const map = stage.querySelector(".mapwrap");
+    if (map) mutation.observe(map, { childList: true });
+    observeChrome();
+    window.addEventListener("resize", measure);
+    window.addEventListener("orientationchange", measure);
+    window.visualViewport?.addEventListener("resize", measure);
+    window.visualViewport?.addEventListener("scroll", measure);
     return () => {
-      handle.removeEventListener("touchstart", onTouchStart);
-      handle.removeEventListener("touchmove", onTouchMove);
-      handle.removeEventListener("touchend", onTouchEnd);
-      handle.removeEventListener("touchcancel", onTouchEnd);
+      resize.disconnect();
+      mutation.disconnect();
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("orientationchange", measure);
+      window.visualViewport?.removeEventListener("resize", measure);
+      window.visualViewport?.removeEventListener("scroll", measure);
+      cancelPending();
     };
-  }, [endDrag]);
+  }, [cancelPending, stops.length]);
+
+  useLayoutEffect(() => { paint(geometry.heights[snapRef.current]); }, [geometry, paint]);
+
+  useEffect(() => {
+    const grip = handleRef.current;
+    if (!grip) return;
+    const draggedHeight = (y: number) => Math.min(
+      geometryRef.current.heights.full + SURFACE_EXTENSION,
+      clampDragHeight(startHeight.current + startY.current - y, geometryRef.current.heights)
+    );
+    const onStart = (event: TouchEvent) => {
+      if (touchId.current != null) return;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      cancelPending();
+      touchId.current = touch.identifier;
+      startY.current = lastY.current = touch.clientY;
+      startHeight.current = geometryRef.current.viewportBottom - sheetRef.current!.getBoundingClientRect().top;
+      lastMoveAt.current = performance.now();
+      velocity.current = 0;
+      sheetRef.current?.classList.add("msheet--dragging");
+      if (sheetRef.current) sheetRef.current.dataset.dragging = "true";
+      paint(startHeight.current);
+      event.stopPropagation();
+    };
+    const onMove = (event: TouchEvent) => {
+      const touch = Array.from(event.touches).find(item => item.identifier === touchId.current);
+      if (!touch) return;
+      const at = performance.now();
+      const elapsed = at - lastMoveAt.current;
+      if (elapsed > 0) velocity.current = (lastY.current - touch.clientY) / elapsed;
+      lastY.current = touch.clientY;
+      lastMoveAt.current = at;
+      latestHeight.current = draggedHeight(touch.clientY);
+      if (paintFrame.current == null) paintFrame.current = requestAnimationFrame(() => {
+        paintFrame.current = null;
+        paint(latestHeight.current);
+      });
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    const onEnd = (event: TouchEvent) => {
+      const touch = Array.from(event.changedTouches).find(item => item.identifier === touchId.current);
+      if (!touch) return;
+      const releasedAt = performance.now();
+      if (Math.abs(startY.current - touch.clientY) > 6) ignoreClickUntil.current = releasedAt + 400;
+      const speed = sheetReleaseVelocity(velocity.current, lastMoveAt.current, releasedAt);
+      animateTo(resolveSnapTarget(draggedHeight(touch.clientY), speed, geometryRef.current.heights));
+      event.stopPropagation();
+    };
+    const onCancel = (event: TouchEvent) => {
+      if (!Array.from(event.changedTouches).some(item => item.identifier === touchId.current)) return;
+      ignoreClickUntil.current = performance.now() + 400;
+      animateTo(resolveSnapTarget(latestHeight.current, 0, geometryRef.current.heights));
+      event.stopPropagation();
+    };
+    grip.addEventListener("touchstart", onStart, { passive: true });
+    grip.addEventListener("touchmove", onMove, { passive: false });
+    grip.addEventListener("touchend", onEnd, { passive: true });
+    grip.addEventListener("touchcancel", onCancel, { passive: true });
+    return () => {
+      grip.removeEventListener("touchstart", onStart);
+      grip.removeEventListener("touchmove", onMove);
+      grip.removeEventListener("touchend", onEnd);
+      grip.removeEventListener("touchcancel", onCancel);
+      cancelPending();
+    };
+  }, [animateTo, cancelPending, paint, stops.length]);
 
   const entries = useMemo(() => buildSheetEntries(home, stops), [home, stops]);
-  const peekStop = useMemo(() => pickPeekStop(stops), [stops]);
-
-  if (stops.length === 0) return null;
-
-  const liveHeight = dragging && dragHeight != null ? dragHeight : sheetHeightFor(snap, heights);
-  const activeContent = contentStateFor(liveHeight, heights);
-  const bgOpacity = backgroundOpacityFor(liveHeight, heights);
+  const peekStop = pickPeekStop(stops);
+  const stopNumbers = useMemo(() => new Map(stops.map((stop, index) => [stop.id, index + 1])), [stops]);
+  if (!stops.length) return null;
+  const style = {
+    height: geometry.heights.full + SURFACE_EXTENSION,
+    bottom: geometry.bottomInset - SURFACE_EXTENSION,
+    transform: `translate3d(0,${geometry.heights.full - geometry.heights[snap]}px,0)`,
+    "--msheet-content-height": `${geometry.heights[contentSnap] - geometry.safeArea}px`,
+    "--msheet-body-height": `${Math.max(0, geometry.heights[contentSnap] - geometry.safeArea - 104)}px`,
+  } as CSSProperties;
 
   return (
-    <div
-      ref={sheetRef}
-      className={"msheet msheet--" + snap + (dragging ? " msheet--dragging" : "")}
-      data-state={activeContent}
-      style={{ height: `${liveHeight}px` }}
-      role="region"
-      aria-label="Your evening, stop by stop"
-    >
-      <div className="msheet__bg msheet__bg--frost" />
-      <div className="msheet__bg msheet__bg--opaque" style={{ opacity: bgOpacity }} />
-      <div className="msheet__draghandle" ref={handleRef}>
-        <span className="msheet__grip" aria-hidden="true" />
-        {/* The peek line has no internal state worth preserving (unlike the
-            carousel/list below), so it mounts/unmounts freely with the
-            content switch — a direct flex child of the handle, so its own
-            flex:1 1 auto still fills the remaining peek-state height. */}
-        {activeContent === "peek" && peekStop && (
-          <PeekLine stop={peekStop} timeZone={timeZone} />
-        )}
+    <div ref={sheetRef} className={`msheet msheet--${snap}`} style={style} data-state={contentSnap} data-dragging="false" role="region" aria-label="Your itinerary, stop by stop"
+      onTransitionEnd={event => { if (event.target === event.currentTarget && event.propertyName === "transform") finish(); }}>
+      <div className="msheet__bg msheet__bg--frost" aria-hidden="true" />
+      <div ref={opaqueRef} className="msheet__bg msheet__bg--opaque" style={{ opacity: backgroundOpacityFor(geometry.heights[snap], geometry.heights) }} aria-hidden="true" />
+      <button ref={handleRef} type="button" className="msheet__draghandle" aria-controls={panelId} aria-expanded={snap !== "peek"} aria-label={snap === "full" ? "Collapse itinerary" : "Expand itinerary"}
+        onClick={() => { if (performance.now() >= ignoreClickUntil.current) animateTo(snapRef.current === "peek" ? "half" : snapRef.current === "half" ? "full" : "half"); }}
+        onKeyDown={event => {
+          let target: SheetSnap | undefined;
+          const index = SNAP_ORDER.indexOf(snapRef.current);
+          if (event.key === "ArrowUp") target = SNAP_ORDER[Math.min(2, index + 1)];
+          if (event.key === "ArrowDown") target = SNAP_ORDER[Math.max(0, index - 1)];
+          if (event.key === "Home" || event.key === "Escape") target = "peek";
+          if (event.key === "End") target = "full";
+          if (target) { event.preventDefault(); event.stopPropagation(); animateTo(target); }
+        }}><span className="msheet__grip" aria-hidden="true" /></button>
+      <button type="button" className="msheet__peekline" hidden={contentSnap !== "peek"} inert={contentSnap !== "peek"} aria-label="Show itinerary cards" aria-describedby={peekId} onClick={() => animateTo("half")}>
+        <span id={peekId}>{peekStop && <PeekLine stop={peekStop} timeZone={timeZone} now={now} />}</span>
+      </button>
+      <div className="msheet__heading" hidden={contentSnap === "peek"}>
+        <div><h2>Your itinerary</h2><p className="msheet__meta">{stops.length} {stops.length === 1 ? "stop" : "stops"}</p></div>
+        <button type="button" className="msheet__view" aria-label={contentSnap === "half" ? "Show full itinerary" : "Show itinerary cards"} onClick={() => animateTo(contentSnap === "half" ? "full" : "half")}>
+          <span aria-hidden="true">{contentSnap === "half" ? "☰" : "⌄"}</span>
+        </button>
       </div>
-      {/* The carousel and list DO carry scroll position worth preserving, so
-          both stay mounted always and are hidden by style rather than
-          conditionally unmounted — unmounting/remounting on every threshold
-          crossing mid-drag would reset scroll position and thrash the DOM,
-          the opposite of "fluid". */}
-      <div
-        className="msheet__half"
-        style={{ display: activeContent === "half" ? undefined : "none" }}
-      >
-        <div className="msheet__track">
-          {entries.map((entry) => (
-            <HalfPage
-              key={entry.kind === "leg" ? entry.id : entry.kind === "home" ? "home" : entry.stop.id}
-              entry={entry}
-              selected={selected}
-              onSelect={onSelect}
-              timeZone={timeZone}
-            />
-          ))}
+      <div id={panelId} className="msheet__body" hidden={contentSnap === "peek"}>
+        <div className="msheet__half" hidden={contentSnap !== "half"} inert={contentSnap !== "half"}>
+          <div className="msheet__track">{entries.map(entry => <HalfPage key={entry.kind === "home" ? "home" : entry.kind === "leg" ? entry.id : entry.stop.id} entry={entry} selected={selected} onSelect={onSelect} timeZone={timeZone} now={now} arrivedStopId={arrivedStopId} stopNumber={entry.kind === "stop" ? stopNumbers.get(entry.stop.id) : undefined} stopCount={stops.length} />)}</div>
         </div>
-      </div>
-      <div
-        className="msheet__full"
-        style={{ display: activeContent === "full" ? undefined : "none" }}
-      >
-        {entries.map((entry) => (
-          <FullRow
-            key={entry.kind === "leg" ? entry.id : entry.kind === "home" ? "home" : entry.stop.id}
-            entry={entry}
-            selected={selected}
-            onSelect={onSelect}
-            timeZone={timeZone}
-          />
-        ))}
+        <div className="msheet__full" hidden={contentSnap !== "full"} inert={contentSnap !== "full"}>
+          {entries.map(entry => <FullRow key={entry.kind === "home" ? "home" : entry.kind === "leg" ? entry.id : entry.stop.id} entry={entry} selected={selected} onSelect={onSelect} timeZone={timeZone} now={now} arrivedStopId={arrivedStopId} stopNumber={entry.kind === "stop" ? stopNumbers.get(entry.stop.id) : undefined} stopCount={stops.length} />)}
+        </div>
       </div>
     </div>
   );

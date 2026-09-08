@@ -6,10 +6,8 @@
 // this file only ever decides "given these numbers, what height/state/opacity
 // results" — it never reads window/document itself.
 //
-// Desktop is unaffected by any of this: the sheet only mounts its touch
-// listeners and becomes visible under the CSS breakpoint in globals.css
-// (max-width: 768px, matching the mobile widths e2e already treats as one
-// bucket in mobile.spec.ts).
+// The sheet mounts with the desktop dock; CSS alone chooses which surface
+// is visible at the established 768px breakpoint.
 
 export type SheetSnap = "peek" | "half" | "full";
 
@@ -20,7 +18,7 @@ export const SNAP_ORDER: SheetSnap[] = ["peek", "half", "full"];
  *  of the viewport — matching the desktop strip's own fixed-height cards.
  *  HALF/FULL scale with the viewport because their content (a carousel, a
  *  scrollable list) genuinely wants more room on a taller phone. */
-export const PEEK_HEIGHT_PX = 110;
+export const PEEK_HEIGHT_PX = 128;
 export const HALF_HEIGHT_FRACTION = 0.45;
 export const FULL_HEIGHT_FRACTION = 0.9;
 
@@ -42,23 +40,28 @@ export interface SheetHeights {
   full: number;
 }
 
-/** Resolves the three snap heights for the current viewport. `safeAreaBottomPx`
- *  is the device's home-indicator inset (0 on everything but a notched
- *  iPhone) — added to peek only as extra reach, not swallowed as padding
- *  eating into peek's usable content height (the caller adds the same inset
- *  as CSS padding-bottom on the sheet, which sits INSIDE this height since
- *  the sheet is box-sizing: border-box; peek is sized to leave the content
- *  area constant across devices). half/full are guarded to stay strictly
- *  above the level below them even on a very short viewport, so the three
- *  points can never collapse into each other or invert. */
+/** Keep the home-indicator inset below peek content and cap full below the
+ *  measured top controls. On a short visual viewport the smaller snaps
+ *  yield to that cap while staying strictly ordered. The component reserves
+ *  safe-area space inside the settled content viewport. */
 export function resolveSheetHeights(
   viewportHeightPx: number,
-  safeAreaBottomPx: number
+  safeAreaBottomPx: number,
+  topClearancePx = 0
 ): SheetHeights {
-  const peek = PEEK_HEIGHT_PX + Math.max(0, safeAreaBottomPx);
-  const half = Math.max(viewportHeightPx * HALF_HEIGHT_FRACTION, peek + 1);
-  const full = Math.max(viewportHeightPx * FULL_HEIGHT_FRACTION, half + 1);
+  const full = Math.max(3, Math.min(
+    viewportHeightPx * FULL_HEIGHT_FRACTION,
+    viewportHeightPx - Math.max(0, topClearancePx)
+  ));
+  const peek = Math.min(PEEK_HEIGHT_PX + Math.max(0, safeAreaBottomPx), full - 2);
+  const half = Math.min(full - 1, Math.max(viewportHeightPx * HALF_HEIGHT_FRACTION, peek + 1));
   return { peek, half, full };
+}
+
+/** A finger held still at release must not reuse a stale fling sample. */
+export function sheetReleaseVelocity(velocity: number, lastMoveAt: number, releasedAt: number): number {
+  const age = releasedAt - lastMoveAt;
+  return Number.isFinite(velocity) && age >= 0 && age <= 100 ? velocity : 0;
 }
 
 /** The live height while a finger is down: tracks the raw drag 1:1 inside
@@ -119,12 +122,8 @@ export function resolveSnapTarget(
   return SNAP_ORDER[targetIndex];
 }
 
-/** Which state's CONTENT to render for a given live height — the same
- *  nearest-point rule as resolveSnapTarget, with no velocity term, so the
- *  layout swaps (peek line -> carousel -> list) exactly when the drag
- *  crosses the midpoint toward another state, both mid-drag and at rest
- *  (where currentHeightPx is already exactly one of the three points, so
- *  this trivially returns that point). */
+/** Nearest content state for a measured height. The UI commits content only
+ *  after settling so a finger crossing a midpoint never rebuilds its layout. */
 export function contentStateFor(currentHeightPx: number, heights: SheetHeights): SheetSnap {
   return resolveSnapTarget(currentHeightPx, 0, heights);
 }

@@ -8,7 +8,7 @@
 // step. See app/api/_mock/fixtures.ts (DUMPLING_CLOSED / DUMPLING_OPEN).
 import type { Page } from "@playwright/test";
 import { test, expect } from "./test";
-import { stripCard, dismissClarifyIfShown } from "./helpers";
+import { stripCard, dismissClarifyIfShown, expandDesktopItinerary } from "./helpers";
 
 function torontoClock(iso: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -66,6 +66,7 @@ test.describe("@mock partial-failure recovery", () => {
     await widenReq;
 
     // the plan now completes: the recovered city-wide dumpling venue renders
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".lstrip__name", { hasText: "Citywide Dumpling Bar" })).toBeVisible();
     // and the untouched bar stop is still there → exactly two stops
@@ -84,6 +85,7 @@ test.describe("@mock partial-failure recovery", () => {
     await page.locator(".recover__input").first().fill("dessert");
     await page.locator(".recover__go").first().click();
 
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".lstrip__stop")).toHaveCount(2);
     // the empty dumplings slot became a real dessert stop; no dumplings left
@@ -119,6 +121,7 @@ test.describe("@mock partial-failure recovery", () => {
     await page.locator(".recover__go").click();
 
     // NOW the plan completes: bar + recovered dumplings + replacement dessert
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".lstrip__stop")).toHaveCount(3);
     await expect(page.locator(".lstrip__name", { hasText: "Citywide Dumpling Bar" })).toBeVisible();
@@ -182,6 +185,7 @@ test.describe("@mock per-slot recovery targeting", () => {
     // Dinner occupies 90 + 15 minutes, so slot 1 starts at 8:45 PM.
     // The fixture gallery opens at 8 PM and was closed at the 7 PM anchor.
     expect(torontoClock(body.targetTime)).toBe("20:45");
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".lstrip__stop")).toHaveCount(2);
     await expect(page.locator(".lstrip__stop .lstrip__name").nth(1)).toHaveText(
@@ -260,6 +264,7 @@ test.describe("@mock per-slot recovery targeting", () => {
     // the original tiny bar and the final plan has two distinct venues.
     await recover.locator(".recover__input").fill("dessert");
     await recover.locator(".recover__go").click();
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".lstrip__stop")).toHaveCount(2);
     const names = page.locator(".lstrip__stop .lstrip__name");
@@ -301,6 +306,7 @@ test.describe("@mock weather-gate", () => {
   test("'Still want it' skips ONLY the weather gate and plans both stops @mock", async ({ page }) => {
     await planRainy(page, "dinner and a walk in the park at 3pm");
     await page.locator(".recover--gate").getByRole("button", { name: "Still want it" }).click();
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".lstrip__stop")).toHaveCount(2);
     // the dinner pick proves the hours filter ran for real (Velvet Fig,
@@ -328,6 +334,7 @@ test.describe("@mock weather-gate", () => {
     // replace the slot → a full two-stop plan
     await page.locator(".recover__input").fill("dessert");
     await page.locator(".recover__go").click();
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".lstrip__stop")).toHaveCount(2);
     await expect(stripCard(page, "Sundown Scoops")).toBeVisible();
@@ -346,6 +353,7 @@ test.describe("@mock weather-gate", () => {
     // and replacing the slot completes the plan
     await page.locator(".recover__input").fill("dessert");
     await page.locator(".recover__go").click();
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(".lstrip__stop")).toHaveCount(2);
     await expect(stripCard(page, "Sundown Scoops")).toBeVisible();

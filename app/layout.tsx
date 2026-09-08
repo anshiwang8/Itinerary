@@ -2,6 +2,9 @@ import type { Metadata, Viewport } from "next";
 import "@fontsource-variable/fraunces";
 import "@fontsource-variable/space-grotesk";
 import "./globals.css";
+import "./desktopItinerary.css";
+import "./mobileItinerary.css";
+import "./uiLayout.css";
 
 export const metadata: Metadata = {
   title: "Itinerary: time to leave.",

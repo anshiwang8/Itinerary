@@ -1,0 +1,265 @@
+/* The approved mobile itinerary views. Motion translates one stable sheet
+   surface; only the visible body viewport changes size. Desktop visibility
+   remains governed by the same CSS breakpoint as the existing strip. */
+.msheet {
+  max-height: none;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-bottom: 0;
+  border-radius: 24px 24px 0 0;
+  padding-bottom: 0;
+  isolation: isolate;
+  color: var(--ink);
+  font-family: var(--grot);
+  transition: transform 280ms cubic-bezier(0.22, 0.8, 0.25, 1);
+  will-change: transform;
+}
+.msheet--dragging { transition: none; }
+.msheet [hidden] { display: none !important; }
+.msheet__bg--frost {
+  background: rgba(247, 251, 253, 0.9);
+  -webkit-backdrop-filter: blur(22px);
+  backdrop-filter: blur(22px);
+}
+.msheet__bg--opaque { background: #FCFDFE; }
+.msheet__draghandle {
+  appearance: none;
+  width: 100%;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: grab;
+}
+.msheet--dragging .msheet__draghandle { cursor: grabbing; }
+.msheet__grip { width: 36px; height: 4px; background: #AFC0CA; }
+.msheet__draghandle > svg {
+  position: absolute;
+  width: 18px; height: 18px;
+  right: 20px; top: 13px;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.msheet__draghandle:focus-visible,
+.msheet__peekline:focus-visible,
+.msheet__view:focus-visible,
+.msheet__pageselect:focus-visible,
+.msheet__row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+.msheet__peekline {
+  position: relative; z-index: 1;
+  flex: 0 0 auto;
+  width: 100%; min-height: 44px;
+  border: 0; padding: 0 18px 10px;
+  background: transparent; text-align: left;
+}
+.msheet__peek {
+  display: flex; align-items: center; gap: 10px;
+  min-width: 0; width: 100%; min-height: 44px; padding: 0;
+}
+.msheet__peekicon { width: 20px; height: 20px; flex: 0 0 20px; }
+.msheet__peekbody { display: flex; flex-direction: column; gap: 2px; }
+.msheet__peekname {
+  display: -webkit-box; font-size: 20px; line-height: 1.15;
+  /* Peek previews two lines; the two reading views show the complete name. */
+  -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  white-space: normal; overflow: hidden; overflow-wrap: anywhere;
+}
+.msheet__peekwhen { display: block; font-size: 13px; line-height: 1.4; margin: 0; }
+.msheet__peeknow { font-size: 10px; letter-spacing: 0.08em; padding: 3px 8px; }
+.msheet__chevron {
+  width: 18px; height: 18px; flex: 0 0 18px;
+  fill: none; stroke: var(--ink-soft); stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.msheet__heading {
+  position: relative; z-index: 1; flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  height: 60px; box-sizing: border-box; padding: 0 20px 10px;
+}
+.msheet__heading > div { min-width: 0; }
+.msheet__heading h2,
+.msheet__heading h3 {
+  margin: 0 0 4px;
+  font-family: var(--disp); font-weight: 600;
+  font-size: 24px; line-height: 1.1; letter-spacing: -0.025em;
+}
+.msheet__meta { display: block; color: var(--ink-soft); font-size: 13px; line-height: 1.4; }
+.msheet__view {
+  display: grid; place-items: center; flex: 0 0 44px;
+  width: 44px; height: 44px; min-height: 44px;
+  border: 1px solid var(--rule); border-radius: 12px;
+  background: var(--card); color: var(--accent);
+}
+.msheet__view svg {
+  width: 19px; height: 19px; fill: none;
+  stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.msheet__body {
+  position: relative; z-index: 1;
+  flex: none; min-height: 0;
+  height: var(--msheet-body-height, auto);
+  overflow: hidden;
+}
+.msheet__half,
+.msheet__full { height: 100%; min-height: 0; box-sizing: border-box; }
+.msheet__half { padding-bottom: env(safe-area-inset-bottom, 0px); }
+.msheet__track {
+  align-items: stretch; gap: 10px;
+  /* A long name or short landscape viewport can need vertical reading.
+     Both axes remain native; only the grip can change the sheet's snap. */
+  overflow-y: auto;
+  touch-action: pan-x pan-y;
+  padding: 2px 9% 14px;
+  scroll-padding-inline: 9%;
+  overscroll-behavior-x: contain;
+}
+.msheet__page {
+  flex: 0 0 82%; min-width: 0;
+  height: fit-content; min-height: 178px;
+  justify-content: flex-start;
+  border-radius: 17px;
+  box-shadow: 0 4px 14px rgba(30, 58, 76, 0.045);
+  overflow: visible;
+}
+.msheet__page--leg {
+  flex-basis: 40%; min-height: 156px; align-self: flex-start; margin-block: auto;
+  align-items: center; justify-content: center;
+  padding: 16px 12px; gap: 6px;
+  background: rgba(232, 242, 248, 0.78);
+  text-align: center; border-style: dashed;
+  box-shadow: none;
+}
+.msheet__page--home {
+  flex-basis: 62%; justify-content: center; gap: 7px;
+  padding: 16px; background: rgba(255, 255, 255, 0.7);
+}
+.msheet__pageselect {
+  display: flex; flex-direction: column; align-items: stretch;
+  min-height: 178px; padding: 16px;
+  border-radius: 16px;
+  cursor: pointer;
+}
+.msheet__pageselect[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--accent); }
+.msheet__stophead { justify-content: space-between; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.msheet__eyebrow {
+  display: block; color: var(--accent); font-size: 11px;
+  line-height: 1.4; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase;
+}
+.msheet__stopcount { color: var(--ink-soft); font-size: 12px; }
+.msheet__pagename,
+.msheet__rowname,
+.msheet__homename {
+  display: block; font-family: var(--disp); font-weight: 600;
+  font-size: 20px; line-height: 1.16; letter-spacing: -0.02em;
+  color: var(--ink); white-space: normal;
+  overflow: visible; text-overflow: clip; overflow-wrap: anywhere;
+}
+.msheet__pagename { margin: 0 0 9px; }
+.msheet__homename { font-size: 18px; }
+.msheet__rowwhen {
+  display: block; width: fit-content; max-width: 100%;
+  margin-top: 5px; color: var(--ink-soft);
+  font-size: 14px; line-height: 1.4; white-space: normal;
+}
+.msheet__duration { display: block; color: var(--ink-soft); font-size: 13px; line-height: 1.4; margin-top: 3px; }
+.msheet__facts { flex-wrap: wrap; margin-top: 10px; gap: 9px; font-size: 13px; line-height: 1.5; }
+.msheet__factdot { width: 3px; height: 3px; border-radius: 50%; background: var(--rule-strong); }
+.msheet__modeicon { display: inline-flex; flex: 0 0 22px; width: 22px; height: 22px; color: var(--accent); }
+.msheet__modeicon svg { width: 100%; height: 100%; fill: currentColor; }
+.msheet__legname { display: block; font-size: 14px; line-height: 1.4; font-weight: 500; overflow-wrap: anywhere; }
+.msheet__legdetail { display: block; color: var(--ink-soft); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.msheet__walkwarning { display: block; margin-top: 6px; color: var(--ink-soft); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.msheet__routes { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 5px; }
+.msheet__routearrow { color: var(--ink-soft); font-size: 12px; }
+.msheet__routebadge {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 30px; width: 30px; height: 30px;
+  padding: 0 2px; border-radius: 50%;
+  font-family: var(--grot); font-size: 10px; line-height: 1;
+  font-weight: 600; letter-spacing: -0.025em;
+  box-sizing: border-box;
+}
+.msheet__full {
+  overflow-x: hidden; overscroll-behavior-y: contain;
+  padding: 0 20px calc(24px + env(safe-area-inset-bottom, 0px));
+}
+.msheet__row {
+  align-items: flex-start; gap: 12px;
+  padding: 21px 0;
+  border-bottom: 1px solid var(--rule); border-radius: 0;
+  color: var(--ink);
+}
+.msheet__row--home { padding: 8px 0 20px; }
+.msheet__homeicon {
+  display: grid; place-items: center; flex: 0 0 30px;
+  width: 30px; height: 30px; color: var(--accent);
+}
+.msheet__homeicon svg {
+  width: 22px; height: 22px; fill: none;
+  stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.msheet__originheading {
+  display: block; font-family: var(--disp); font-size: 20px;
+  line-height: 1.15; font-weight: 600; margin-bottom: 5px;
+}
+.msheet__originname { display: block; font-size: 14px; line-height: 1.45; color: var(--ink-soft); overflow-wrap: anywhere; }
+.msheet__row--stop { cursor: pointer; }
+.msheet__row--sel { background: rgba(226, 239, 246, 0.65); }
+.msheet__row--stop .msheet__chevron { align-self: center; }
+.msheet__stopnumber {
+  display: grid; place-items: center;
+  flex: 0 0 27px; width: 27px; height: 27px;
+  border-radius: 50%; background: var(--ink); color: #FFFFFF;
+  font-size: 12px; font-weight: 500; margin-top: 2px;
+}
+.msheet__legrow {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin: 0; padding: 14px 0;
+  border: 0; border-bottom: 1px solid var(--rule); border-radius: 0;
+  background: transparent; font-size: 14px;
+}
+.msheet__legrow .msheet__modeicon svg { width: 22px; height: 22px; }
+.msheet__legbody { flex: 1 1 auto; min-width: 0; }
+.msheet__legrow--summary { border-bottom: 0; padding-bottom: 10px; }
+.msheet__journey-leg { padding-bottom: 13px; border-bottom: 1px solid var(--rule); }
+.msheet__routelist { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.msheet__routeline { display: flex; align-items: center; gap: 8px; font-size: 14px; overflow-wrap: anywhere; }
+.msheet__ride { padding: 13px; margin: 8px 0; border: 1px solid var(--rule); border-radius: 14px; background: var(--card); }
+.msheet__ridehead { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-bottom: 12px; }
+.msheet__ridename { flex: 1 1 100px; min-width: 0; font-size: 15px; line-height: 1.35; font-weight: 500; overflow-wrap: anywhere; }
+.msheet__rideminutes { margin-left: auto; color: var(--ink-soft); font-size: 13px; white-space: nowrap; }
+.msheet__ridestops { list-style: none; padding: 0; margin: 0; }
+.msheet__ridepoint { position: relative; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: start; gap: 9px; padding: 0 0 16px; }
+.msheet__ridepoint:last-child { padding-bottom: 0; }
+.msheet__riderail { position: relative; display: block; width: 8px; height: 8px; margin-top: 5px; border: 1.5px solid var(--accent); border-radius: 50%; background: var(--card); }
+.msheet__ridepoint--board::before { content: ""; position: absolute; width: 1px; background: var(--rule-strong); left: 3.5px; top: 13px; bottom: -5px; }
+.msheet__ridepoint--board .msheet__riderail { background: var(--accent); }
+.msheet__ridewhere { display: flex; flex-direction: column; min-width: 0; color: var(--ink-soft); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.msheet__ridewhere strong { color: var(--ink); font-size: 13px; font-weight: 500; }
+.msheet__ridepoint time { font-size: 13px; line-height: 1.45; color: var(--ink); white-space: nowrap; }
+.msheet__scheduled { display: block; font-size: 13px; line-height: 1.4; color: var(--ink-soft); }
+.msheet__page--active { border-color: var(--live); box-shadow: inset 0 0 0 1px var(--live); }
+.msheet__row--active { border-left: 3px solid var(--live); padding-left: 8px; }
+.msheet__row--active .msheet__stopnumber { background: var(--live); color: var(--ink); }
+.msheet__row--changed .msheet__stopnumber { box-shadow: 0 0 0 3px rgba(200, 240, 0, 0.42); }
+.msheet__rowwhen--changed { padding: 2px 5px; margin-left: -5px; border-radius: 5px; background: rgba(200, 240, 0, 0.3); }
+.msheet__oldtime { display: inline-block; margin-right: 7px; color: var(--ink-faint); }
+.msheet__page--past,
+.msheet__row--past { opacity: 0.66; }
+.msheet__page--arrived,
+.msheet__row--arrived { background: var(--live); }
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .msheet__bg--frost { background: #F7FBFD; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msheet,
+  .msheet__bg--opaque { transition: none !important; }
+}

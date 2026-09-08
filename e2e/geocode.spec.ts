@@ -1,5 +1,5 @@
 import { expect, test } from "./test";
-import { dismissClarifyIfShown } from "./helpers";
+import { dismissClarifyIfShown, expandDesktopItinerary } from "./helpers";
 
 function cityCandidate(options: {
   label: string;
@@ -123,6 +123,7 @@ test("@mock an ambiguous city pauses before search and resumes from the explicit
 
   await page.getByRole("button", { name: "Use London, ON, Canada" }).click();
   await dismissClarifyIfShown(page);
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 90_000 });
   await expect(page.locator(".lstrip__name--home")).toContainText(
     "London, ON, Canada"
@@ -205,6 +206,7 @@ test("@mock an ambiguous address receives city context and preserves the selecte
     })
     .click();
   await dismissClarifyIfShown(page);
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect(page.locator(".lstrip")).toBeVisible({ timeout: 90_000 });
   await expect(page.locator(".lstrip__name--home")).toContainText(
     "100 Queen St E, Toronto, ON, Canada"

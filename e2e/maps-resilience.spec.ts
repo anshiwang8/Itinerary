@@ -1,6 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./test";
-import { expectStripMatchesPin, planEvening } from "./helpers";
+import { expectStripMatchesPin, planEvening, expandDesktopItinerary } from "./helpers";
 
 type InjectedFix = { at: number; lat: number; lng: number; accuracy: number; age?: number };
 
@@ -767,6 +767,7 @@ async function openRouteSpecimen(page: Page): Promise<PolylineSnapshot[]> {
     "ready"
   );
   await page.getByRole("button", { name: "Show route specimen" }).click();
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect
     .poll(
       async () =>
@@ -785,6 +786,7 @@ async function openVisibilitySpecimen(page: Page): Promise<void> {
   );
   await page.getByRole("button", { name: "Show visibility specimen" }).click();
   await expect(page.getByTestId("visibility-strip-specimen")).toHaveCount(1);
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect(page.getByTestId("visibility-strip-specimen").locator(".lstrip")).toBeVisible();
   await expect
     .poll(async () => linesForPath(await activePolylines(page), VISIBILITY_PATHS.homeLocal).length)
@@ -1063,6 +1065,7 @@ test("@mock manual WALK lifecycle replaces overlays and retains only a surviving
 }) => {
   await openVisibilitySpecimen(page);
   await page.getByRole("button", { name: "All stops completed" }).click();
+  await expandDesktopItinerary(page);
   const strip = page.getByTestId("visibility-strip-specimen");
   const manualControl = strip
     .locator('.lstrip__leg[aria-label="walking leg"]')
@@ -1102,6 +1105,7 @@ test("@mock manual WALK lifecycle replaces overlays and retains only a surviving
     .toEqual(exactSignatures);
 
   await page.getByRole("button", { name: "Reroute clone exact IDs" }).click();
+  await expandDesktopItinerary(page);
   await expect(manualControl).toHaveAttribute("aria-pressed", "true");
   await expect
     .poll(async () =>
@@ -1114,11 +1118,13 @@ test("@mock manual WALK lifecycle replaces overlays and retains only a surviving
   await page
     .getByRole("button", { name: "Reroute replace manual leg" })
     .click();
+  await expandDesktopItinerary(page);
   await expect(manualControl).toHaveAttribute("aria-pressed", "false");
   await expect.poll(async () => (await activePolylines(page)).length).toBe(0);
 
   await page.getByRole("button", { name: "Reset visibility plan" }).click();
   await page.getByRole("button", { name: "All stops completed" }).click();
+  await expandDesktopItinerary(page);
   const resetManualControl = page
     .getByTestId("visibility-strip-specimen")
     .locator('.lstrip__leg[aria-label="walking leg"]')
@@ -1127,6 +1133,7 @@ test("@mock manual WALK lifecycle replaces overlays and retains only a surviving
   await resetManualControl.click();
   await expect(resetManualControl).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Replace plan or history" }).click();
+  await expandDesktopItinerary(page);
   const replacementControl = page
     .getByTestId("visibility-strip-specimen")
     .locator('.lstrip__leg[aria-label="walking leg"]')
@@ -1178,6 +1185,7 @@ test("@mock changed identified transit keeps one same-colour halo while legacy W
 
   await page.getByRole("button", { name: "Show all-leg specimen" }).click();
   await expect(page.getByTestId("route-strip-specimen")).toHaveCount(1);
+  await expandDesktopItinerary(page, { waitForDock: true });
   await expect(page.getByTestId("route-strip-specimen").locator(".lstrip")).toBeVisible();
   await expect
     .poll(async () => ({
@@ -1975,6 +1983,7 @@ test("@mock a driving leg renders as Drive, not as a walk, and stays selectable"
   await page.goto("/test-harness/maps");
   await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
   await page.getByRole("button", { name: "Show driving specimen" }).click();
+  await expandDesktopItinerary(page, { waitForDock: true });
 
   const strip = page.getByTestId("driving-strip-specimen");
   const driving = strip.locator('[role="listitem"][aria-label="driving leg"]');
@@ -2027,6 +2036,7 @@ test("@mock the active stop's card alone shows the real-time creep triangle, at 
   await page.goto("/test-harness/maps");
   await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
   await page.getByRole("button", { name: "Show driving specimen" }).click();
+  await expandDesktopItinerary(page, { waitForDock: true });
 
   const strip = page.getByTestId("driving-strip-specimen");
   const stops = strip.locator(".lstrip__stop");
@@ -2045,11 +2055,16 @@ test("@mock the active stop's card alone shows the real-time creep triangle, at 
   // elapsed is exactly 50%, so the triangle's horizontal center should sit
   // at the card's own midpoint (a generous ±2% tolerance covers subpixel
   // rounding in the two bounding boxes, well inside the investigation's
-  // measured ±1% accuracy for the underlying CSS technique).
-  const cardBox = await activeCard.boundingBox();
-  const triangleBox = await activeCard.locator(".lstrip__triangle").boundingBox();
-  if (!cardBox || !triangleBox) throw new Error("expected both boxes to be measurable");
-  const fraction = (triangleBox.x + triangleBox.width / 2 - cardBox.x) / cardBox.width;
+  // measured ±1% accuracy for the underlying CSS technique). Read both in
+  // one browser task: sidebar expansion can change the card width between
+  // separate protocol calls, despite the caret tracking its width correctly.
+  const fraction = await activeCard.evaluate((card) => {
+    const triangle = card.querySelector(".lstrip__triangle");
+    if (!triangle) throw new Error("expected the active triangle");
+    const cardBox = card.getBoundingClientRect();
+    const triangleBox = triangle.getBoundingClientRect();
+    return (triangleBox.x + triangleBox.width / 2 - cardBox.x) / cardBox.width;
+  });
   expect(fraction).toBeGreaterThan(0.48);
   expect(fraction).toBeLessThan(0.52);
 });
@@ -2065,6 +2080,7 @@ test("@mock a stop marked arrived turns its card chartreuse and keeps the active
   await page.goto("/test-harness/maps");
   await expect(page.locator(".mapwrap")).toHaveAttribute("data-map-state", "ready");
   await page.getByRole("button", { name: "Show driving specimen" }).click();
+  await expandDesktopItinerary(page, { waitForDock: true });
 
   const strip = page.getByTestId("driving-strip-specimen");
   const activeCard = strip.locator(".lstrip__stop").filter({ hasText: "Drive Specimen One" });

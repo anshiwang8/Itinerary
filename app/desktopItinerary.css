@@ -1,0 +1,279 @@
+/* One desktop sidebar owns the controls and the vertical journey. Only its
+   width changes on interaction; the map and the panel's anchors stay put. */
+.itinerary-dock {
+  position: absolute;
+  top: 16px;
+  bottom: 16px;
+  left: 16px;
+  z-index: 18;
+  display: flex;
+  flex-direction: column;
+  width: 288px;
+  max-width: calc(100vw - 96px);
+  min-height: 0;
+  background: var(--card);
+  border: 1px solid var(--rule-strong);
+  border-radius: 18px;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  transition: width 220ms ease;
+}
+
+.itinerary-dock[data-expanded="true"] { width: 420px; }
+
+.itinerary-dock__summary {
+  flex: 0 0 66px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 66px;
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.itinerary-dock__summary:hover { background: var(--card-2); }
+.itinerary-dock__summary:focus-visible {
+  outline: 3px solid var(--accent-deep);
+  outline-offset: -4px;
+  border-radius: 8px;
+}
+
+.itinerary-dock__destination {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.itinerary-dock__name {
+  font-family: var(--disp);
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -.015em;
+  white-space: nowrap;
+}
+
+.itinerary-dock__total,
+.itinerary-dock__action {
+  font-family: var(--grot);
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 400;
+  color: var(--ink-soft);
+}
+
+.itinerary-dock__total { white-space: nowrap; }
+.itinerary-dock__action {
+  flex: 0 0 auto;
+  max-width: 78px;
+  color: var(--accent-deep);
+  font-size: 11px;
+  text-align: right;
+}
+
+.itinerary-dock__chevron {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 220ms ease;
+}
+
+.itinerary-dock[data-expanded="true"] .itinerary-dock__chevron {
+  transform: rotate(180deg);
+}
+
+.itinerary-dock .lstrip {
+  position: static;
+  transform: none;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  width: 100%;
+  min-height: 0;
+  max-width: none;
+  padding: 0 14px 20px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 12px;
+}
+
+.itinerary-dock .lstrip::-webkit-scrollbar { width: 6px; }
+
+.itinerary-dock .lstrip__home,
+.itinerary-dock .lstrip__stop,
+.itinerary-dock .lstrip__leg {
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  box-shadow: none;
+}
+
+.itinerary-dock .lstrip__home {
+  padding: 12px 4px 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.itinerary-dock .lstrip__homehead { gap: 6px; margin-bottom: 7px; }
+.itinerary-dock .lstrip__homehead .eyebrow { font-size: 10px; letter-spacing: .08em; }
+.itinerary-dock .lstrip__homeicon { width: 14px; height: 14px; flex: 0 0 auto; }
+.itinerary-dock .lstrip__hometitle {
+  margin-bottom: 5px;
+  font-family: var(--disp);
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -.02em;
+}
+
+.itinerary-dock .lstrip__name--home {
+  margin-bottom: 5px;
+  font-family: var(--grot);
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.itinerary-dock .lstrip__stop {
+  padding: 15px;
+  border-radius: 14px;
+  background: var(--card-2);
+}
+
+/* Selection still marks the map's selected venue even when its editing
+   detail is hidden in the compact panel. */
+.itinerary-dock .lstrip__stop--sel {
+  width: 100%;
+  background: var(--card);
+  border-color: var(--accent);
+}
+
+.itinerary-dock .lstrip__stophead { margin-bottom: 10px; }
+.itinerary-dock .lstrip__stophead .eyebrow {
+  min-width: 0;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.itinerary-dock .lstrip__num {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  font-size: 11px;
+  box-shadow: none;
+}
+
+.itinerary-dock .lstrip__stop .lstrip__name {
+  margin-bottom: 7px;
+  font-size: 21px;
+  line-height: 1.2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.itinerary-dock .lstrip__be { font-size: 13px; line-height: 1.5; }
+.itinerary-dock .lstrip__facts { flex-wrap: wrap; margin-top: 7px; font-size: 12px; }
+.itinerary-dock .lstrip__desc {
+  margin-top: 11px;
+  font-family: var(--grot);
+  font-size: 13px;
+  font-style: normal;
+  line-height: 1.55;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* The native hidden state and inert prop keep compact details out of both
+   the accessibility tree and the tab order without unmounting edit state. */
+.itinerary-dock .lstrip__details[hidden] { display: none; }
+.itinerary-dock .lstrip__reason {
+  font-family: var(--grot);
+  font-size: 13px;
+  line-height: 1.55;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.itinerary-dock .lstrip__why { font-size: 10px; }
+.itinerary-dock .lstrip__swap,
+.itinerary-dock .lstrip__remove { margin-top: 13px; padding-top: 12px; }
+.itinerary-dock .lstrip__swaplabel { display: block; font-size: 12px; margin-bottom: 7px; }
+.itinerary-dock .lstrip__swapinput { background: var(--card-2); }
+.itinerary-dock .lstrip__swapgo { padding: 0 12px; }
+.itinerary-dock .lstrip__swaperr,
+.itinerary-dock .lstrip__removeerr {
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.itinerary-dock .lstrip__remove--armed { padding: 12px; }
+.itinerary-dock .lstrip__removeask { font-size: 13px; line-height: 1.5; }
+
+/* The dotted connector is decorative. Route identity, provider facts and
+   the exact ride colours remain on the existing route summaries. */
+.itinerary-dock .lstrip__leg,
+.itinerary-dock .lstrip__leg--open {
+  width: auto;
+  margin: -3px 0 -3px 13px;
+  padding: 11px 4px 11px 19px;
+  border: 0;
+  border-left: 2px dotted var(--rule-strong);
+  border-radius: 0;
+  background: transparent;
+  align-self: stretch;
+}
+
+.itinerary-dock .lstrip__legline { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.itinerary-dock .lstrip__legmeta { margin-top: 4px; font-size: 12px; }
+.itinerary-dock .lstrip__legtimes { margin-top: 4px; font-size: 11px; line-height: 1.5; }
+.itinerary-dock .lstrip__legicon { width: 19px; height: 19px; margin-bottom: 5px; }
+.itinerary-dock .lstrip__legicon svg { width: 19px; height: 19px; }
+.itinerary-dock .lstrip__timeline { margin-top: 10px; padding-top: 10px; }
+.itinerary-dock .lstrip__tlrow { font-size: 12px; padding: 4px 0; }
+.itinerary-dock .lstrip__tlwhere { font-size: 12px; line-height: 1.5; }
+.itinerary-dock .lstrip__walkwarning { font-size: 11px; line-height: 1.5; }
+
+/* Signal colours keep their established precedence over neutral cards and
+   selection, including when more than one state applies. */
+.itinerary-dock .lstrip__stop--done { background: var(--card-2); }
+.itinerary-dock .lstrip__stop--live,
+.itinerary-dock .lstrip__stop--changed { border-color: var(--live); }
+.itinerary-dock .lstrip__stop--arrived { background: var(--live-wash); border-color: var(--live); }
+.itinerary-dock .lstrip__stop--arming { border-color: var(--danger); }
+
+/* Keep the single toolbar in its existing mobile position. Only desktop
+   itinerary children disappear; the mobile sheet itself is unchanged. */
+@media (max-width: 768px) {
+  .itinerary-dock { display: contents; }
+  .itinerary-dock__summary,
+  .itinerary-dock .lstrip { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .itinerary-dock,
+  .itinerary-dock__chevron { transition: none; }
+}

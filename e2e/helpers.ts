@@ -17,7 +17,10 @@ export async function planEvening(
   prompt: string,
   /** The landing travel-mode toggle. Omitted = leave it on its default,
    *  which is Transit — so every existing spec is byte-identical. */
-  travelMode?: "transit" | "driving"
+  travelMode?: "transit" | "driving",
+  /** Existing scenarios operate on cards. Tests of the compact desktop
+   *  default explicitly opt out of opening that surface. */
+  options: { expandDesktop?: boolean } = {}
 ): Promise<void> {
   await page.goto("/");
   await page.locator(".prompt__input").fill(prompt);
@@ -39,7 +42,7 @@ export async function planEvening(
   // are always mounted; only one is ever visible per viewport) never wins
   // `.first()` over the genuinely visible surface.
   await expect(
-    page.locator(".lstrip:visible, .msheet:visible, .empty__err, .stage__err").first()
+    page.locator(".itinerary-dock:visible, .lstrip:visible, .msheet:visible, .empty__err, .stage__err").first()
   ).toBeVisible({
     timeout: 90_000,
   });
@@ -51,6 +54,38 @@ export async function planEvening(
   // Pins remain present on the deterministic fallback projection when the
   // external Maps JavaScript provider is unavailable.
   await expect(page.locator(".chip").first()).toBeVisible({ timeout: 30_000 });
+  if (options.expandDesktop !== false) await expandDesktopItinerary(page);
+}
+
+/** Open the desktop itinerary through its real disclosure control. Both
+ *  surfaces remain mounted at all widths; visibility, not a JS width check,
+ *  tells this helper whether the desktop dock is the active surface. */
+export async function expandDesktopItinerary(
+  page: Page,
+  options: { waitForDock?: boolean; timeout?: number } = {}
+): Promise<void> {
+  const dock = page.locator(".itinerary-dock");
+  const summary = dock.locator(".itinerary-dock__summary");
+  // Manual recovery/geocoding flows call before planning has finished. The
+  // summary signals that the desktop journey and its controls have mounted.
+  if (options.waitForDock) await expect(summary).toBeVisible({ timeout: options.timeout ?? 90_000 });
+  // Mobile retains the single toolbar inside a display:contents wrapper.
+  // Only the summary identifies the visible desktop itinerary surface.
+  if (!(await summary.isVisible())) return;
+  if ((await summary.getAttribute("aria-expanded")) !== "true") {
+    // Keyboard activation also works in the isolated Maps specimen harness,
+    // whose test-only controls overlap the sidebar's top-left coordinates.
+    // Product pointer hit testing is covered explicitly in ui-fixture.spec.
+    await summary.focus();
+    await summary.press("Enter");
+  }
+  // A preceding outside control can leave the dock visible only until its
+  // hover-close grace period expires. Give it deliberate keyboard focus
+  // before reading cards, while preserving real mutation focus in the dock.
+  if (!(await dock.evaluate((element) => element.contains(document.activeElement)))) {
+    await summary.focus();
+  }
+  await expect(page.locator(".lstrip")).toBeVisible();
 }
 
 /** If the clarify QUESTIONS appear, click "Skip, just plan it" so the
@@ -59,7 +94,7 @@ export async function planEvening(
  *  THAT here would silently drop a stop mid-test. */
 export async function dismissClarifyIfShown(page: Page): Promise<void> {
   const outcome = page
-    .locator(".clarify:visible, .lstrip:visible, .msheet:visible, .empty__err, .stage__err")
+    .locator(".clarify:visible, .itinerary-dock:visible, .lstrip:visible, .msheet:visible, .empty__err, .stage__err")
     .first();
   await expect(outcome).toBeVisible({ timeout: 90_000 });
   const skip = page.getByRole("button", { name: "Skip, just plan it" });
@@ -94,9 +129,9 @@ export async function planExpectingProblem(page: Page, prompt: string): Promise<
  */
 export async function swapOn(page: Page, venueName: string, refinement: string): Promise<void> {
   // Via selectStop, and both halves of that matter. It clicks the card's own
-  // SELECT BUTTON rather than the card box: `.lstrip` is a flex row, so every
-  // card stretches to the tallest one, and a click at a stretched card's centre
-  // can land below its button entirely — which selects nothing. And it WAITS
+  // SELECT BUTTON rather than the card box: a card includes details and edit
+  // controls, so a click at its centre can land outside the selection button
+  // entirely — which selects nothing. And it WAITS
   // for the selection to stick, closing the auto-select race.
   //
   // The input is then scoped to THIS card. It used to be page-wide, which is
@@ -152,6 +187,7 @@ export async function switchMode(
     option.click(),
   ]);
   await expect(option).toHaveAttribute("aria-checked", "true");
+  await expandDesktopItinerary(page);
 }
 
 /**
@@ -166,6 +202,7 @@ export async function switchMode(
  * selection first, then asserting the new one took, removes both.
  */
 export async function selectStop(page: Page, venueName: string): Promise<void> {
+  await expandDesktopItinerary(page);
   await expect(page.locator(".lstrip__stop--sel")).toHaveCount(1);
   const card = stripCard(page, venueName);
   await card.locator(".lstrip__select").click();
@@ -259,6 +296,7 @@ async function startLabel(scope: Locator, kind: "strip" | "pin"): Promise<string
  * strip/map/store agreement check.
  */
 export async function expectStripMatchesPin(page: Page, venueName: string): Promise<void> {
+  await expandDesktopItinerary(page);
   const card = stripCard(page, venueName);
   const pin = mapPin(page, venueName);
   await expect(card, `strip card for "${venueName}"`).toBeVisible();

@@ -8,6 +8,7 @@ import {
   contentStateFor,
   resolveSheetHeights,
   resolveSnapTarget,
+  sheetReleaseVelocity,
   sheetHeightFor,
   PEEK_HEIGHT_PX,
 } from "./bottomSheet";
@@ -55,6 +56,58 @@ const cases: Case[] = [
       const result = resolveSheetHeights(50, 0);
       assert.ok(result.half > result.peek, "half must stay strictly above peek");
       assert.ok(result.full > result.half, "full must stay strictly above half");
+    },
+  ],
+  [
+    "resolveSheetHeights: expanded sheet leaves the measured plan controls and notice unobscured",
+    () => {
+      // An 844px phone with 180px of controls and a 34px home indicator.
+      // The controls, rather than the old 90%-of-viewport rule, set full.
+      const result = resolveSheetHeights(844, 34, 180);
+      assert.strictEqual(result.full, 664);
+      assert.strictEqual(844 - result.full, 180);
+      assert.strictEqual(result.peek, PEEK_HEIGHT_PX + 34);
+      assert.strictEqual(result.half, 844 * 0.45);
+    },
+  ],
+  [
+    "resolveSheetHeights: the 90% viewport ceiling still wins when controls fit above it",
+    () => {
+      assert.deepStrictEqual(resolveSheetHeights(VIEWPORT, 0, 60), HEIGHTS);
+      assert.deepStrictEqual(resolveSheetHeights(VIEWPORT, 0, -50), HEIGHTS);
+      assert.deepStrictEqual(resolveSheetHeights(VIEWPORT, 0, 90), HEIGHTS);
+      assert.ok(resolveSheetHeights(VIEWPORT, 0, 91).full < HEIGHTS.full);
+    },
+  ],
+  [
+    "resolveSheetHeights: a short keyboard viewport compresses all snaps inside the available space",
+    () => {
+      const result = resolveSheetHeights(300, 34, 180);
+      assert.strictEqual(result.full, 120);
+      assert.ok(result.peek > 0);
+      assert.ok(result.peek < result.half);
+      assert.ok(result.half < result.full);
+      assert.ok(result.peek < PEEK_HEIGHT_PX, "the fixed peek must yield to the actual viewport cap");
+    },
+  ],
+  [
+    "resolveSheetHeights: controls and unusually large safe areas never invert the snap order",
+    () => {
+      for (const viewport of [240, 390, 640, 844, 1024]) {
+        for (const safeArea of [0, 34, 1000]) {
+          for (const clearance of [0, 144, viewport - 3, viewport, viewport + 100]) {
+            const result = resolveSheetHeights(viewport, safeArea, clearance);
+            const label = JSON.stringify({ viewport, safeArea, clearance, result });
+            assert.ok(result.peek > 0, label);
+            assert.ok(result.peek < result.half && result.half < result.full, label);
+            assert.ok(result.full <= viewport * 0.9, label);
+            // With less than three pixels available, the three ordered
+            // states retain a minimal emergency surface instead of NaN.
+            if (viewport - clearance >= 3) assert.ok(result.full <= viewport - clearance, label);
+            else assert.strictEqual(result.full, 3, label);
+          }
+        }
+      }
     },
   ],
   [
@@ -138,6 +191,44 @@ const cases: Case[] = [
     () => {
       const barelyMoved = HEIGHTS.peek + 5;
       assert.strictEqual(resolveSnapTarget(barelyMoved, 0.5, HEIGHTS), "peek");
+    },
+  ],
+  [
+    "sheetReleaseVelocity: a fresh sample preserves upward and downward fling direction",
+    () => {
+      assert.strictEqual(sheetReleaseVelocity(0.8, 1000, 1040), 0.8);
+      assert.strictEqual(sheetReleaseVelocity(-0.8, 1000, 1040), -0.8);
+      assert.strictEqual(sheetReleaseVelocity(0.25, 1000, 1000), 0.25);
+    },
+  ],
+  [
+    "sheetReleaseVelocity: the 100ms freshness boundary is inclusive and expires immediately after",
+    () => {
+      assert.strictEqual(sheetReleaseVelocity(0.8, 1000, 1100), 0.8);
+      assert.strictEqual(sheetReleaseVelocity(0.8, 1000, 1100.01), 0);
+    },
+  ],
+  [
+    "sheetReleaseVelocity: holding after a flick settles at the nearby point rather than reusing the old fling",
+    () => {
+      const stoppedNearPeek = HEIGHTS.peek + 5;
+      const fresh = sheetReleaseVelocity(0.8, 1000, 1040);
+      const held = sheetReleaseVelocity(0.8, 1000, 1500);
+      assert.strictEqual(resolveSnapTarget(stoppedNearPeek, fresh, HEIGHTS), "half");
+      assert.strictEqual(resolveSnapTarget(stoppedNearPeek, held, HEIGHTS), "peek");
+      const stoppedNearFull = HEIGHTS.full - 5;
+      assert.strictEqual(resolveSnapTarget(stoppedNearFull, sheetReleaseVelocity(-0.8, 1000, 1500), HEIGHTS), "full");
+    },
+  ],
+  [
+    "sheetReleaseVelocity: invalid samples or clocks cannot manufacture a fling",
+    () => {
+      for (const invalid of [NaN, Infinity, -Infinity]) {
+        assert.strictEqual(sheetReleaseVelocity(invalid, 1000, 1010), 0);
+        assert.strictEqual(sheetReleaseVelocity(0.8, invalid, 1010), 0);
+        assert.strictEqual(sheetReleaseVelocity(0.8, 1000, invalid), 0);
+      }
+      assert.strictEqual(sheetReleaseVelocity(0.8, 1000, 999), 0);
     },
   ],
   [

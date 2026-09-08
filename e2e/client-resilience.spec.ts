@@ -6,6 +6,7 @@ import {
   stripCard,
   swapOn,
   expectStripMatchesPin,
+  expandDesktopItinerary,
 } from "./helpers";
 
 test("@mock D7 End is disabled throughout an in-flight swap and enabled after it settles", async ({ page }) => {
@@ -188,6 +189,7 @@ test.describe("@mock typed client transport", () => {
     await expect(page.locator(".weather")).toHaveCount(0);
     await expect(page.locator(".loading")).toHaveCount(0, { timeout: 30_000 });
     await expect(page.locator(".topbar__go")).toBeEnabled();
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(page.locator(".lstrip")).toBeVisible();
   });
 
@@ -253,6 +255,7 @@ test.describe("@mock typed client transport", () => {
       releaseRecovery();
     }
 
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(
       page.locator(".lstrip__name", { hasText: "Citywide Dumpling Bar" })
     ).toBeVisible({ timeout: 30_000 });
@@ -319,6 +322,7 @@ test.describe("@mock typed client transport", () => {
       releaseRecovery();
     }
 
+    await expandDesktopItinerary(page, { waitForDock: true });
     await expect(
       page.locator(".lstrip__name", { hasText: "Citywide Dumpling Bar" })
     ).toBeVisible({ timeout: 30_000 });
@@ -351,6 +355,7 @@ test.describe("@mock mutation transport", () => {
     await page
       .locator('.dev input[type="datetime-local"]')
       .fill(planDayAt(20));
+    await expandDesktopItinerary(page);
     await expect(stripCard(page, "Velvet Fig").locator(".lstrip__now")).toBeVisible();
 
     await page.route(
@@ -391,6 +396,7 @@ test.describe("@mock mutation transport", () => {
     await page
       .locator('.dev input[type="datetime-local"]')
       .fill(planDayAt(20));
+    await expandDesktopItinerary(page);
     await expect(
       stripCard(page, "Velvet Fig").locator(".lstrip__now")
     ).toBeVisible();

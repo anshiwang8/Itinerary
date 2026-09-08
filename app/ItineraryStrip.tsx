@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useId, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { formatStopRange, formatStopTime } from "./lib/timeLabels";
 import { resolveCategory } from "./api/schedule/durations";
 import {
@@ -17,11 +17,9 @@ import {
 import { originDisplayLabel } from "./lib/locationLabels";
 import { computeTriangleCreep } from "./lib/activeTriangleCreep";
 
-// Horizontal itinerary strip — the primary surface, sitting just under
-// the search bar. Reads left to right like a transit-app trip view:
-// home → stop → transit leg → stop → transit leg → stop. Low-emphasis by
-// default, crisp on hover/focus. Warm-paper cards, ink-navy, Fraunces +
-// Space Grotesk; chartreuse stays reserved for the active/changed stop.
+// The desktop sidebar always shows the journey in order. Hover, keyboard
+// focus or its explicit control widen it for details, using the original
+// stop selection, travel identity and mutation contracts.
 
 export interface StripLeg {
   legId?: string | null;
@@ -236,6 +234,7 @@ function LegCard({
   origin,
   manualLegId,
   onToggleManualLeg,
+  panelExpanded,
 }: {
   leg: StripLeg;
   timeZone: string;
@@ -245,6 +244,7 @@ function LegCard({
   origin: "home" | "interstop";
   manualLegId: string | null;
   onToggleManualLeg: (legId: string) => void;
+  panelExpanded: boolean;
 }) {
   // This leg's SELECTION: the user tapped this card. One of the two inputs
   // to the visibility rule — the other is the clock, and neither is a
@@ -274,7 +274,7 @@ function LegCard({
       ? legacySelected
       : false;
   const underway = legUnderway(leg, now.getTime());
-  const showTimeline = shouldShowTimeline({
+  const showTimeline = panelExpanded && shouldShowTimeline({
     isTransit,
     hasTimeline: timeline !== null,
     isActiveNow: underway,
@@ -587,6 +587,11 @@ function RemoveControl({
         >
           Remove
         </button>
+        {remove.error && (
+          <div id={errorId} className="lstrip__removeerr" role="alert">
+            {remove.error}
+          </div>
+        )}
       </div>
     );
   }
@@ -640,6 +645,9 @@ function StopCard({
   arrived,
   focusRequest,
   onFocusHandled,
+  focusReady = true,
+  onRemovalArmedChange,
+  panelExpanded,
 }: {
   stop: StripStop;
   index: number;
@@ -660,19 +668,35 @@ function StopCard({
   arrived: boolean;
   focusRequest?: StripFocusRequest | null;
   onFocusHandled?: (nonce: number) => void;
+  focusReady?: boolean;
+  onRemovalArmedChange?: (stopId: string, armed: boolean) => void;
+  panelExpanded: boolean;
 }) {
   const selectRef = useRef<HTMLButtonElement>(null);
   const handledFocusNonce = useRef<number | null>(null);
   const detailsId = useId();
   const swapInputId = useId();
   const swapErrorId = useId();
+  const detailsVisible = selected && panelExpanded;
   // Armed lives HERE rather than inside the control, because the card's own
   // border turns danger-red while the question is up — the thing being removed
   // has to be the thing that looks at risk. It needs no reset: the control is
   // only rendered for the selected card, so deselecting unmounts it and the
   // state goes with it.
   const [armed, setArmed] = useState(false);
-  const disarm = useCallback(() => setArmed(false), []);
+  const disarm = useCallback(() => {
+    setArmed(false);
+    onRemovalArmedChange?.(stop.id, false);
+  }, [onRemovalArmedChange, stop.id]);
+  const arm = useCallback(() => {
+    setArmed(true);
+    onRemovalArmedChange?.(stop.id, true);
+  }, [onRemovalArmedChange, stop.id]);
+
+  useEffect(
+    () => () => onRemovalArmedChange?.(stop.id, false),
+    [onRemovalArmedChange, stop.id]
+  );
   const price = stop.price ? PRICE_LABEL[stop.price] ?? null : null;
   const cls =
     "lstrip__stop" +
@@ -692,6 +716,7 @@ function StopCard({
 
   useEffect(() => {
     if (
+      !focusReady ||
       !focusRequest ||
       focusRequest.stopId !== stop.id ||
       handledFocusNonce.current === focusRequest.nonce
@@ -707,7 +732,7 @@ function StopCard({
 
     handledFocusNonce.current = focusRequest.nonce;
     onFocusHandled?.(focusRequest.nonce);
-  }, [focusRequest, onFocusHandled, stop.id]);
+  }, [focusReady, focusRequest, onFocusHandled, stop.id]);
 
   return (
     <div className={cls} role="listitem">
@@ -715,7 +740,7 @@ function StopCard({
         ref={selectRef}
         type="button"
         className="lstrip__select"
-        aria-expanded={selected}
+        aria-expanded={detailsVisible}
         aria-controls={detailsId}
         onClick={onSelect}
       >
@@ -758,9 +783,16 @@ function StopCard({
             <span className="lstrip__price">Free</span>
           )}
         </span>
-        {stop.description && <span className="lstrip__desc">{stop.description}</span>}
+        {panelExpanded && stop.description && (
+          <span className="lstrip__desc">{stop.description}</span>
+        )}
       </button>
-      <div id={detailsId} hidden={!selected}>
+      <div
+        id={detailsId}
+        className="lstrip__details"
+        hidden={!detailsVisible}
+        inert={!detailsVisible}
+      >
         {/* the reason is PICK JUSTIFICATION, never a description — labeled so
             that on venues with no Places editorial (desc line absent) the
             LLM-written reason can't read as a factual description */}
@@ -828,7 +860,7 @@ function StopCard({
           <RemoveControl
             stopName={stop.name}
             armed={armed}
-            onArm={() => setArmed(true)}
+            onArm={arm}
             onDisarm={disarm}
             remove={remove}
           />
@@ -855,6 +887,9 @@ function StopCard({
 }
 
 export interface ItineraryStripProps {
+  /** The shared planning toolbar. It stays in one DOM location: the sidebar
+   * on desktop and its original fixed mobile position through CSS. */
+  controls?: ReactNode;
   home?: StripHome | null;
   stops: StripStop[];
   selected: string | null;
@@ -883,6 +918,7 @@ export interface ItineraryStripProps {
 }
 
 export default function ItineraryStrip({
+  controls,
   home,
   stops,
   selected,
@@ -897,24 +933,181 @@ export default function ItineraryStrip({
   focusRequest,
   onFocusHandled,
 }: ItineraryStripProps) {
+  const dockRef = useRef<HTMLDivElement>(null);
+  const summaryRef = useRef<HTMLButtonElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pointerInside = useRef(false);
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const [explicitOpen, setExplicitOpen] = useState(false);
+  const [focusInside, setFocusInside] = useState(false);
+  const [suppressFocusOpen, setSuppressFocusOpen] = useState(false);
+  const [armedStopId, setArmedStopId] = useState<string | null>(null);
+  const listId = useId();
+  const summaryId = useId();
+
+  const cancelClose = useCallback(() => {
+    if (closeTimer.current !== null) clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+  }, []);
+
+  const queueClose = useCallback(() => {
+    cancelClose();
+    closeTimer.current = setTimeout(() => {
+      closeTimer.current = null;
+      if (pointerInside.current) return;
+      setHoverOpen(false);
+      // Pointer and focus are temporary holds. An explicit "Keep open"
+      // choice survives both leaving until Compact or Escape clears it.
+      if (!dockRef.current?.contains(document.activeElement)) {
+        setFocusInside(false);
+        setSuppressFocusOpen(false);
+      }
+    }, 180);
+  }, [cancelClose]);
+
+  useEffect(() => cancelClose, [cancelClose]);
+
+  const reportRemovalArmed = useCallback((stopId: string, armed: boolean) => {
+    setArmedStopId((current) => armed ? stopId : current === stopId ? null : current);
+  }, []);
+
+  const removalArmed =
+    armedStopId !== null && selected === armedStopId &&
+    stops.some((stop) => stop.id === armedStopId);
+  const hasDraft = Boolean(swap?.text.trim());
+  const pending = Boolean(swap?.submitting || remove?.submitting);
+  const hasError = Boolean(swap?.error || remove?.error);
+  // Selection is intentionally absent: planning auto-selects a venue, but
+  // that is neither an editing session nor a request to cover the map.
+  const protectedOpen = hasDraft || pending || hasError || removalArmed;
+  const heldOpen = protectedOpen || (focusInside && !suppressFocusOpen);
+  // A mutation's focus request widens the panel before StopCard tries to
+  // focus it. That focus holds the details after the nonce is handled.
+  const expanded = explicitOpen || hoverOpen || heldOpen || Boolean(focusRequest);
+  const lastTimedStop = [...stops].reverse().find((stop) => stop.end);
+
   if (stops.length === 0) return null;
+
+  const closeDisclosure = () => {
+    if (protectedOpen) return;
+    cancelClose();
+    setExplicitOpen(false);
+    setHoverOpen(false);
+    setSuppressFocusOpen(true);
+    summaryRef.current?.focus({ preventScroll: true });
+  };
+
   return (
-    <div className="lstrip" role="list" aria-label="Your evening, stop by stop">
+    <div
+      ref={dockRef}
+      className="itinerary-dock"
+      data-expanded={expanded}
+      data-held-open={heldOpen}
+      onPointerEnter={(event) => {
+        // Capability is checked at the interaction, never to choose the
+        // mobile/desktop layout. Touch must not leave a sticky hover open.
+        if (
+          event.pointerType !== "mouse" ||
+          !window.matchMedia("(hover: hover) and (pointer: fine)").matches
+        ) return;
+        pointerInside.current = true;
+        cancelClose();
+        setHoverOpen(true);
+      }}
+      onPointerLeave={(event) => {
+        if (event.pointerType !== "mouse") return;
+        pointerInside.current = false;
+        queueClose();
+      }}
+      onFocusCapture={(event) => {
+        cancelClose();
+        setFocusInside(true);
+        // Escape deliberately returns to the summary without reopening.
+        // Continuing into the toolbar or journey resumes ordinary focus
+        // expansion, even though focus has stayed inside this wrapper.
+        if (
+          (event.target as EventTarget) !== summaryRef.current ||
+          !event.currentTarget.contains(event.relatedTarget as Node | null)
+        ) {
+          setSuppressFocusOpen(false);
+        }
+      }}
+      onBlurCapture={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        if (pointerInside.current) {
+          setFocusInside(false);
+          setSuppressFocusOpen(false);
+        } else queueClose();
+      }}
+      onKeyDown={(event) => {
+        // The shared toolbar keeps its original mobile keyboard behavior;
+        // CSS alone decides whether the desktop disclosure is present.
+        if (!summaryRef.current?.getClientRects().length) return;
+        if (event.key !== "Escape" || protectedOpen) return;
+        event.preventDefault();
+        event.stopPropagation();
+        closeDisclosure();
+      }}
+    >
+      {controls}
+      <button
+        ref={summaryRef}
+        type="button"
+        className="itinerary-dock__summary"
+        aria-expanded={expanded}
+        aria-controls={listId}
+        aria-describedby={summaryId}
+        aria-label={explicitOpen ? "Compact itinerary" :
+          expanded ? "Keep itinerary expanded" : "Expand itinerary"}
+        onClick={() => {
+          if (explicitOpen) closeDisclosure();
+          else {
+            cancelClose();
+            setSuppressFocusOpen(false);
+            setExplicitOpen(true);
+          }
+        }}
+      >
+        <span className="itinerary-dock__destination" id={summaryId}>
+          <span className="itinerary-dock__name">Your itinerary</span>
+          <span className="itinerary-dock__total">
+            {stops.length} {stops.length === 1 ? "stop" : "stops"}
+            {lastTimedStop?.end && (
+              <> · ends {formatStopTime(lastTimedStop.end, now, timeZone)}</>
+            )}
+          </span>
+        </span>
+        <span className="itinerary-dock__action">
+          {hasError ? "Review update" : pending ? "Updating…" :
+            removalArmed ? "Confirm removal" : hasDraft ? "Editing stop" :
+            explicitOpen ? "Compact" : expanded ? "Keep open" : "Expand"}
+        </span>
+        <svg className="itinerary-dock__chevron" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m9 6 6 6-6 6" />
+        </svg>
+      </button>
+    <div
+      id={listId}
+      className="lstrip"
+      role="list"
+      aria-label="Your evening, stop by stop"
+    >
       {home && (
         <div className="lstrip__home" role="listitem">
           <div className="lstrip__homehead">
             <svg viewBox="0 0 24 24" aria-hidden="true" className="lstrip__homeicon">
               <path d="M12 3 3 10v11h6v-6h6v6h6V10z" />
             </svg>
-            <span className="eyebrow">home</span>
+            <span className="eyebrow">starting point</span>
           </div>
+          <div className="lstrip__hometitle">Home</div>
           <div className="lstrip__name lstrip__name--home">
             {originDisplayLabel(home.label)}
           </div>
           {home.leaveBy && <div className="lstrip__be">leave by {home.leaveBy}</div>}
         </div>
       )}
-      {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} now={now} origin="home" manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} />}
+      {home?.leg && <LegCard leg={home.leg} timeZone={timeZone} now={now} origin="home" manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} panelExpanded={expanded} />}
       {stops.map((s, i) => (
         <Fragment key={s.id}>
           <StopCard
@@ -929,12 +1122,16 @@ export default function ItineraryStrip({
             arrived={s.status === "active" && arrivedStopId === s.id}
             focusRequest={focusRequest}
             onFocusHandled={onFocusHandled}
+            focusReady={expanded}
+            onRemovalArmedChange={reportRemovalArmed}
+            panelExpanded={expanded}
           />
           {s.legToNext && (
-            <LegCard leg={s.legToNext} timeZone={timeZone} now={now} origin="interstop" manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} />
+            <LegCard leg={s.legToNext} timeZone={timeZone} now={now} origin="interstop" manualLegId={manualLegId} onToggleManualLeg={onToggleManualLeg} panelExpanded={expanded} />
           )}
         </Fragment>
       ))}
+    </div>
     </div>
   );
 }

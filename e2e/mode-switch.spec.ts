@@ -28,6 +28,7 @@ import {
   swapOn,
   switchMode,
   expectStripMatchesPin,
+  expandDesktopItinerary,
 } from "./helpers";
 
 /** The leg leaving home — the one fixture leg whose mode is discriminating. */
@@ -36,6 +37,7 @@ const homeLeg = (page: import("@playwright/test").Page) =>
 
 /** Every venue name on the strip, in order. */
 async function venueNames(page: import("@playwright/test").Page): Promise<string[]> {
+  await expandDesktopItinerary(page);
   const names = page.locator(".lstrip__stop .lstrip__name");
   const count = await names.count();
   const out: string[] = [];
