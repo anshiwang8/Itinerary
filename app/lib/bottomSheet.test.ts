@@ -9,7 +9,9 @@ import {
   resolveSheetHeights,
   resolveSnapTarget,
   sheetReleaseVelocity,
+  sheetTerminalVelocity,
   sheetHeightFor,
+  unclampDragHeight,
   PEEK_HEIGHT_PX,
 } from "./bottomSheet";
 
@@ -35,7 +37,7 @@ const cases: Case[] = [
     },
   ],
   [
-    "resolveSheetHeights: safe-area inset extends peek only, not half/full",
+    "resolveSheetHeights: on tall viewports the safe-area inset extends peek without changing half/full",
     () => {
       const withInset = resolveSheetHeights(VIEWPORT, 34);
       assert.strictEqual(withInset.peek, PEEK_HEIGHT_PX + 34);
@@ -80,10 +82,24 @@ const cases: Case[] = [
     },
   ],
   [
+    "resolveSheetHeights: short half viewports leave a readable body below the grip and heading",
+    () => {
+      const landscape = resolveSheetHeights(390, 0, 144);
+      assert.deepStrictEqual(landscape, { peek: 128, half: 216, full: 246 });
+      assert.strictEqual(landscape.half - 44 - 60, 112);
+      const withSafeArea = resolveSheetHeights(390, 34, 120);
+      assert.deepStrictEqual(withSafeArea, { peek: 162, half: 250, full: 270 });
+      assert.strictEqual(withSafeArea.half - 34 - 44 - 60, 112);
+      // The minimum changes only cramped layouts; a normal tall phone keeps
+      // its established fractional snap positions.
+      assert.deepStrictEqual(resolveSheetHeights(844, 34, 144), { peek: 162, half: 379.8, full: 700 });
+    },
+  ],
+  [
     "resolveSheetHeights: a short keyboard viewport compresses all snaps inside the available space",
     () => {
       const result = resolveSheetHeights(300, 34, 180);
-      assert.strictEqual(result.full, 120);
+      assert.deepStrictEqual(result, { peek: 118, half: 119, full: 120 });
       assert.ok(result.peek > 0);
       assert.ok(result.peek < result.half);
       assert.ok(result.half < result.full);
@@ -140,6 +156,33 @@ const cases: Case[] = [
     },
   ],
   [
+    "unclampDragHeight: re-grabbing either resisted edge preserves position and small finger movement",
+    () => {
+      const heights = resolveSheetHeights(844, 34, 144);
+      for (const painted of [127, 735]) {
+        const raw = unclampDragHeight(painted, heights);
+        assert.strictEqual(clampDragHeight(raw, heights), painted, "a stationary re-grab must not jump");
+        assert.ok(Math.abs(clampDragHeight(raw + 1, heights) - (painted + 0.35)) < 1e-9);
+        assert.ok(Math.abs(clampDragHeight(raw - 1, heights) - (painted - 0.35)) < 1e-9);
+      }
+    },
+  ],
+  [
+    "unclampDragHeight: raw and painted heights round-trip across bounds and compressed viewports",
+    () => {
+      for (const heights of [HEIGHTS, resolveSheetHeights(844, 34, 144), resolveSheetHeights(300, 34, 180)]) {
+        for (const raw of [heights.peek - 500, heights.peek - 1, heights.peek, heights.half, heights.full, heights.full + 1, heights.full + 300]) {
+          const restored = unclampDragHeight(clampDragHeight(raw, heights), heights);
+          assert.ok(Math.abs(restored - raw) < 1e-9, `${raw} must survive a drag/re-grab round trip`);
+        }
+        // The component caps its painted overshoot at full + 80px. Recover
+        // an equivalent raw baseline from that cap, not the pre-cap finger.
+        const capped = heights.full + 80;
+        assert.ok(Math.abs(clampDragHeight(unclampDragHeight(capped, heights), heights) - capped) < 1e-9);
+      }
+    },
+  ],
+  [
     "resolveSnapTarget: exactly at a point with no velocity returns that point",
     () => {
       assert.strictEqual(resolveSnapTarget(HEIGHTS.peek, 0, HEIGHTS), "peek");
@@ -178,6 +221,39 @@ const cases: Case[] = [
     },
   ],
   [
+    "resolveSnapTarget: crossing the old nearest-point midpoint cannot skip half in either direction",
+    () => {
+      const heights = resolveSheetHeights(844, 34, 144);
+      for (const height of [270.9, 271.9]) {
+        assert.strictEqual(resolveSnapTarget(height, 0.8, heights), "half");
+      }
+      for (const height of [540.9, 539.9]) {
+        assert.strictEqual(resolveSnapTarget(height, -0.8, heights), "half");
+      }
+    },
+  ],
+  [
+    "resolveSnapTarget: a fling advances past an exact snap only after the release reaches it",
+    () => {
+      const half = HEIGHTS.half;
+      assert.strictEqual(resolveSnapTarget(half - 0.01, 0.8, HEIGHTS), "half");
+      assert.strictEqual(resolveSnapTarget(half, 0.8, HEIGHTS), "full");
+      assert.strictEqual(resolveSnapTarget(half + 0.01, 0.8, HEIGHTS), "full");
+      assert.strictEqual(resolveSnapTarget(half + 0.01, -0.8, HEIGHTS), "half");
+      assert.strictEqual(resolveSnapTarget(half, -0.8, HEIGHTS), "peek");
+      assert.strictEqual(resolveSnapTarget(half - 0.01, -0.8, HEIGHTS), "peek");
+    },
+  ],
+  [
+    "resolveSnapTarget: flinging back from overscroll returns to the first bound instead of skipping it",
+    () => {
+      for (const speed of [-0.8, 0, 0.8]) {
+        assert.strictEqual(resolveSnapTarget(HEIGHTS.peek - 35, speed, HEIGHTS), "peek");
+        assert.strictEqual(resolveSnapTarget(HEIGHTS.full + 35, speed, HEIGHTS), "full");
+      }
+    },
+  ],
+  [
     "resolveSnapTarget: a fling never overshoots past the ends of SNAP_ORDER",
     () => {
       // already effectively at full, flinging further up must still resolve full
@@ -191,6 +267,7 @@ const cases: Case[] = [
     () => {
       const barelyMoved = HEIGHTS.peek + 5;
       assert.strictEqual(resolveSnapTarget(barelyMoved, 0.5, HEIGHTS), "peek");
+      assert.strictEqual(resolveSnapTarget(HEIGHTS.full - 5, -0.5, HEIGHTS), "full");
     },
   ],
   [
@@ -229,6 +306,46 @@ const cases: Case[] = [
         assert.strictEqual(sheetReleaseVelocity(0.8, 1000, invalid), 0);
       }
       assert.strictEqual(sheetReleaseVelocity(0.8, 1000, 999), 0);
+    },
+  ],
+  [
+    "sheetTerminalVelocity: a distinct release coordinate replaces a recent opposite-direction sample",
+    () => {
+      const heights = resolveSheetHeights(844, 34, 144);
+      const speed = sheetTerminalVelocity({ velocity: 1, lastY: 464, lastMoveAt: 1000, releaseY: 474, releasedAt: 1050 });
+      assert.strictEqual(speed, -0.2);
+      assert.strictEqual(resolveSnapTarget(370, speed, heights), "half");
+      const strongReversal = sheetTerminalVelocity({ velocity: 1, lastY: 464, lastMoveAt: 1000, releaseY: 484, releasedAt: 1010 });
+      assert.strictEqual(strongReversal, -2);
+      assert.strictEqual(resolveSnapTarget(370, strongReversal, heights), "peek");
+      assert.strictEqual(sheetTerminalVelocity({ velocity: -1, lastY: 464, lastMoveAt: 1000, releaseY: 444, releasedAt: 1010 }), 2);
+    },
+  ],
+  [
+    "sheetTerminalVelocity: an unchanged release coordinate retains fresh motion but expires after a hold",
+    () => {
+      const sample = { velocity: 0.8, lastY: 464, lastMoveAt: 1000, releaseY: 464 };
+      assert.strictEqual(sheetTerminalVelocity({ ...sample, releasedAt: 1000 }), 0.8);
+      assert.strictEqual(sheetTerminalVelocity({ ...sample, releasedAt: 1100 }), 0.8);
+      assert.strictEqual(sheetTerminalVelocity({ ...sample, releasedAt: 1100.01 }), 0);
+      assert.strictEqual(sheetTerminalVelocity({ ...sample, releasedAt: 1500 }), 0);
+      assert.strictEqual(sheetTerminalVelocity({ ...sample, releaseY: 364, releasedAt: 1100 }), 1);
+      assert.strictEqual(sheetTerminalVelocity({ ...sample, releaseY: 364, releasedAt: 1100.01 }), 0);
+    },
+  ],
+  [
+    "sheetTerminalVelocity: missing timing or invalid coordinates never invent terminal motion",
+    () => {
+      const sample = { velocity: 0.8, lastY: 464, lastMoveAt: 1000, releaseY: 454, releasedAt: 1010 };
+      assert.strictEqual(sheetTerminalVelocity({ ...sample, releasedAt: 1000 }), 0);
+      assert.strictEqual(sheetTerminalVelocity({ ...sample, releasedAt: 999 }), 0);
+      for (const invalid of [NaN, Infinity, -Infinity]) {
+        assert.strictEqual(sheetTerminalVelocity({ ...sample, lastY: invalid }), 0);
+        assert.strictEqual(sheetTerminalVelocity({ ...sample, releaseY: invalid }), 0);
+        assert.strictEqual(sheetTerminalVelocity({ ...sample, lastMoveAt: invalid }), 0);
+        assert.strictEqual(sheetTerminalVelocity({ ...sample, releasedAt: invalid }), 0);
+        assert.strictEqual(sheetTerminalVelocity({ ...sample, velocity: invalid, releaseY: sample.lastY }), 0);
+      }
     },
   ],
   [

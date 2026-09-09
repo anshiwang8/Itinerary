@@ -30,6 +30,11 @@ interface EntryProps {
   stopCount?: number;
 }
 
+interface HalfPageProps extends EntryProps {
+  /** Opens the full, scrollable itinerary where every summary fact is shown. */
+  onShowDetails: () => void;
+}
+
 function HomeIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -106,11 +111,11 @@ function HomeLeave({ home, timeZone, now }: { home: StripHome; timeZone: string;
   return home.leaveBy ? <span className="msheet__rowwhen">Leave by {home.leaveBy}</span> : null;
 }
 
-function StopTime({ stop, timeZone, now }: { stop: StripStop; timeZone: string; now: Date }) {
+function StopTime({ stop, timeZone, now, summary = false }: { stop: StripStop; timeZone: string; now: Date; summary?: boolean }) {
   if (!stop.start || !stop.end) return null;
   return (
     <span className={"msheet__rowwhen" + (stop.changed ? " msheet__rowwhen--changed" : "")}>
-      {stop.changed && stop.oldStart && stop.oldStart !== stop.start && (
+      {!summary && stop.changed && stop.oldStart && stop.oldStart !== stop.start && (
         <s className="msheet__oldtime">{formatStopTime(stop.oldStart, now, timeZone)}</s>
       )}
       {formatStopRange(stop.start, stop.end, now, timeZone)}
@@ -148,15 +153,17 @@ export function PeekLine({
 }
 
 export function HalfPage({
-  entry, selected, onSelect, timeZone, now = new Date(), arrivedStopId, stopNumber, stopCount,
-}: EntryProps) {
+  entry, selected, onSelect, onShowDetails, timeZone, now = new Date(), arrivedStopId, stopNumber, stopCount,
+}: HalfPageProps) {
   if (entry.kind === "home") {
     return (
       <div className="msheet__page msheet__page--home">
-        <span className="msheet__homeicon"><HomeIcon /></span>
-        <span className="msheet__eyebrow">Home</span>
-        <span className="msheet__homename">{originDisplayLabel(entry.home.label)}</span>
-        <HomeLeave home={entry.home} timeZone={timeZone} now={now} />
+        <div className="msheet__pagesummary">
+          <span className="msheet__summaryhead"><span className="msheet__homeicon"><HomeIcon /></span><span className="msheet__eyebrow">Home</span></span>
+          <span className="msheet__homename">{originDisplayLabel(entry.home.label)}</span>
+          <HomeLeave home={entry.home} timeZone={timeZone} now={now} />
+        </div>
+        <button type="button" className="msheet__details" onClick={onShowDetails} aria-label="Show home details in full itinerary">Details <Chevron /></button>
       </div>
     );
   }
@@ -165,27 +172,31 @@ export function HalfPage({
     const lines = leg.mode === "transit" ? lineBadges(leg.segments ?? []) : [];
     return (
       <div className="msheet__page msheet__page--leg" aria-label={`${modeLabel(leg)}${leg.mode !== "unknown" ? `, ${leg.totalMinutes} minutes` : ""}`}>
-        <ModeIcon mode={leg.mode} />
-        {lines.length > 0 && (
-          <span className="msheet__routes">
-            {lines.map((line, index) => (
-              <Fragment key={line.segment.rideId ?? index}>
-                {index > 0 && <span className="msheet__routearrow" aria-hidden="true">→</span>}
-                <RouteBadge line={line} />
-              </Fragment>
-            ))}
+        <div className="msheet__pagesummary">
+          <span className="msheet__summaryhead"><ModeIcon mode={leg.mode} /><span className="msheet__legname">{modeLabel(leg)}</span></span>
+          {lines.length > 0 && (
+            <span className="msheet__routes">
+              {lines.slice(0, 2).map((line, index) => (
+                <Fragment key={line.segment.rideId ?? index}>
+                  {index > 0 && <span className="msheet__routearrow" aria-hidden="true">→</span>}
+                  <RouteBadge line={line} />
+                </Fragment>
+              ))}
+              {lines.length > 2 && <span className="msheet__more-routes" aria-label={`${lines.length - 2} more rides in full itinerary`}>+{lines.length - 2}</span>}
+            </span>
+          )}
+          <span className="msheet__summarytime">
+            {leg.mode !== "unknown" && <span className="msheet__legdetail">{leg.totalMinutes} min</span>}
+            {leg.leaveISO && <span className="msheet__legdetail">Leave {formatStopTime(leg.leaveISO, now, timeZone)}</span>}
           </span>
-        )}
-        <span className="msheet__legname">{modeLabel(leg)}</span>
-        {leg.mode === "transit" && lines.length === 0 && leg.lineName && <span className="msheet__legdetail">{leg.lineName}</span>}
-        {leg.mode !== "unknown" && <span className="msheet__legdetail">{leg.totalMinutes} min</span>}
-        {leg.leaveISO && <span className="msheet__legdetail">Leave {formatStopTime(leg.leaveISO, now, timeZone)}</span>}
-        {leg.mode === "walk" && <WalkCaution />}
+        </div>
+        <button type="button" className="msheet__details" onClick={onShowDetails} aria-label={leg.mode === "walk" ? "Show walking route caution and full itinerary" : `Show ${modeLabel(leg).toLowerCase()} details in full itinerary`}>
+          {leg.mode === "walk" ? "Caution & details" : "Details"} <Chevron />
+        </button>
       </div>
     );
   }
   const stop = entry.stop;
-  const minutes = durationBetween(stop.start, stop.end);
   return (
     <div className={"msheet__page" + statusClasses("msheet__page", stop, arrivedStopId === stop.id)}>
       <button
@@ -202,10 +213,9 @@ export function HalfPage({
           ) : null}
         </span>
         <span className="msheet__pagename">{stop.name}</span>
-        <StopTime stop={stop} timeZone={timeZone} now={now} />
-        {minutes !== null && <span className="msheet__duration">{minutes} minutes here</span>}
-        <StopFacts stop={stop} />
+        <StopTime stop={stop} timeZone={timeZone} now={now} summary />
       </button>
+      <button type="button" className="msheet__details" onClick={onShowDetails} aria-label={`Show details for ${stop.name} in full itinerary`}>Details <Chevron /></button>
     </div>
   );
 }
@@ -298,6 +308,7 @@ export function FullRow({
   if (entry.kind === "leg") return <FullLeg leg={entry.leg} timeZone={timeZone} now={now} />;
   const stop = entry.stop;
   const isSelected = selected === stop.id;
+  const minutes = durationBetween(stop.start, stop.end);
   return (
     <button
       type="button"
@@ -314,6 +325,7 @@ export function FullRow({
         </span>
         <span className="msheet__rowname">{stop.name}</span>
         <StopTime stop={stop} timeZone={timeZone} now={now} />
+        {minutes !== null && <span className="msheet__duration">{minutes} minutes here</span>}
         <StopFacts stop={stop} />
       </span>
       <Chevron />

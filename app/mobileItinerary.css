@@ -10,7 +10,8 @@
   isolation: isolate;
   color: var(--ink);
   font-family: var(--grot);
-  transition: transform 280ms cubic-bezier(0.22, 0.8, 0.25, 1);
+  /* The motion controller paints transform and opacity together. */
+  transition: none;
   will-change: transform;
 }
 .msheet--dragging { transition: none; }
@@ -46,6 +47,7 @@
 .msheet__peekline:focus-visible,
 .msheet__view:focus-visible,
 .msheet__pageselect:focus-visible,
+.msheet__details:focus-visible,
 .msheet__row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -3px;
@@ -65,7 +67,7 @@
 .msheet__peekbody { display: flex; flex-direction: column; gap: 2px; }
 .msheet__peekname {
   display: -webkit-box; font-size: 20px; line-height: 1.15;
-  /* Peek previews two lines; the two reading views show the complete name. */
+  /* Peek previews two lines; the full itinerary shows the complete name. */
   -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   white-space: normal; overflow: hidden; overflow-wrap: anywhere;
 }
@@ -107,45 +109,79 @@
   overflow: hidden;
 }
 .msheet__half,
-.msheet__full { height: 100%; min-height: 0; box-sizing: border-box; }
-.msheet__half { padding-bottom: env(safe-area-inset-bottom, 0px); }
+.msheet__full {
+  position: absolute; inset: 0 0 auto;
+  min-height: 0; box-sizing: border-box;
+}
+.msheet__half {
+  height: var(--msheet-half-height, 100%);
+  padding-bottom: 0;
+  container: sheet-half / size;
+}
 .msheet__track {
   align-items: stretch; gap: 10px;
-  /* A long name or short landscape viewport can need vertical reading.
-     Both axes remain native; only the grip can change the sheet's snap. */
-  overflow-y: auto;
-  touch-action: pan-x pan-y;
-  padding: 2px 9% 14px;
+  height: 100%; min-height: 0;
+  /* Half is an overview. The explicit Details action opens the full
+     itinerary for reading, so this carousel has one scrolling direction. */
+  overflow-y: hidden;
+  touch-action: pan-x;
+  padding: 2px 9% 8px;
   scroll-padding-inline: 9%;
   overscroll-behavior-x: contain;
 }
 .msheet__page {
   flex: 0 0 82%; min-width: 0;
-  height: fit-content; min-height: 178px;
+  height: 100%; max-height: 100%; min-height: 0;
   justify-content: flex-start;
   border-radius: 17px;
   box-shadow: 0 4px 14px rgba(30, 58, 76, 0.045);
-  overflow: visible;
+  overflow: hidden;
 }
 .msheet__page--leg {
-  flex-basis: 40%; min-height: 156px; align-self: flex-start; margin-block: auto;
-  align-items: center; justify-content: center;
-  padding: 16px 12px; gap: 6px;
+  flex-basis: clamp(156px, 42%, 188px);
+  align-self: stretch; margin: 0;
+  align-items: stretch; justify-content: flex-start;
+  padding: 0; gap: 0;
   background: rgba(232, 242, 248, 0.78);
   text-align: center; border-style: dashed;
   box-shadow: none;
 }
 .msheet__page--home {
-  flex-basis: 62%; justify-content: center; gap: 7px;
-  padding: 16px; background: rgba(255, 255, 255, 0.7);
+  flex-basis: 62%; justify-content: flex-start; gap: 0;
+  padding: 0; background: rgba(255, 255, 255, 0.7);
+}
+.msheet__pageselect,
+.msheet__pagesummary {
+  display: flex; flex-direction: column; align-items: stretch;
+  position: relative; flex: 1 1 auto;
+  min-height: 0; padding: 12px 12px 6px;
+  overflow: hidden;
 }
 .msheet__pageselect {
-  display: flex; flex-direction: column; align-items: stretch;
-  min-height: 178px; padding: 16px;
-  border-radius: 16px;
+  border-radius: 16px 16px 0 0;
   cursor: pointer;
 }
 .msheet__pageselect[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--accent); }
+.msheet__details {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  flex: 0 0 44px; width: 100%; min-height: 44px;
+  padding: 0 12px; border: 0; border-top: 1px solid var(--rule);
+  background: transparent; color: var(--accent-deep);
+  font-family: var(--grot); font-size: 13px; font-weight: 500;
+  text-align: left; white-space: nowrap;
+  cursor: pointer;
+}
+.msheet__details:hover { background: var(--accent-soft); }
+.msheet__details .msheet__chevron { width: 16px; height: 16px; flex-basis: 16px; }
+.msheet__summaryhead { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 6px; }
+.msheet__summaryhead .msheet__homeicon { width: 22px; height: 22px; flex-basis: 22px; }
+.msheet__summaryhead .msheet__legname { min-width: 0; text-align: left; }
+.msheet__summarytime { display: block; margin-top: 4px; }
+.msheet__page--leg .msheet__summaryhead { justify-content: center; }
+.msheet__page--leg .msheet__summarytime { text-align: center; }
+.msheet__page .msheet__stophead { flex: 0 0 auto; flex-wrap: nowrap; margin-bottom: 6px; }
+.msheet__page .msheet__eyebrow { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msheet__page .msheet__stopcount { flex: 0 0 auto; }
 .msheet__stophead { justify-content: space-between; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .msheet__eyebrow {
   display: block; color: var(--accent); font-size: 11px;
@@ -160,8 +196,21 @@
   color: var(--ink); white-space: normal;
   overflow: visible; text-overflow: clip; overflow-wrap: anywhere;
 }
-.msheet__pagename { margin: 0 0 9px; }
+.msheet__pagename { margin: 0 0 5px; }
 .msheet__homename { font-size: 18px; }
+.msheet__page .msheet__pagename,
+.msheet__page .msheet__homename {
+  display: -webkit-box; flex: 0 0 auto;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  max-height: 2.32em; overflow: hidden;
+}
+.msheet__page .msheet__rowwhen {
+  flex: 0 0 auto; display: block; width: auto;
+  max-width: 100%; margin-top: 2px; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.msheet__page .msheet__rowwhen--changed { margin-left: 0; }
+.msheet__page .msheet__legdetail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .msheet__rowwhen {
   display: block; width: fit-content; max-width: 100%;
   margin-top: 5px; color: var(--ink-soft);
@@ -177,6 +226,7 @@
 .msheet__walkwarning { display: block; margin-top: 6px; color: var(--ink-soft); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .msheet__routes { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 5px; }
 .msheet__routearrow { color: var(--ink-soft); font-size: 12px; }
+.msheet__more-routes { color: var(--ink-soft); font-size: 12px; white-space: nowrap; }
 .msheet__routebadge {
   display: inline-flex; align-items: center; justify-content: center;
   flex: 0 0 30px; width: 30px; height: 30px;
@@ -186,8 +236,39 @@
   box-sizing: border-box;
 }
 .msheet__full {
+  height: var(--msheet-full-height, 100%);
   overflow-x: hidden; overscroll-behavior-y: contain;
-  padding: 0 20px calc(24px + env(safe-area-inset-bottom, 0px));
+  /* The controller has already reserved the device safe area in this
+     pane's height. Only the ordinary reading margin belongs here. */
+  padding: 0 20px 24px;
+}
+
+/* A short landscape sheet keeps a real Details target and a one-line
+   overview. Full retains every name, route, time, rating and caution. */
+@container sheet-half (max-height: 180px) {
+  .msheet__pageselect,
+  .msheet__pagesummary { justify-content: center; padding: 7px 10px 5px; }
+  .msheet__page .msheet__pagename,
+  .msheet__page .msheet__homename {
+    -webkit-line-clamp: 1; max-height: 1.16em;
+    font-size: 18px; margin-bottom: 2px;
+  }
+  .msheet__page .msheet__stophead {
+    position: absolute; right: 9px; top: 7px; margin: 0;
+  }
+  .msheet__page .msheet__stophead .msheet__eyebrow,
+  .msheet__page .msheet__stopcount { display: none; }
+  .msheet__page--active .msheet__pageselect { padding-right: 57px; }
+  .msheet__page--home .msheet__summaryhead,
+  .msheet__page--leg .msheet__routes { display: none; }
+  .msheet__page--leg .msheet__summaryhead { margin-bottom: 2px; }
+  .msheet__page--leg .msheet__summaryhead .msheet__legname {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .msheet__summarytime { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .msheet__summarytime .msheet__legdetail { display: inline; font-size: 12px; white-space: nowrap; }
+  .msheet__summarytime .msheet__legdetail + .msheet__legdetail::before { content: " · "; }
+  .msheet__details { padding-inline: 10px; }
 }
 .msheet__row {
   align-items: flex-start; gap: 12px;
@@ -263,3 +344,27 @@
   .msheet,
   .msheet__bg--opaque { transition: none !important; }
 }
+
+/* Fixed pane layouts reveal through one moving clip. Position, opacity and
+   visibility are painted together by the sheet's animation frame controller. */
+.msheet {
+  height: calc(90dvh + 80px);
+  bottom: -80px;
+  transform: translate3d(0, calc(90dvh - 128px - env(safe-area-inset-bottom, 0px)), 0);
+  --msheet-reveal: 0;
+  --msheet-full-reveal: 0;
+  --msheet-body-height: 0px;
+}
+.msheet__header { position: relative; z-index: 1; height: 104px; flex: none; touch-action: none; }
+.msheet__headercontent { position: relative; height: 60px; }
+.msheet__headercontent > .msheet__peekline,
+.msheet__headercontent > .msheet__heading { position: absolute; inset: 0; }
+.msheet__peekline { opacity: calc(1 - var(--msheet-reveal)); }
+.msheet__heading { opacity: var(--msheet-reveal); }
+.msheet__body { opacity: var(--msheet-reveal); }
+.msheet__half { opacity: calc(1 - var(--msheet-full-reveal)); }
+.msheet__full { opacity: var(--msheet-full-reveal); }
+.msheet__heading,
+.msheet__half,
+.msheet__full { visibility: hidden; }
+.msheet [inert] { pointer-events: none; }

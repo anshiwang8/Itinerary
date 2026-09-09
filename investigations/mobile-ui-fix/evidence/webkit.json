@@ -1,0 +1,572 @@
+{
+  "engine": "webkit",
+  "version": "26.5",
+  "input": "synthetic TouchEvent binding probe; not native iOS gesture input",
+  "baseline": {
+    "label": "baseline",
+    "at": 1916,
+    "sheetTop": 716,
+    "sheetHeight": 687.109375,
+    "transform": "matrix(1, 0, 0, 1, 0, 479.109375)",
+    "content": "peek",
+    "dragging": false,
+    "touchCancelCount": 0,
+    "ariaExpanded": "false",
+    "bodyHidden": true,
+    "bodyHeight": 0,
+    "opacity": "0",
+    "track": {
+      "height": 0,
+      "scrollHeight": 0,
+      "scrollTop": 0,
+      "overflowY": "auto",
+      "touchAction": "pan-x pan-y"
+    },
+    "fullScroll": 0,
+    "documentY": 0,
+    "documentScroll": 0,
+    "toolbarTop": 12,
+    "toolbarHeight": 114,
+    "toolbarVisualTop": 12,
+    "viewport": {
+      "height": 844,
+      "offsetTop": 0,
+      "scale": 1
+    },
+    "innerHeight": 844
+  },
+  "peekExpansion": [
+    {
+      "label": "finger held after 245px upward drag",
+      "at": 3295,
+      "sheetTop": 471,
+      "sheetHeight": 687.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 234.109375)",
+      "content": "peek",
+      "dragging": true,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    },
+    {
+      "label": "just released",
+      "at": 3629,
+      "sheetTop": 471,
+      "sheetHeight": 687.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 234.109375)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "true",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    },
+    {
+      "label": "release+100ms",
+      "at": 3734,
+      "sheetTop": 465.9991455078125,
+      "sheetHeight": 687.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 229.108505)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "true",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    },
+    {
+      "label": "settled",
+      "at": 4048,
+      "sheetTop": 464.20001220703125,
+      "sheetHeight": 687.1093139648438,
+      "transform": "matrix(1, 0, 0, 1, 0, 227.309372)",
+      "content": "half",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "true",
+      "bodyHidden": false,
+      "bodyHeight": 275.796875,
+      "opacity": "0",
+      "track": {
+        "height": 276,
+        "scrollHeight": 281,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    }
+  ],
+  "halfOverflow": {
+    "height": 276,
+    "scrollHeight": 281,
+    "cards": [
+      {
+        "kind": "msheet__page msheet__page--home",
+        "height": 178,
+        "text": "HomeToronto (fixture) centreLeave at 7:00 PM"
+      },
+      {
+        "kind": "msheet__page msheet__page--leg",
+        "height": 167.28125,
+        "text": "505Transit16 minLeave 7:00 PM"
+      },
+      {
+        "kind": "msheet__page",
+        "height": 180,
+        "text": "dinner1 of 4Velvet Fig7:16 PM – 9:01 PM105 minutes here★ 4.8$$$"
+      },
+      {
+        "kind": "msheet__page msheet__page--leg",
+        "height": 265.015625,
+        "text": "Walk3 minLeave 9:01 PMWalking routes are in beta and may miss sidewalks or pedestrian paths. Use caution."
+      },
+      {
+        "kind": "msheet__page",
+        "height": 180,
+        "text": "drinks2 of 4Ten O'Clock Curfew9:04 PM – 10:14 PM70 minutes here★ 4.7$$$"
+      },
+      {
+        "kind": "msheet__page msheet__page--leg",
+        "height": 265.015625,
+        "text": "Walk3 minLeave 10:14 PMWalking routes are in beta and may miss sidewalks or pedestrian paths. Use caution."
+      },
+      {
+        "kind": "msheet__page",
+        "height": 180,
+        "text": "dessert3 of 4Midnight Flour10:17 PM – 10:57 PM40 minutes here★ 4.4$$"
+      },
+      {
+        "kind": "msheet__page msheet__page--leg",
+        "height": 265.015625,
+        "text": "Walk3 minLeave 10:57 PMWalking routes are in beta and may miss sidewalks or pedestrian paths. Use caution."
+      },
+      {
+        "kind": "msheet__page",
+        "height": 180,
+        "text": "coffee4 of 4Fixture Coffee Three11:00 PM – 12:00 AM60 minutes here★ 4.0$"
+      }
+    ]
+  },
+  "geometryInterruption": [
+    {
+      "label": "held before topbar geometry change",
+      "at": 5059,
+      "sheetTop": 599,
+      "sheetHeight": 687.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 362.109375)",
+      "content": "peek",
+      "dragging": true,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    },
+    {
+      "label": "80ms after topbar +8px",
+      "at": 5167,
+      "sheetTop": 643.3087158203125,
+      "sheetHeight": 679.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 398.41806)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 122,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    },
+    {
+      "label": "same finger moved another90px",
+      "at": 5260,
+      "sheetTop": 710.1143798828125,
+      "sheetHeight": 679.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 465.223724)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 122,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    },
+    {
+      "label": "finger released",
+      "at": 5624,
+      "sheetTop": 716,
+      "sheetHeight": 679.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 471.109375)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 122,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    }
+  ],
+  "viewportInterruption": [
+    {
+      "label": "held before viewport resize",
+      "at": 6846,
+      "sheetTop": 586,
+      "sheetHeight": 687.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 349.109375)",
+      "content": "peek",
+      "dragging": true,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    },
+    {
+      "label": "viewport 40px shorter",
+      "at": 6941,
+      "sheetTop": 586,
+      "sheetHeight": 647.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 349.109375)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 804,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 804
+    },
+    {
+      "label": "same finger moved after resize",
+      "at": 7033,
+      "sheetTop": 660.95361328125,
+      "sheetHeight": 647.109375,
+      "transform": "matrix(1, 0, 0, 1, 0, 424.062988)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 804,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 804
+    }
+  ],
+  "regrab": {
+    "method": "atomic synthetic regrab during real CSS transition",
+    "before": {
+      "sheetTop": 233.94064331054688,
+      "opacity": 0.376631,
+      "dragging": false
+    },
+    "after": {
+      "sheetTop": 233.94064331054688,
+      "opacity": 0.705884,
+      "dragging": true
+    }
+  },
+  "mapScroll": [
+    {
+      "label": "before map gesture",
+      "at": 10279,
+      "sheetTop": 716,
+      "sheetHeight": 786,
+      "transform": "matrix(1, 0, 0, 1, 0, 578)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    },
+    {
+      "label": "input focused",
+      "at": 10289,
+      "sheetTop": 716,
+      "sheetHeight": 786,
+      "transform": "matrix(1, 0, 0, 1, 0, 578)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    },
+    {
+      "label": "input blurred",
+      "at": 10502,
+      "sheetTop": 716,
+      "sheetHeight": 786,
+      "transform": "matrix(1, 0, 0, 1, 0, 578)",
+      "content": "peek",
+      "dragging": false,
+      "touchCancelCount": 0,
+      "ariaExpanded": "false",
+      "bodyHidden": true,
+      "bodyHeight": 0,
+      "opacity": "0",
+      "track": {
+        "height": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "auto",
+        "touchAction": "pan-x pan-y"
+      },
+      "fullScroll": 0,
+      "documentY": 0,
+      "documentScroll": 0,
+      "toolbarTop": 12,
+      "toolbarHeight": 114,
+      "toolbarVisualTop": 12,
+      "viewport": {
+        "height": 844,
+        "offsetTop": 0,
+        "scale": 1
+      },
+      "innerHeight": 844
+    }
+  ]
+}

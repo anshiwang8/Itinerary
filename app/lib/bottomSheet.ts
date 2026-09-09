@@ -21,6 +21,9 @@ export const SNAP_ORDER: SheetSnap[] = ["peek", "half", "full"];
 export const PEEK_HEIGHT_PX = 128;
 export const HALF_HEIGHT_FRACTION = 0.45;
 export const FULL_HEIGHT_FRACTION = 0.9;
+// Keep 112px of readable body below the 44px grip and 60px heading when
+// the space below persistent controls allows it. Safe area is additional.
+const HALF_CONTENT_MIN_PX = 216;
 
 /** How much a drag past peek/full keeps moving the sheet, scaled down — the
  *  standard "rubber band" feel so a drag never hard-stops, but a release past
@@ -28,8 +31,8 @@ export const FULL_HEIGHT_FRACTION = 0.9;
  *  feel constant, not a measurement — same category as DRIVING_MARGIN_MIN. */
 const OVERDRAG_RESISTANCE = 0.35;
 
-/** A fling faster than this (px/ms) overrides "nearest point" and moves one
- *  snap step in the fling's direction, even mid-way between two points —
+/** A fling faster than this (px/ms) overrides "nearest point" and takes the
+ *  next snap beyond the release height in the fling's direction —
  *  the standard bottom-sheet feel: a fast flick commits, a slow drag settles
  *  wherever you let go. ~500px/s, a typical native swipe-page threshold. */
 const FLING_VELOCITY_PX_PER_MS = 0.5;
@@ -41,9 +44,9 @@ export interface SheetHeights {
 }
 
 /** Keep the home-indicator inset below peek content and cap full below the
- *  measured top controls. On a short visual viewport the smaller snaps
- *  yield to that cap while staying strictly ordered. The component reserves
- *  safe-area space inside the settled content viewport. */
+ *  measured top controls. Half keeps a usable body on short viewports where
+ *  the control cap permits it; all snaps yield to that cap while staying
+ *  strictly ordered. Safe-area space sits inside the content viewport. */
 export function resolveSheetHeights(
   viewportHeightPx: number,
   safeAreaBottomPx: number,
@@ -54,7 +57,11 @@ export function resolveSheetHeights(
     viewportHeightPx - Math.max(0, topClearancePx)
   ));
   const peek = Math.min(PEEK_HEIGHT_PX + Math.max(0, safeAreaBottomPx), full - 2);
-  const half = Math.min(full - 1, Math.max(viewportHeightPx * HALF_HEIGHT_FRACTION, peek + 1));
+  const half = Math.min(full - 1, Math.max(
+    viewportHeightPx * HALF_HEIGHT_FRACTION,
+    peek + 1,
+    HALF_CONTENT_MIN_PX + Math.max(0, safeAreaBottomPx)
+  ));
   return { peek, half, full };
 }
 
@@ -62,6 +69,25 @@ export function resolveSheetHeights(
 export function sheetReleaseVelocity(velocity: number, lastMoveAt: number, releasedAt: number): number {
   const age = releasedAt - lastMoveAt;
   return Number.isFinite(velocity) && age >= 0 && age <= 100 ? velocity : 0;
+}
+
+/** Touchend can carry a position newer than the final touchmove. Use that
+ *  terminal segment when present so a release reversal cannot retain the
+ *  previous direction. An unchanged coordinate retains a fresh fling, while
+ *  the same 100ms guard prevents a held finger from reusing old motion. */
+export function sheetTerminalVelocity({ velocity, lastY, lastMoveAt, releaseY, releasedAt }: {
+  velocity: number;
+  lastY: number;
+  lastMoveAt: number;
+  releaseY: number;
+  releasedAt: number;
+}): number {
+  if (!Number.isFinite(lastY) || !Number.isFinite(releaseY)) return 0;
+  const elapsed = releasedAt - lastMoveAt;
+  const terminal = lastY === releaseY
+    ? velocity
+    : elapsed > 0 ? (lastY - releaseY) / elapsed : 0;
+  return sheetReleaseVelocity(terminal, lastMoveAt, releasedAt);
 }
 
 /** The live height while a finger is down: tracks the raw drag 1:1 inside
@@ -80,12 +106,26 @@ export function clampDragHeight(rawHeightPx: number, heights: SheetHeights): num
   return rawHeightPx;
 }
 
+/** Recover the raw baseline when a finger re-grabs a resisted position.
+ *  Feeding the painted height back through clampDragHeight directly would
+ *  resist it twice, jumping toward the bound before the finger has moved. */
+export function unclampDragHeight(paintedHeightPx: number, heights: SheetHeights): number {
+  if (paintedHeightPx < heights.peek) {
+    return heights.peek - (heights.peek - paintedHeightPx) / OVERDRAG_RESISTANCE;
+  }
+  if (paintedHeightPx > heights.full) {
+    return heights.full + (paintedHeightPx - heights.full) / OVERDRAG_RESISTANCE;
+  }
+  return paintedHeightPx;
+}
+
 /**
  * Decides which of the three snap points a drag should land on. Nearest
  * point by pixel distance, UNLESS the release velocity clears the fling
- * threshold, in which case it moves exactly one step in the fling's
- * direction from the nearest point (never skips a state, and never moves
- * past the ends of SNAP_ORDER). `velocityPxPerMs` is signed: positive means
+ * threshold, in which case it takes the first snap strictly beyond the
+ * release height in that direction. Crossing a midpoint cannot skip the
+ * next snap; a release beyond either end returns to that end.
+ * `velocityPxPerMs` is signed: positive means
  * moving up (expanding), negative means moving down (collapsing) — the
  * same sign convention the component derives from clientY deltas (up on
  * screen = decreasing Y = increasing height).
@@ -101,6 +141,13 @@ export function resolveSnapTarget(
     ["full", heights.full],
   ];
 
+  if (velocityPxPerMs > FLING_VELOCITY_PX_PER_MS) {
+    return points.find(([, height]) => height > currentHeightPx)?.[0] ?? "full";
+  }
+  if (velocityPxPerMs < -FLING_VELOCITY_PX_PER_MS) {
+    return points.reverse().find(([, height]) => height < currentHeightPx)?.[0] ?? "peek";
+  }
+
   let nearest: SheetSnap = "peek";
   let nearestDist = Infinity;
   for (const [snap, h] of points) {
@@ -111,19 +158,10 @@ export function resolveSnapTarget(
     }
   }
 
-  if (Math.abs(velocityPxPerMs) <= FLING_VELOCITY_PX_PER_MS) return nearest;
-
-  const nearestIndex = SNAP_ORDER.indexOf(nearest);
-  const direction = velocityPxPerMs > 0 ? 1 : -1;
-  const targetIndex = Math.min(
-    SNAP_ORDER.length - 1,
-    Math.max(0, nearestIndex + direction)
-  );
-  return SNAP_ORDER[targetIndex];
+  return nearest;
 }
 
-/** Nearest content state for a measured height. The UI commits content only
- *  after settling so a finger crossing a midpoint never rebuilds its layout. */
+/** Nearest content state for a measured height, without any fling intent. */
 export function contentStateFor(currentHeightPx: number, heights: SheetHeights): SheetSnap {
   return resolveSnapTarget(currentHeightPx, 0, heights);
 }

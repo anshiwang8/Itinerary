@@ -337,10 +337,11 @@ test.describe("mobile itinerary controls", () => {
     }
   });
 
-  test("short landscape half cards remain readable by native vertical scrolling @mock", async ({ page }) => {
+  test("short landscape half summaries keep full details reachable without vertical scrolling @mock", async ({ page }) => {
     await page.setViewportSize({ width: 740, height: 390 });
     await useLongVenueLabel(page);
     await planEvening(page, "dinner and drinks at 7pm");
+    await dismissMapWarning(page);
     const sheet = page.locator(".msheet");
     const handle = sheet.locator(".msheet__draghandle");
     await handle.click();
@@ -358,29 +359,28 @@ test.describe("mobile itinerary controls", () => {
       });
     });
     const overflow = await track.evaluate((element) => element.scrollHeight - element.clientHeight);
-    expect(overflow, "the short viewport must exercise real clipped card content").toBeGreaterThan(40);
-    const facts = card.locator(".msheet__facts");
-    let viewport = await rect(track);
-    expect((await rect(facts)).y + (await rect(facts)).height).toBeGreaterThan(viewport.y + viewport.height);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      viewport = await rect(track);
-      await touchSwipe(
-        page,
-        { x: viewport.x + viewport.width / 2, y: viewport.y + viewport.height - 10 },
-        { x: viewport.x + viewport.width / 2, y: viewport.y + 10 }
-      );
-      const bottom = await rect(facts);
-      if (bottom.y + bottom.height <= viewport.y + viewport.height + 1) break;
-    }
-    await expect.poll(() => track.evaluate((element) => element.scrollTop)).toBeGreaterThan(20);
-    const visibleFacts = await rect(facts);
-    expect(visibleFacts.y).toBeGreaterThanOrEqual(viewport.y - 1);
-    expect(visibleFacts.y + visibleFacts.height).toBeLessThanOrEqual(viewport.y + viewport.height + 1);
+    expect(overflow, "half summaries must not create a second vertical scroller").toBeLessThanOrEqual(1);
+    const details = card.locator(".msheet__details");
+    await expectPointerTarget(details);
+    const viewport = await rect(track);
+    const detailsBox = await rect(details);
+    expect(detailsBox.y).toBeGreaterThanOrEqual(viewport.y - 1);
+    expect(detailsBox.y + detailsBox.height).toBeLessThanOrEqual(viewport.y + viewport.height + 1);
+    await touchSwipe(
+      page,
+      { x: viewport.x + viewport.width / 2, y: viewport.y + viewport.height - 10 },
+      { x: viewport.x + viewport.width / 2, y: viewport.y + 10 }
+    );
+    expect(await track.evaluate((element) => element.scrollTop)).toBe(0);
     await expect(sheet).toHaveAttribute("data-state", "half");
     await expect(sheet).toHaveAttribute("data-dragging", "false");
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
-    await handle.click();
+    await details.click();
     await expect(sheet).toHaveAttribute("data-state", "full");
+    const row = sheet.locator(".msheet__row", { hasText: LONG_STOP_NAME });
+    await row.scrollIntoViewIfNeeded();
+    await expect(row.locator(".msheet__rowname")).toHaveText(LONG_STOP_NAME);
+    await expect(row.locator(".msheet__facts")).toBeVisible();
   });
 
   test("full list scrolls independently and both sheet panes retain their position @mock", async ({ page }) => {
