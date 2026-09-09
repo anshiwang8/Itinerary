@@ -1199,6 +1199,47 @@ export function mockTravelLegs(
  * same type/component/context validation as a live response; mock mode
  * replaces only the network data source. */
 export function mockGeocodingResponse(request: GeocodeRequest): Record<string, unknown> {
+  // REVERSE (coordinate -> label). Provider-shaped like the rest: the route
+  // still runs the real relaxed parse, the real country/distance checks and
+  // the real timezone lookup over this. The result deliberately carries the
+  // `route`/`neighborhood` types a genuine device fix produces, which the
+  // strict address branch would refuse and this branch must not.
+  if (request.kind === "reverse") {
+    const context = request.cityContext;
+    return {
+      status: "OK",
+      results: [
+        {
+          formatted_address: "Chestnut St, Toronto, ON, Canada (fixture)",
+          place_id: "fixture-reverse",
+          types: ["route"],
+          address_components: [
+            { long_name: "Chestnut Street", short_name: "Chestnut St", types: ["route"] },
+            {
+              long_name: context?.locality ?? "Toronto",
+              short_name: context?.locality ?? "Toronto",
+              types: ["locality", "political"],
+            },
+            {
+              long_name: context?.administrativeArea ?? "Ontario",
+              short_name: context?.administrativeArea ?? "ON",
+              types: ["administrative_area_level_1", "political"],
+            },
+            {
+              long_name: context?.country ?? "Canada",
+              short_name: context?.countryCode ?? "CA",
+              types: ["country", "political"],
+            },
+          ],
+          geometry: {
+            location: { lat: 43.6547, lng: -79.3862 },
+            location_type: "GEOMETRIC_CENTER",
+          },
+        },
+      ],
+    };
+  }
+
   const locality =
     request.kind === "address"
       ? (request.cityContext?.locality ?? "Toronto")

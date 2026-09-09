@@ -783,6 +783,45 @@ export function parseGeocodePayload(value: unknown): GeocodeOutcome {
   throw new Error("invalid geocode");
 }
 
+/**
+ * The REVERSE geocode reply (coordinate -> label), for the starting
+ * location field's "Use current location" row.
+ *
+ * A SEPARATE, DELIBERATELY LOOSER validator rather than a branch inside
+ * `parseGeocodePayload`, because the two guard different promises. That one
+ * describes a place a user NAMED, so an empty locality or a blank formatted
+ * address means the server got confused and the safe move is to reject. This
+ * one describes a point a DEVICE reported: the coordinate is the fact, and
+ * the text around it is whatever the provider could supply, which for a
+ * genuine fix in a park or on a highway is legitimately nothing at all.
+ *
+ * So the coordinate and the timezone are checked exactly as strictly as
+ * anywhere else in this file, and every text field is allowed to be empty.
+ * The caller turns an empty label into plain wording (`startLabelFrom`); it
+ * is not this function's job to invent one.
+ */
+export function parseReverseGeocodePayload(value: unknown): GeocodeCandidate {
+  const data = record(value);
+  if (
+    data.outcome === "resolved" &&
+    data.queryType === "reverse" &&
+    typeof data.label === "string" &&
+    typeof data.formattedAddress === "string" &&
+    isLatLng(data.location) &&
+    isIanaTimeZone(data.timeZone) &&
+    typeof data.locality === "string" &&
+    optionalString(data.administrativeArea) &&
+    typeof data.country === "string" &&
+    typeof data.countryCode === "string" &&
+    (data.countryCode === "" || /^[A-Z]{2}$/.test(data.countryCode)) &&
+    strings(data.resultTypes) &&
+    optionalString(data.placeId)
+  ) {
+    return data as unknown as GeocodeCandidate;
+  }
+  throw new Error("invalid reverse geocode");
+}
+
 export function parseWeatherPayload(value: unknown): ClientWeatherHour[] {
   if (
     !Array.isArray(value) ||

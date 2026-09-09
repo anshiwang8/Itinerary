@@ -149,6 +149,26 @@ test("empty, planned, and expanded-swap surfaces pass axe and load only self-hos
   expect(loadedFamilies).toContain("Space Grotesk Variable");
   await expectNoSeriousAxeViolations(page, "empty planner");
 
+  // The starting location dropdown is part of this surface but only exists
+  // while the field is focused, so it is scanned here rather than left as
+  // the one piece of the landing page axe never sees.
+  await page.locator("#q-start").click();
+  await expect(page.locator(".startmenu")).toBeVisible();
+  // Scan the SETTLED card, not the fade. `toBeVisible` does not wait for
+  // animations, and mid-`acctmenu-in` the popover's white and its ink text
+  // are both blended with the dark hero behind it, so axe measures a real
+  // 1.06 contrast on a transient frame nobody reads. Waiting on the actual
+  // animations rather than a magic sleep keeps this exact.
+  await page
+    .locator(".startmenu")
+    .evaluate((element) =>
+      Promise.all(
+        element.getAnimations({ subtree: true }).map((animation) => animation.finished)
+      ).then(() => undefined)
+    );
+  await expectNoSeriousAxeViolations(page, "empty planner with the start dropdown open");
+  await page.keyboard.press("Escape");
+
   await planEvening(page, "dinner and drinks");
   await expectNoSeriousAxeViolations(page, "planned itinerary");
 

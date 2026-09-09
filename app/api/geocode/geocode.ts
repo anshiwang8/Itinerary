@@ -71,7 +71,14 @@ const ADDRESS_RESULT_TYPES = new Set([
   "airport",
 ]);
 
-export type GeocodeQueryType = "city" | "address";
+/**
+ * "reverse" is the coordinate -> label direction, added for the starting
+ * location field's "Use current location" row. It is a THIRD kind rather
+ * than a flag on "address" because it is judged by different rules: a GPS
+ * fix legitimately lands on a route, a neighbourhood or a plus code, none
+ * of which the address branch's completeness test would accept.
+ */
+export type GeocodeQueryType = "city" | "address" | "reverse";
 
 export interface GeocodePoint {
   latitude: number;
@@ -107,9 +114,13 @@ export interface CityContext {
 }
 
 export interface GeocodeRequest {
+  /** The typed text. Empty on a reverse request, which has no text. */
   query: string;
   kind: GeocodeQueryType;
   cityContext?: CityContext;
+  /** REVERSE ONLY: the device's own coordinate, which is the fact being
+   *  named. Never set for a city or address lookup. */
+  location?: GeocodePoint;
 }
 
 export interface ResolvedGeocode extends GeocodeCandidate {
@@ -273,15 +284,41 @@ function parseCityContext(value: unknown): CityContext {
 export function parseGeocodeRequest(value: unknown): GeocodeRequest {
   if (
     !isRecord(value) ||
-    typeof value.query !== "string" ||
-    value.query.trim().length === 0 ||
-    value.query.length > REQUEST_LIMITS.promptChars ||
-    (value.kind !== "city" && value.kind !== "address")
+    (value.kind !== "city" && value.kind !== "address" && value.kind !== "reverse")
   ) {
     throw new ApiError(
       400,
       "invalid_query",
-      `\`query\` must be a non-empty string no longer than ${REQUEST_LIMITS.promptChars} characters, and \`kind\` must be "city" or "address".`
+      '`kind` must be "city", "address", or "reverse".'
+    );
+  }
+
+  // A reverse request carries a COORDINATE and no text. The city context is
+  // OPTIONAL here, unlike the address branch: the dropdown asks what a point
+  // is called before any city has been resolved, and the pipeline asks again
+  // with the resolved city when it is time to check the point is a plausible
+  // start. Same function, two questions.
+  if (value.kind === "reverse") {
+    const request: GeocodeRequest = {
+      query: "",
+      kind: "reverse",
+      location: parseInputPoint(value.location, "location"),
+    };
+    if (value.cityContext !== undefined) {
+      request.cityContext = parseCityContext(value.cityContext);
+    }
+    return request;
+  }
+
+  if (
+    typeof value.query !== "string" ||
+    value.query.trim().length === 0 ||
+    value.query.length > REQUEST_LIMITS.promptChars
+  ) {
+    throw new ApiError(
+      400,
+      "invalid_query",
+      `\`query\` must be a non-empty string no longer than ${REQUEST_LIMITS.promptChars} characters.`
     );
   }
   const request: GeocodeRequest = {
@@ -323,6 +360,22 @@ function boundsParameter(bounds: GeocodeBounds): string {
 
 export function buildGeocodeUrl(request: GeocodeRequest, apiKey: string): URL {
   const url = new URL(GEOCODING_URL);
+
+  // REVERSE: `latlng` and nothing else. No bounds bias, no `components`
+  // country filter, no region. Every one of those exists to disambiguate
+  // TEXT, and there is no text here: a coordinate names exactly one point on
+  // earth. Adding a country filter would be worse than useless, because it
+  // would suppress results for a fix that is genuinely outside the selected
+  // city's country instead of letting the check below report that plainly.
+  if (request.kind === "reverse" && request.location) {
+    url.searchParams.set(
+      "latlng",
+      `${request.location.latitude},${request.location.longitude}`
+    );
+    url.searchParams.set("key", apiKey);
+    return url;
+  }
+
   let address = request.query;
   if (request.kind === "address" && request.cityContext) {
     const context = request.cityContext;
@@ -509,12 +562,144 @@ function noResult(): never {
   );
 }
 
+/**
+ * COORDINATE -> LABEL, for the starting location field's "Use current
+ * location" row. Three things make this branch different from the address
+ * branch, and all three are deliberate.
+ *
+ * 1. THE ACCEPTANCE IS RELAXED. A real device fix lands wherever the person
+ *    is standing, which is regularly a park, a highway, a campus, or a
+ *    street the provider only knows as a `route`. The address branch calls
+ *    every one of those an incomplete address and refuses it, correctly, for
+ *    something a user TYPED. Refusing them here would refuse a point we
+ *    actually know, because of how it is spelled.
+ *
+ * 2. THE COORDINATE NEVER MOVES. The label is whatever the provider calls
+ *    the point; the LOCATION returned is the device's own reading, byte for
+ *    byte, and the timezone is derived from that same reading. A reverse
+ *    result's coordinate is the centroid of whatever feature matched, which
+ *    can be a block or a suburb away. The device knows where it is; the
+ *    provider is only being asked for a name.
+ *
+ * 3. NO NAME IS STILL A RESULT. When nothing parses, this returns a
+ *    candidate with empty text rather than a 404. The caller supplies the
+ *    plain fallback wording, because a missing LABEL is no reason to throw
+ *    away a good coordinate.
+ *
+ * The two SANITY checks are NOT relaxed. When a city context is supplied,
+ * the country test and `judgeStartProximity` run exactly as they do for a
+ * typed address, through the same function and the same constants, so a
+ * plan can never start 400 km from the city it is planning.
+ */
+function resolveReverseGeocode(
+  data: Record<string, unknown>,
+  request: GeocodeRequest
+): ResolvedGeocode {
+  const device = request.location;
+  if (!device) {
+    throw new ApiError(
+      400,
+      "invalid_query",
+      "A reverse lookup needs a `location`."
+    );
+  }
+
+  // The first result the provider can produce cleanly. Google orders these
+  // most specific first, so "first" is "best named". A single odd entry is
+  // skipped rather than failing the lookup: this is a label, and the
+  // coordinate behind it is already good.
+  let named: ParsedResult | null = null;
+  if (Array.isArray(data.results) && data.results.length <= MAX_PROVIDER_RESULTS) {
+    for (const raw of data.results) {
+      try {
+        const parsed = parseResult(raw);
+        if (parsed.candidate.formattedAddress.trim().length > 0) {
+          named = parsed;
+          break;
+        }
+      } catch {
+        // an unreadable entry is not a reason to lose the coordinate
+      }
+    }
+  }
+
+  const components = named?.components ?? [];
+  const candidate: GeocodeCandidate = {
+    label: named?.candidate.label ?? "",
+    formattedAddress: named?.candidate.formattedAddress ?? "",
+    // the device's reading, verbatim, and its zone
+    location: device,
+    timeZone: zoneFromLatLng(device.latitude, device.longitude),
+    locality: named?.candidate.locality ?? "",
+    administrativeArea: named?.candidate.administrativeArea,
+    country: named?.candidate.country ?? "",
+    countryCode: named?.candidate.countryCode ?? "",
+    resultTypes: named?.candidate.resultTypes ?? [],
+    // deliberately no `bounds`: a matched feature's viewport describes that
+    // feature, not the person standing inside it
+    placeId: named?.candidate.placeId,
+  };
+
+  const context = request.cityContext;
+  if (context) {
+    // Only checkable when the provider named a country. Keep-on-missing:
+    // an unnamed point is judged by distance alone, which is the stronger
+    // test anyway.
+    if (
+      candidate.countryCode &&
+      normalized(candidate.countryCode) !== normalized(context.countryCode)
+    ) {
+      throw new ApiError(
+        422,
+        "geocode_wrong_country",
+        "Your current location is outside the selected city's country. Check the city, or type a starting address."
+      );
+    }
+    const regionMatches =
+      !context.administrativeArea ||
+      components.length === 0 ||
+      matchesComponent(components, context.administrativeArea, [
+        "administrative_area_level_1",
+        "administrative_area_level_2",
+      ]);
+    const proximity = judgeStartProximity(
+      device,
+      context.location,
+      regionMatches
+    );
+    if (proximity === "too-far") {
+      throw new ApiError(
+        422,
+        "geocode_far_from_city",
+        `Your current location is very far from ${context.locality}. Check the city, or type a starting address.`
+      );
+    }
+    if (proximity === "wrong-region") {
+      throw new ApiError(
+        422,
+        "geocode_outside_city",
+        `Your current location is in a different region than ${context.locality}. Check the city, or type a starting address.`
+      );
+    }
+  }
+
+  return { outcome: "resolved", queryType: "reverse", ...candidate };
+}
+
 export function resolveGeocodeResponse(
   value: unknown,
   request: GeocodeRequest
 ): GeocodeOutcome {
   const data = requireProviderRecord("geocoding", value);
   if (!validText(data.status)) invalidProvider();
+  if (request.kind === "reverse") {
+    // ZERO_RESULTS is a legitimate answer for a coordinate (an unnamed spot
+    // is still a spot), so only a genuine provider rejection throws here.
+    if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+      throw new ProviderError("geocoding", 502, "geocoding_rejected_request");
+    }
+    return resolveReverseGeocode(data, request);
+  }
   if (data.status === "ZERO_RESULTS") noResult();
   if (data.status !== "OK") {
     throw new ProviderError("geocoding", 502, "geocoding_rejected_request");

@@ -43,6 +43,7 @@ import { settlePendingWrite } from "./lib/pendingWrite";
 import {
   parseCreatePayload,
   parseGeocodePayload,
+  parseReverseGeocodePayload,
   parseItineraryPayload,
   parsePlacesPayload,
   parsePlanPayload,
@@ -72,6 +73,17 @@ import HistoryPanel from "./HistoryPanel";
 import TasteSurvey from "./TasteSurvey";
 import ProfilePanel from "./ProfilePanel";
 import AccountMenu from "./AccountMenu";
+import StartLocationMenu from "./StartLocationMenu";
+import {
+  CURRENT_LOCATION_INSECURE_NOTE,
+  CURRENT_LOCATION_POSITION_OPTIONS,
+  CURRENT_LOCATION_UNSUPPORTED_NOTE,
+  geolocationErrorNote,
+  judgeFix,
+  startFixForField,
+  startLabelFrom,
+  type StartFix,
+} from "./lib/currentLocation";
 import {
   EMPTY_ANSWERS,
   profileGateState,
@@ -588,6 +600,16 @@ export default function Home() {
   // defaulting to the city centre.
   const [city, setCity] = useState("Toronto");
   const [startAddress, setStartAddress] = useState("");
+  // ONE-SHOT device position behind the field's "Use current location" row.
+  // Independent of `liveTracking` in every way: a single `getCurrentPosition`
+  // read, no watch, no timer, discarded the moment the field is edited.
+  // `startFix.label` is what makes that discard structural rather than
+  // remembered — see `startFixForField`.
+  const [startFix, setStartFix] = useState<StartFix | null>(null);
+  const [startMenuOpen, setStartMenuOpen] = useState(false);
+  const [startLocating, setStartLocating] = useState(false);
+  const [startLocationNote, setStartLocationNote] = useState<string | null>(null);
+  const startInputRef = useRef<HTMLInputElement>(null);
   // How this plan gets around. A plain STORED CHOICE, made once at creation:
   // no LLM is asked, nothing is inferred from the prompt, and the day is
   // built, re-priced and mutated in whichever mode was chosen here. The
@@ -899,6 +921,91 @@ export default function Home() {
   }
 
   /**
+   * The starting location dropdown's one action: read the device position
+   * ONCE, name it, and put that name in the field.
+   *
+   * `getCurrentPosition`, never `watchPosition`. This is a completely
+   * separate use of the same browser API from `liveTracking.ts`, which owns
+   * the map's live dot: that one is a continuous stream with a staleness
+   * heartbeat, this one is a single question asked at the moment the row is
+   * pressed and finished as soon as it is answered. They share no state, and
+   * this must never grow into a watch.
+   *
+   * THE PERMISSION PROMPT LIVES HERE, on the row, not on the field. Merely
+   * focusing a text input never asks the browser for anything.
+   *
+   * THE REVERSE GEOCODE IS A LABEL, NOT A GATE. Anything at all can go wrong
+   * with it (no result, a rate limit, an outage) and the coordinate is still
+   * good, so a failure degrades to plain wording rather than losing the fix.
+   * The check that actually matters, whether this point is a plausible start
+   * for the chosen city, happens in `resolvePlace` against the RESOLVED city,
+   * because the city can still be edited after this row is used.
+   */
+  const useCurrentLocation = useCallback(() => {
+    setStartLocationNote(null);
+    // Browsers gate geolocation on a secure context. localhost counts, a LAN
+    // address over plain http does not, which is exactly how a phone pointed
+    // at a dev machine fails; Chrome reports that as a denied permission, so
+    // say the true thing before asking.
+    if (typeof window !== "undefined" && window.isSecureContext === false) {
+      setStartLocationNote(CURRENT_LOCATION_INSECURE_NOTE);
+      return;
+    }
+    const geolocation =
+      typeof navigator !== "undefined" ? navigator.geolocation : undefined;
+    if (!geolocation) {
+      setStartLocationNote(CURRENT_LOCATION_UNSUPPORTED_NOTE);
+      return;
+    }
+    setStartLocating(true);
+    geolocation.getCurrentPosition(
+      (position) => {
+        const verdict = judgeFix(position.coords);
+        if (!verdict.ok) {
+          // A refusal leaves the menu open with the reason on it, the field
+          // untouched, and the row ready to try again.
+          setStartLocating(false);
+          setStartLocationNote(verdict.note);
+          return;
+        }
+        const { latitude, longitude } = verdict;
+        void (async () => {
+          let label: string;
+          try {
+            const named = await fetchJson("/api/geocode", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                kind: "reverse",
+                location: { latitude, longitude },
+              }),
+              parse: parseReverseGeocodePayload,
+            });
+            label = startLabelFrom(named.formattedAddress);
+          } catch {
+            label = startLabelFrom(null);
+          }
+          setStartAddress(label);
+          setStartFix({ latitude, longitude, label });
+          setStartLocating(false);
+          setStartLocationNote(null);
+          // Focus BEFORE closing, deliberately. Returning focus to the field
+          // fires its own `onFocus`, which asks to open the menu again; both
+          // updates land in the same batch and this one is last, so the menu
+          // closes and the caret is back where typing would continue.
+          startInputRef.current?.focus();
+          setStartMenuOpen(false);
+        })();
+      },
+      (error: GeolocationPositionError) => {
+        setStartLocating(false);
+        setStartLocationNote(geolocationErrorNote(error?.code));
+      },
+      CURRENT_LOCATION_POSITION_OPTIONS
+    );
+  }, []);
+
+  /**
    * Resolve the city (and optional starting address) to coordinates + a
    * timezone. Returns null when the pipeline PAUSED on an ambiguous result
    * (the geocode recovery panel is now showing) or failed loud. Never
@@ -958,7 +1065,40 @@ export default function Home() {
     const geocode: PipelineGeocode = { city: cityData };
 
     const addrQ = startAddress.trim();
-    if (addrQ) {
+    // A DEVICE COORDINATE IS ONLY USED WHILE THE FIELD STILL DESCRIBES IT.
+    // Editing the text clears the fix outright; this is the second lock on
+    // the same door, and the one that is a property rather than a habit. If
+    // the two ever disagree, the text the user can actually read wins and
+    // the ordinary typed path below runs.
+    const fix = startFixForField(startFix, startAddress);
+    if (fix) {
+      // Re-ask the SAME coordinate, this time with the resolved city, so the
+      // country and distance rules run in the one place they are written.
+      // Not a wasted repeat of the dropdown's lookup: the city can be edited
+      // after the row is used, so "is this a plausible start" is a different
+      // question from "what is this point called", asked at the only moment
+      // the answer is knowable. A failure here fails the plan loud, unlike
+      // the label lookup, because this call IS the guardrail.
+      let fixData = existing.address;
+      if (!fixData) {
+        setLoadingText("Checking your current location…");
+        fixData = await fetchJson("/api/geocode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: "reverse",
+            location: { latitude: fix.latitude, longitude: fix.longitude },
+            cityContext: cityData,
+          }),
+          parse: parseReverseGeocodePayload,
+        });
+      }
+      geocode.address = fixData;
+      hp = {
+        label: `Start · ${startLabelFrom(fixData.formattedAddress)}`,
+        location: fixData.location,
+      };
+    } else if (addrQ) {
       let addrData = existing.address;
       if (!addrData) {
         setLoadingText("Finding your starting address…");
@@ -3291,10 +3431,41 @@ export default function Home() {
               id="q-start"
               className="where__input where__input--addr"
               disabled={busy}
+              ref={startInputRef}
               value={startAddress}
-              onChange={(e) => setStartAddress(e.target.value)}
+              onChange={(e) => {
+                setStartAddress(e.target.value);
+                // TYPING INVALIDATES A DEVICE COORDINATE. The field must
+                // never show one place while the plan starts from another.
+                setStartFix(null);
+                setStartLocationNote(null);
+              }}
+              // Opening the menu does NOTHING but render it. No permission
+              // is requested until the row itself is chosen.
+              onFocus={() => setStartMenuOpen(true)}
+              onClick={() => setStartMenuOpen(true)}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown" && startMenuOpen) {
+                  // the keyboard way into the row, without the menu ever
+                  // taking focus off the field on its own
+                  e.preventDefault();
+                  e.currentTarget.parentElement
+                    ?.querySelector<HTMLButtonElement>('.startmenu [role="menuitem"]')
+                    ?.focus();
+                }
+              }}
               placeholder="optional (city centre)"
               aria-label="Starting address"
+            />
+            {/* Additive: the field's manual typing path is unchanged, and
+                this hangs beside it rather than in front of it. */}
+            <StartLocationMenu
+              open={startMenuOpen && !busy}
+              busy={startLocating}
+              note={startLocationNote}
+              anchorRef={startInputRef}
+              onUseCurrentLocation={useCurrentLocation}
+              onClose={() => setStartMenuOpen(false)}
             />
           </div>
           {/* A fourth labelled section in the same pill, not a new UI system:

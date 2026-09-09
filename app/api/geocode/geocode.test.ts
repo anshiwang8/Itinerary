@@ -9,6 +9,7 @@ import {
   SAME_METRO_METERS,
   buildGeocodeUrl,
   judgeStartProximity,
+  parseGeocodeRequest,
   resolveGeocodeResponse,
 } from "./geocode";
 
@@ -110,7 +111,192 @@ function request(body: unknown): NextRequest {
   });
 }
 
+/** A device fix somewhere in downtown Toronto. */
+const deviceFix = { latitude: 43.6547, longitude: -79.3862 };
+function reverseRequest(cityContext?: CityContext): GeocodeRequest {
+  const value: GeocodeRequest = {
+    query: "",
+    kind: "reverse",
+    location: deviceFix,
+  };
+  if (cityContext) value.cityContext = cityContext;
+  return value;
+}
+
 const cases: Array<[string, () => void | Promise<void>]> = [
+  // ── reverse (coordinate -> label), the "Use current location" path ──
+  [
+    "reverse accepts a route-only result the ADDRESS branch would refuse",
+    () => {
+      // This exact result shape (a `route` with no street_number) is what
+      // `geocode_incomplete_address` exists to reject for typed text. A real
+      // device fix lands on one constantly, and refusing it would throw away
+      // a coordinate we actually know because of how it is spelled.
+      const outcome = resolveGeocodeResponse(
+        response([
+          result({
+            formatted: "Chestnut St, Toronto, ON, Canada",
+            types: ["route"],
+            includeStreetNumber: false,
+          }),
+        ]),
+        reverseRequest()
+      );
+      assert.strictEqual(outcome.outcome, "resolved");
+      assert.strictEqual(outcome.queryType, "reverse");
+      if (outcome.outcome !== "resolved") return;
+      assert.strictEqual(outcome.formattedAddress, "Chestnut St, Toronto, ON, Canada");
+    },
+  ],
+  [
+    "reverse returns the DEVICE coordinate, never the matched feature's centroid",
+    () => {
+      // The provider's own `geometry.location` is deliberately far from the
+      // fix here: a reverse result's coordinate is the centre of whatever
+      // feature matched, and the device is the one that knows where it is.
+      const outcome = resolveGeocodeResponse(
+        response([
+          result({
+            formatted: "Yonge St, Toronto, ON, Canada",
+            types: ["route"],
+            includeStreetNumber: false,
+            lat: 43.7,
+            lng: -79.4,
+          }),
+        ]),
+        reverseRequest()
+      );
+      if (outcome.outcome !== "resolved") throw new Error("expected resolved");
+      assert.deepStrictEqual(outcome.location, deviceFix);
+      // and the zone follows the device coordinate, not the feature's
+      assert.strictEqual(outcome.timeZone, "America/Toronto");
+    },
+  ],
+  [
+    "reverse with no usable result returns empty text, not a 404",
+    () => {
+      const zero = resolveGeocodeResponse(
+        { status: "ZERO_RESULTS", results: [] },
+        reverseRequest()
+      );
+      if (zero.outcome !== "resolved") throw new Error("expected resolved");
+      assert.strictEqual(zero.formattedAddress, "");
+      assert.strictEqual(zero.label, "");
+      assert.deepStrictEqual(zero.location, deviceFix);
+      // an unreadable entry is skipped rather than losing the coordinate
+      const junk = resolveGeocodeResponse(
+        { status: "OK", results: [{ formatted_address: 7 }] },
+        reverseRequest()
+      );
+      if (junk.outcome !== "resolved") throw new Error("expected resolved");
+      assert.strictEqual(junk.formattedAddress, "");
+      assert.deepStrictEqual(junk.location, deviceFix);
+    },
+  ],
+  [
+    "reverse still refuses a fix past the city distance cap, on the SAME rule",
+    () => {
+      const far = northOfCity(MAX_START_DISTANCE_FROM_CITY_METERS + 2_000);
+      const request: GeocodeRequest = {
+        query: "",
+        kind: "reverse",
+        location: { latitude: far.lat, longitude: far.lng },
+        cityContext: toronto,
+      };
+      assert.throws(
+        () =>
+          resolveGeocodeResponse(
+            response([
+              result({
+                formatted: "Somewhere far, ON, Canada",
+                types: ["route"],
+                includeStreetNumber: false,
+                lat: far.lat,
+                lng: far.lng,
+              }),
+            ]),
+            request
+          ),
+        (error: unknown) =>
+          error instanceof ApiError &&
+          error.status === 422 &&
+          error.code === "geocode_far_from_city"
+      );
+    },
+  ],
+  [
+    "reverse still refuses a fix in another country",
+    () => {
+      assert.throws(
+        () =>
+          resolveGeocodeResponse(
+            response([
+              result({
+                formatted: "Buffalo, NY, USA",
+                types: ["route"],
+                includeStreetNumber: false,
+                locality: "Buffalo",
+                admin: "New York",
+                country: "United States",
+                countryCode: "US",
+              }),
+            ]),
+            reverseRequest(toronto)
+          ),
+        (error: unknown) =>
+          error instanceof ApiError &&
+          error.status === 422 &&
+          error.code === "geocode_wrong_country"
+      );
+    },
+  ],
+  [
+    "an unnamed reverse fix inside the city still passes: distance alone decides",
+    () => {
+      const outcome = resolveGeocodeResponse(
+        { status: "ZERO_RESULTS", results: [] },
+        reverseRequest(toronto)
+      );
+      assert.strictEqual(outcome.outcome, "resolved");
+    },
+  ],
+  [
+    "reverse builds a latlng URL with no text-disambiguation parameters",
+    () => {
+      const url = buildGeocodeUrl(reverseRequest(toronto), "KEY");
+      assert.strictEqual(url.searchParams.get("latlng"), "43.6547,-79.3862");
+      assert.strictEqual(url.searchParams.get("address"), null);
+      // bounds/components/region exist to disambiguate TEXT; a coordinate
+      // names exactly one point, and a country filter here would hide the
+      // wrong-country result the check above is meant to report.
+      assert.strictEqual(url.searchParams.get("bounds"), null);
+      assert.strictEqual(url.searchParams.get("components"), null);
+      assert.strictEqual(url.searchParams.get("region"), null);
+    },
+  ],
+  [
+    "a reverse request needs a location, and a provider rejection still throws",
+    () => {
+      assert.throws(
+        () => parseGeocodeRequest({ kind: "reverse" }),
+        (error: unknown) => error instanceof ApiError && error.status === 400
+      );
+      assert.throws(
+        () =>
+          parseGeocodeRequest({
+            kind: "reverse",
+            location: { latitude: 200, longitude: 0 },
+          }),
+        (error: unknown) => error instanceof ApiError && error.status === 400
+      );
+      // ZERO_RESULTS is a legitimate answer for a point; a real rejection
+      // is not, and must not be laundered into a blank label.
+      assert.throws(() =>
+        resolveGeocodeResponse({ status: "REQUEST_DENIED" }, reverseRequest())
+      );
+    },
+  ],
+
   [
     "ambiguous city returns bounded formatted-address candidates instead of index zero",
     () => {

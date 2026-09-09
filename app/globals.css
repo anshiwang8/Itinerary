@@ -270,6 +270,61 @@ button { font-family: var(--grot); cursor: pointer; }
 .prompt__sec .where__input::placeholder { color: rgba(255, 255, 255, 0.6); }
 .prompt__sec .where__input:focus { border-color: transparent; }
 
+/* ── the starting location dropdown ──
+   An ANCHORED popover on `.prompt__sec` (already `position: relative`),
+   reusing `.acctmenu__pop`'s card language and its entry animation rather
+   than inventing a second popover system. It is the app's CARD WHITE and not
+   the pill's dark glass on purpose: everything else that appears below the
+   pill (`.clarify`, `.empty__err`, the recovery panel) is a white card over
+   the photo, so this reads as one of those rather than as a fifth section of
+   the search bar. */
+.startmenu {
+  position: absolute; top: calc(100% + 8px); left: 14px; z-index: 5;
+  width: max(100%, 244px); max-width: min(340px, calc(100vw - 28px));
+  display: flex; flex-direction: column;
+  padding: 6px;
+  background: var(--card); border: 1px solid var(--rule); border-radius: 14px;
+  box-shadow: var(--shadow-lift);
+  animation: acctmenu-in 0.14s ease-out;
+  text-align: left;
+}
+/* THE ONE `!important` HERE, and what it beats. `.empty > *:not(…)` gives
+   the pill AND every panel under it the same `z-index: 2`, so DOM order
+   decides and a clarify or error card (both later siblings) would paint over
+   this popover. That rule carries five `:not()` classes of specificity, which
+   no readable selector on `.prompt` alone can outrank. Scoped to `:has()` so
+   it applies ONLY while the popover is mounted: with the menu closed the
+   landing's layering is byte-identical to before. */
+.empty > .prompt:has(.startmenu) { z-index: 4 !important; }
+/* the menu owns only its rows, so the note can sit beside it without
+   breaking `role="menu"`'s required children */
+.startmenu [role="menu"] { display: flex; flex-direction: column; }
+.startmenu__item {
+  display: flex; align-items: center; gap: 10px;
+  /* a thumb target, on every viewport */
+  min-height: 44px; padding: 10px 12px;
+  background: transparent; color: var(--ink);
+  border: 0; border-radius: 10px;
+  font-family: var(--grot); font-size: 13.5px; font-weight: 500;
+  text-align: left; white-space: nowrap; cursor: pointer;
+  transition: background 0.14s ease;
+}
+.startmenu__item:hover:not(:disabled) { background: var(--accent-soft); }
+.startmenu__item:disabled { color: var(--ink-faint); cursor: default; }
+.startmenu__icon {
+  width: 17px; height: 17px; flex: none;
+  fill: none; stroke: var(--accent); stroke-width: 1.9;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.startmenu__item:disabled .startmenu__icon { stroke: var(--ink-faint); }
+/* A location that could not be read ENDS nothing and is not happening NOW,
+   so neither --danger nor --live appears here. The wording carries it. */
+.startmenu__note {
+  padding: 2px 12px 8px;
+  font-family: var(--grot); font-size: 12px; line-height: 1.45;
+  color: var(--ink-soft); white-space: normal;
+}
+
 /* ── travel-mode toggle (Transit / Drive) ──
    A fourth section of the same pill, so it inherits `.prompt__sec`'s
    divider, padding and label. Two segmented options inside one rounded
@@ -2036,6 +2091,8 @@ button { font-family: var(--grot); cursor: pointer; }
   .acct__signin, .auth__google, .auth__guest { transition: none !important; }
   .acctmenu__pop { animation: none !important; }
   .acctmenu__item { transition: none !important; }
+  .startmenu { animation: none !important; }
+  .startmenu__item { transition: none !important; }
   .stopdlg, .stopdlg__card { animation: none !important; }
   .stopdlg__btn, .topbar__stop { transition: none !important; }
   /* The pending state still SAYS what it is doing, through the live region

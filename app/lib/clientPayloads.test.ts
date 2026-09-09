@@ -6,6 +6,7 @@ import {
   parsePlacesPayload,
   parseRemovePayload,
   parseReroutePayload,
+  parseReverseGeocodePayload,
   parseSelectionsPayload,
   parseSwapPayload,
   parseTravelPayload,
@@ -409,6 +410,65 @@ const cases: Array<[string, () => void]> = [
           ],
         })
       );
+    },
+  ],
+  [
+    "reverse geocode validation keeps the coordinate strict and lets the text be empty",
+    () => {
+      const named = parseReverseGeocodePayload({
+        outcome: "resolved",
+        queryType: "reverse",
+        label: "Chestnut St, Toronto, ON, Canada",
+        formattedAddress: "Chestnut St, Toronto, ON, Canada",
+        location: { latitude: 43.6547, longitude: -79.3862 },
+        timeZone: "America/Toronto",
+        locality: "Toronto",
+        administrativeArea: "Ontario",
+        country: "Canada",
+        countryCode: "CA",
+        resultTypes: ["route"],
+      });
+      assert.strictEqual(named.location.latitude, 43.6547);
+      // A device fix in a park names nothing. The coordinate is the fact;
+      // every text field around it is allowed to be blank, and the caller
+      // supplies the plain wording rather than this validator inventing one.
+      const unnamed = parseReverseGeocodePayload({
+        outcome: "resolved",
+        queryType: "reverse",
+        label: "",
+        formattedAddress: "",
+        location: { latitude: 43.6547, longitude: -79.3862 },
+        timeZone: "America/Toronto",
+        locality: "",
+        country: "",
+        countryCode: "",
+        resultTypes: [],
+      });
+      assert.strictEqual(unnamed.formattedAddress, "");
+      assert.strictEqual(unnamed.countryCode, "");
+      const base = {
+        outcome: "resolved",
+        queryType: "reverse",
+        label: "",
+        formattedAddress: "",
+        location: { latitude: 43.6547, longitude: -79.3862 },
+        timeZone: "America/Toronto",
+        locality: "",
+        country: "",
+        countryCode: "",
+        resultTypes: [],
+      };
+      // the coordinate, the zone and the shape are still non-negotiable
+      assert.throws(() =>
+        parseReverseGeocodePayload({ ...base, location: { latitude: 200, longitude: 0 } })
+      );
+      assert.throws(() => parseReverseGeocodePayload({ ...base, timeZone: "Nowhere/Here" }));
+      assert.throws(() => parseReverseGeocodePayload({ ...base, countryCode: "CAN" }));
+      assert.throws(() => parseReverseGeocodePayload({ ...base, queryType: "address" }));
+      assert.throws(() => parseReverseGeocodePayload({ ...base, formattedAddress: 7 }));
+      assert.throws(() => parseReverseGeocodePayload(null));
+      // and a reverse reply must never pass as a city/address resolution
+      assert.throws(() => parseGeocodePayload(base));
     },
   ],
   [
