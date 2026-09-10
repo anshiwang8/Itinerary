@@ -1963,6 +1963,43 @@ const cases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    // The swap model invents constraints the user never asked for — a live
+    // trace had it return "licensed" on a "bar with live music" complaint
+    // that mentioned neither. A word provider evidence can NEVER prove makes
+    // placeMeetsAllConstraints false for every candidate and the swap
+    // refuses forever. isLeakedConstraint now strips it, the same way it
+    // strips a leaked category, while a genuine provable feature survives.
+    "CONSTRAINT LEAK: an unprovable word is stripped, a provable one and a strict diet stay",
+    async () => {
+      const it = mkItinerary();
+      let judged: string[] = [];
+      let searched: string[] = [];
+      const patioVenue: Place = { ...mkVenue("bar_fresh"), outdoorSeating: true };
+      const res = await swapStop(it, 1, "somewhere with a patio near the water", new Date(T(18, 0)), mkDeps({
+        intent: "constraint",
+        path: "research",
+        // the model's output: two invented unprovable words + one real one +
+        // a strict dietary word the owner keeps hard
+        constraints: ["licensed", "waterfront", "patio", "vegan"],
+        pool: [patioVenue],
+        legMin: 10,
+        onJudge: (parsed) => { judged = parsed.constraints; },
+        onSearch: (parsed) => { searched = parsed.constraints; },
+      }));
+      assert.ok(res.swapped, `expected a swap, got: ${JSON.stringify(res)}`);
+      assert.deepStrictEqual(
+        judged,
+        ["patio", "vegan"],
+        "the unprovable words go; the provable feature and the strict diet stay"
+      );
+      assert.deepStrictEqual(
+        searched,
+        ["patio", "vegan"],
+        "and they must not become literal Places query noise either"
+      );
+    },
+  ],
+  [
     "CATEGORY CHANGE: nothing found refuses naming the REQUESTED kind, plan untouched",
     async () => {
       const it = mkItinerary();

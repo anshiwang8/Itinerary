@@ -215,9 +215,31 @@ const cases: Array<[string, () => void]> = [
         weatherBlockedReason([{ category: "park walk", reason: "rain likely at 8pm" }]),
         "Couldn't plan this one, park walk: rain likely at 8pm. Try an indoor plan?"
       );
+      // non-colliding category + constraint: the plain phrasing, now pointing
+      // at the real recovery options (the panel offers widen + replace)
       assert.strictEqual(
         unmetConstraintReason("steakhouse", "vegan"),
-        "Couldn't find a steakhouse that's really vegan, want to drop a constraint, or try a different kind of place?"
+        "Couldn't find a steakhouse that's really vegan, want to look further out, or try a different kind of place?"
+      );
+    },
+  ],
+  [
+    "unmetConstraintReason does NOT self-contradict when category contains the constraint",
+    () => {
+      // "a vegan restaurant that's really vegan" was the reported bug
+      assert.strictEqual(
+        unmetConstraintReason("vegan restaurant", "vegan"),
+        "Couldn't confirm anywhere nearby is genuinely vegan. Want to look further out, or try something else for this stop?"
+      );
+      // general, not dietary-specific: "a bar with live music that's really live music"
+      assert.strictEqual(
+        unmetConstraintReason("bar with live music", "live music"),
+        "Couldn't confirm anywhere nearby is genuinely live music. Want to look further out, or try something else for this stop?"
+      );
+      // a shared STOPWORD ("with") must not trip the collision path
+      assert.strictEqual(
+        unmetConstraintReason("dinner with a view", "with a patio"),
+        "Couldn't find a dinner with a view that's really with a patio, want to look further out, or try a different kind of place?"
       );
     },
   ],
@@ -250,8 +272,10 @@ const cases: Array<[string, () => void]> = [
   [
     "unmet-constraint null picks are NOT treated as empty pools (different failure)",
     () => {
-      // a constraint failure (id null + unmetConstraint) is handled by
-      // unmetConstraintReason, never routed into recovery
+      // a constraint failure (id null + unmetConstraint) is NOT an empty
+      // pool — there ARE venues, they just lack the evidence. It reaches
+      // the recovery panel through a parallel path in continuePipeline, so
+      // partialEmptyCategories deliberately never surfaces it here.
       assert.deepStrictEqual(
         partialEmptyCategories([pick("bar"), unmetPick("steakhouse", "vegan")]),
         []

@@ -6,6 +6,7 @@
 // same pattern as resolveStartTimeChecked.
 import { ParsedPrompt, DropEntry, DropRule } from "../api/places/search/filter";
 import type { Selection } from "../api/select/selectVenues";
+import { normalizeConstraint } from "./constraints";
 
 export const UNPARSEABLE_MESSAGE =
   "I couldn't make sense of that. Try describing your evening, like “dinner and drinks in Ossington”.";
@@ -213,9 +214,26 @@ export function weatherBlockedReason(
   return `Couldn't plan this one, ${detail}. Try an indoor plan?`;
 }
 
-/** A hard constraint no candidate actually meets — fail loud, never hedge. */
+/**
+ * A hard constraint no candidate verifiably meets. Two phrasings, because
+ * the naive one self-contradicts whenever the category already contains the
+ * constraint word: "Couldn't find a vegan restaurant that's really vegan",
+ * "a bar with live music that's really live music". When the normalized
+ * category and constraint share a word, say it once and honestly instead.
+ * This is a GENERAL fix (any colliding pair), not a dietary-only one.
+ */
 export function unmetConstraintReason(category: string, constraint: string): string {
-  return `Couldn't find a ${category} that's really ${constraint}, want to drop a constraint, or try a different kind of place?`;
+  const STOPWORDS = new Set(["a", "an", "the", "and", "or", "with", "for", "of", "to", "in"]);
+  const meaningful = (word: string) => word.length > 1 && !STOPWORDS.has(word);
+  const catWords = new Set(
+    normalizeConstraint(category).split(" ").filter(meaningful)
+  );
+  const conWords = normalizeConstraint(constraint).split(" ").filter(meaningful);
+  const collides = conWords.length > 0 && conWords.some((w) => catWords.has(w));
+  if (collides) {
+    return `Couldn't confirm anywhere nearby is genuinely ${constraint}. Want to look further out, or try something else for this stop?`;
+  }
+  return `Couldn't find a ${category} that's really ${constraint}, want to look further out, or try a different kind of place?`;
 }
 
 // ── partial-failure recovery ──────────────────────────────────────────
@@ -226,8 +244,11 @@ export function unmetConstraintReason(category: string, constraint: string): str
 // Distinct from the ALL-empty case, which keeps its own noVenuesReason
 // path and must never route through here.
 
-/** An empty-pool selection: id null with NO unmet constraint (a constraint
- *  failure is a different, harder case handled by unmetConstraintReason). */
+/** An empty-pool selection: id null with NO unmet constraint. An unmet
+ *  constraint is a distinct failure (there ARE venues, they just lack the
+ *  evidence) and is routed to the SAME recovery panel by a parallel path in
+ *  continuePipeline — never through here, so the empty-pool reason phrasing
+ *  and the "all-empty stays on noVenuesReason" rule below stay clean. */
 function isEmptyPoolPick(s: Selection): boolean {
   return s.id === null && !s.unmetConstraint;
 }

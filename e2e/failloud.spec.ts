@@ -4,7 +4,13 @@
 // borrowed from the wrong branch. Exact-text assertions on purpose: these
 // messages ARE the product behavior the manual-testing bugs were about.
 import { test, expect } from "./test";
-import { planEvening, planExpectingProblem, stripCard, expectStripMatchesPin } from "./helpers";
+import {
+  dismissClarifyIfShown,
+  planEvening,
+  planExpectingProblem,
+  stripCard,
+  expectStripMatchesPin,
+} from "./helpers";
 
 const UNPARSEABLE =
   "I couldn't make sense of that. Try describing your evening, like “dinner and drinks in Ossington”.";
@@ -53,19 +59,20 @@ test("constraints: 'vegan steakhouse' is caught as a contradiction, up front @mo
   );
 });
 
-test("constraints: 'dessert with a patio' hits the unmet-constraint fail-loud @mock", async ({ page }) => {
-  // restores the e2e coverage the vegan-steakhouse test carried before it
-  // was retargeted at the contradiction guard: a single hard constraint
-  // that NO dessert fixture evidences ("patio" lives only on The Standing
-  // Room, a bar), with nothing matching the dietary/venue-type
-  // contradiction patterns — so it flows past the guard, through select's
-  // id:null + unmetConstraint, into the page-level unmetConstraintReason.
-  expect(await planExpectingProblem(page, "dessert with a patio at 8pm")).toBe(
-    "Couldn't find a dessert that's really patio, want to drop a constraint, or try a different kind of place?"
-  );
-  // and it must NOT surface as the partial-empty recovery panel — an unmet
-  // constraint is a different failure from an empty pool
-  await expect(page.locator(".recover")).toHaveCount(0);
+test("constraints: an unmet PROVABLE constraint opens the recovery panel, not a dead end @mock", async ({ page }) => {
+  // "patio" IS provable (a real provider boolean), and NO dessert fixture
+  // carries it ("patio" lives only on The Standing Room, a bar), so select
+  // returns id:null + unmetConstraint. That used to be a hard fail() with
+  // no way out; it now reaches the SAME recovery panel an empty pool gets.
+  await page.goto("/");
+  await page.locator(".prompt__input").fill("dessert with a patio at 8pm in Ossington");
+  await page.locator(".prompt__go").click();
+  await dismissClarifyIfShown(page);
+  await expect(page.locator(".recover")).toBeVisible({ timeout: 90_000 });
+  await expect(page.locator(".recover__reason")).toContainText(/patio/i);
+  // NOT a fail-loud surface, and no silent plan behind it
+  await expect(page.locator(".empty__err, .stage__err")).toHaveCount(0);
+  await expect(page.locator(".lstrip")).toHaveCount(0);
 });
 
 test("constraints: 'vegetarian dinner' takes the structured-evidence pick @mock", async ({ page }) => {

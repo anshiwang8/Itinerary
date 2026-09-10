@@ -16,6 +16,7 @@
 // correction is not trusted merely because it parsed.
 import type { ParsedPrompt } from "../places/search/filter";
 import { isLeakedActivityConstraint, type PlannerPreferences } from "./plannerPreferences";
+import { canEverBeProven, isStrictDietaryConstraint } from "../../lib/constraints";
 import { hasImmediateTimeSignal } from "../../lib/immediateTime";
 import { hasAllDaySignal } from "../../lib/allDayTime";
 import { sanitizeModelProse, sanitizeModelProseList } from "../../lib/sanitizeProse";
@@ -250,7 +251,7 @@ DURATIONS
 "estimatedMinutes" is how long a person actually spends there — a coffee about 30, a sit-down dinner about 90, an escape room about 60, a major museum about 120, a walk in a park about 45. Between ${MIN_ACTIVITY_MINUTES} and ${MAX_ACTIVITY_MINUTES}.
 
 CONTEXT
-- "constraints" are HARD requirements only: dietary ("vegan"), accessibility ("wheelchair accessible"), and venue features attached to an activity ("patio", "live music", "outdoor seating"). A feature is never its own activity.
+- "constraints" are HARD requirements only: dietary ("vegetarian"), accessibility ("wheelchair accessible"), and venue features attached to an activity ("patio", "live music", "outdoor seating"). A feature is never its own activity.
 - "location" is a neighbourhood WITHIN the city if the prompt names one ("the west end", "near the harbour"); otherwise "". NEVER a city name — the app supplies the city separately.
 - "aesthetic" and "groupContext" are "unspecified" when not stated; "budget" is null when not stated.
 
@@ -1028,6 +1029,41 @@ export function stripLeakedPreferenceConstraints(
 ): PlanIntent {
   const kept = plan.context.constraints.filter(
     (constraint) => !isLeakedActivityConstraint(constraint, preferences)
+  );
+  if (kept.length === plan.context.constraints.length) return plan;
+  return { ...plan, context: { ...plan.context, constraints: kept } };
+}
+
+/**
+ * Remove any `constraints` entry that provider evidence could NEVER prove
+ * ("indoor", "waterfront", "quiet", "seats six", "licensed"). Another floor
+ * over the model's answer, beside the time floors and the preference-leak
+ * strip, and for the same reason: it corrects a fact the model does not get
+ * to be wrong about.
+ *
+ * `context.constraints` feeds the HARD pass/fail check in selectVenues
+ * (`placeMeetsAllConstraints`, proved from six provider booleans). A word
+ * with no possible evidence makes that check false for EVERY venue in EVERY
+ * category, so the correction retry fails identically and the whole plan
+ * refuses with `unmet_constraint` — a self-contradicting "a waterfront park
+ * that's really waterfront" with no recovery path. The word is still useful
+ * to Google's relevance ranking, so it stays wherever the model wrote it in
+ * `searchQuery` (a separate array, untouched here); only the pass/fail path
+ * is cleaned. This is the split the design always intended and never had.
+ *
+ * ONE deliberate exception, checked FIRST: the strict dietary/religious
+ * words (`isStrictDietaryConstraint` — vegan, halal, kosher, gluten free,
+ * plant based). Those also fail provability, but the owner has chosen to
+ * keep them hard: a plan may still refuse on them. The recovery panel, not
+ * this strip, is what saves that case now.
+ *
+ * Returns the SAME object when nothing was stripped, so the ordinary plan
+ * (no constraints, or only provable ones) is untouched rather than cloned.
+ */
+export function stripUnprovableConstraints(plan: PlanIntent): PlanIntent {
+  const kept = plan.context.constraints.filter(
+    (constraint) =>
+      isStrictDietaryConstraint(constraint) || canEverBeProven(constraint)
   );
   if (kept.length === plan.context.constraints.length) return plan;
   return { ...plan, context: { ...plan.context, constraints: kept } };

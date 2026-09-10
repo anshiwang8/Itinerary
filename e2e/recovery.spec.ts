@@ -153,6 +153,86 @@ test.describe("@mock partial-failure recovery", () => {
   });
 });
 
+// ── Unmet-constraint recovery ──────────────────────────────────────────
+// A hard constraint no candidate verifiably meets used to be a hard
+// fail() with the ONLY way out being to retype the whole request. It now
+// reaches the SAME recovery panel an empty pool gets. Two shapes:
+//  - a PROVABLE constraint that genuinely failed ("patio" on a dessert —
+//    no dessert fixture carries outdoorSeating): widen can actually find
+//    one, so the slot resolves.
+//  - a STRICT DIETARY word ("vegan" — kept hard on purpose, no provider
+//    boolean can ever prove it): the plan still refuses to auto-build, but
+//    the panel offers widen / replace instead of a dead end.
+test.describe("@mock unmet-constraint recovery", () => {
+  test("an UNPROVABLE constraint is stripped, so the plan proceeds normally @mock", async ({
+    page,
+  }) => {
+    // "indoor" can never be proved from any provider boolean. The parse
+    // route's provability strip removes it from the hard pass/fail check
+    // (it stays in the search text). REVERT-RUN: delete
+    // stripUnprovableConstraints from route.ts and this goes red — "indoor"
+    // reaches select, no fixture carries it, and the recovery panel
+    // appears instead of a plan.
+    await page.goto("/");
+    await page.locator(".prompt__input").fill("indoor ramen at 7pm in Ossington");
+    await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
+    await expandDesktopItinerary(page, { waitForDock: true });
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".lstrip__stop")).toHaveCount(1);
+    await expect(page.locator(".recover")).toHaveCount(0);
+    await expect(page.locator(".empty__err, .stage__err")).toHaveCount(0);
+  });
+
+  test("a provable constraint that failed → recovery panel, and widen resolves it @mock", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page
+      .locator(".prompt__input")
+      .fill("dessert with a patio at 8pm in Ossington");
+    await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
+
+    const recover = page.locator(".recover");
+    await expect(recover).toBeVisible({ timeout: 90_000 });
+    await expect(recover.locator(".recover__reason")).toContainText(/patio/i);
+    // never a fail-loud surface, never a silent plan behind it
+    await expect(page.locator(".empty__err, .stage__err")).toHaveCount(0);
+    await expect(page.locator(".lstrip")).toHaveCount(0);
+
+    // widen re-searches this slot city-wide WITHOUT the impossible
+    // constraint, so a real dessert resolves and the plan completes
+    await recover.locator(".recover__widen").click();
+    await expandDesktopItinerary(page, { waitForDock: true });
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".lstrip__stop")).toHaveCount(1);
+    await expect(page.locator(".recover")).toHaveCount(0);
+  });
+
+  test("a strict dietary word still refuses to auto-plan, but offers recovery @mock", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.locator(".prompt__input").fill("vegan dinner at 7pm in Ossington");
+    await page.locator(".prompt__go").click();
+    await dismissClarifyIfShown(page);
+
+    const recover = page.locator(".recover");
+    // dietary strictness preserved: NO plan was built automatically
+    await expect(recover).toBeVisible({ timeout: 90_000 });
+    await expect(recover.locator(".recover__reason")).toContainText(/vegan/i);
+    await expect(page.locator(".lstrip")).toHaveCount(0);
+
+    // but it is NOT a dead end any more: replacing the slot completes a plan
+    await recover.locator(".recover__input").fill("dinner");
+    await recover.locator(".recover__go").click();
+    await expandDesktopItinerary(page, { waitForDock: true });
+    await expect(page.locator(".lstrip")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".lstrip__stop")).toHaveCount(1);
+  });
+});
+
 test.describe("@mock per-slot recovery targeting", () => {
   async function planPrompt(page: Page, prompt: string): Promise<void> {
     await page.goto("/");

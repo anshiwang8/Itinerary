@@ -10,6 +10,7 @@ import {
 import { PlanTravelMode, TravelLeg } from "./api/schedule/travel";
 import { HOME, splitHomeLeg } from "./api/schedule/home";
 import { Itinerary } from "./api/itinerary/store";
+import { normalizeConstraint } from "./lib/constraints";
 import { formatStopTime } from "./lib/timeLabels";
 import {
   contradictionReason,
@@ -1347,10 +1348,17 @@ export default function Home() {
         parse: parseSelectionsPayload,
       });
 
-      // a hard constraint nothing actually meets → fail loud, never a
-      // pick with a "check with the venue" hedge
-      const unmet = sels.find((s) => s.unmetConstraint);
-      if (unmet) return fail(unmetConstraintReason(unmet.category, unmet.unmetConstraint!));
+      // A hard constraint nothing verifiably meets. The /api/parse
+      // provability strip means the only words that can still reach here
+      // are ones evidence COULD have proven but no candidate did (a real
+      // checked negative), plus the strict dietary/religious words the
+      // owner keeps hard on purpose. Either way it is no longer a dead
+      // end: it opens the SAME recovery panel an empty pool gets (widen /
+      // replace / plan without it). The impossible constraint is lifted
+      // from the recovery context so a re-search can actually resolve the
+      // slot; nothing is planned until the user picks one of those, so a
+      // strict dietary constraint still refuses to auto-plan.
+      const unmetSels = sels.filter((s) => !!s.unmetConstraint);
 
       const requestedCategories =
         parseData.category_signals.length > 0
@@ -1373,6 +1381,40 @@ export default function Home() {
         drops,
         slots: {},
       };
+
+      if (unmetSels.length > 0) {
+        const unmetNorms = new Set(
+          unmetSels.map((s) => normalizeConstraint(s.unmetConstraint!))
+        );
+        const relaxedParse: ParsedPrompt = {
+          ...parseData,
+          constraints: (parseData.constraints ?? []).filter(
+            (c) => !unmetNorms.has(normalizeConstraint(c))
+          ),
+        };
+        // blank the failing selections so "Plan without it" drops them
+        // rather than shipping a venue-less slot, matching the
+        // closed-on-arrival recovery path
+        const clearedSels = sels.map((s) =>
+          s.unmetConstraint
+            ? { ...s, id: null, unmetConstraint: undefined, reason: "no verified match for that requirement" }
+            : s
+        );
+        setRecovery({
+          mode: "empty",
+          ctx: { ...ctx, parseData: relaxedParse, sels: clearedSels },
+          empties: unmetSels.map((s) => ({
+            category: s.category,
+            slot: s.slot,
+            reason: unmetConstraintReason(s.category, s.unmetConstraint!),
+          })),
+          replaceText: {},
+          busy: false,
+          note: null,
+        });
+        setLoadingText(null);
+        return;
+      }
 
       // partial failure: some categories resolved, ≥1 came back empty.
       // Never drop the empty one silently — pause with the honest reason

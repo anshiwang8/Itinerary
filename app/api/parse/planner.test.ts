@@ -20,6 +20,7 @@ import {
   planStartInstant,
   planToParsed,
   planWithModel,
+  stripUnprovableConstraints,
   validatePlan,
   whenQuestion,
 } from "./planner";
@@ -1084,6 +1085,87 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(q.id, "when");
       assert.strictEqual(q.appliesToSlot, null);
       assert.strictEqual(q.options.length, 4);
+    },
+  ],
+
+  // ── the provability strip over the model's output ──
+  [
+    "stripUnprovableConstraints removes what no evidence can prove, keeps what can",
+    () => {
+      const built = validatePlan(
+        goodPlan({
+          context: {
+            aesthetic: "cozy",
+            groupContext: "date",
+            budget: null,
+            constraints: ["indoor", "vegetarian", "patio", "waterfront"],
+            location: "",
+          },
+        }),
+        NOW
+      );
+      assert.ok(built.ok);
+      if (!built.ok) return;
+      const stripped = stripUnprovableConstraints(built.plan);
+      assert.deepStrictEqual(
+        stripped.context.constraints,
+        ["vegetarian", "patio"],
+        "indoor and waterfront go (no possible evidence); vegetarian and patio stay (real provider booleans)"
+      );
+      // the search text is a SEPARATE array and is never touched here
+      assert.deepStrictEqual(planToParsed(stripped).category_signals, ["italian restaurant"]);
+    },
+  ],
+  [
+    "the dietary carve-out: a strict word is NOT stripped even though it is unprovable",
+    () => {
+      for (const word of ["vegan", "plant-based", "gluten-free", "halal", "kosher"]) {
+        const built = validatePlan(
+          goodPlan({
+            context: {
+              aesthetic: "unspecified",
+              groupContext: "unspecified",
+              budget: null,
+              constraints: [word],
+              location: "",
+            },
+          }),
+          NOW
+        );
+        assert.ok(built.ok);
+        if (!built.ok) return;
+        assert.deepStrictEqual(
+          stripUnprovableConstraints(built.plan).context.constraints,
+          [word],
+          `"${word}" must survive the strip — it stays a hard requirement`
+        );
+      }
+    },
+  ],
+  [
+    "stripUnprovableConstraints is a no-op (same object) when every constraint is fine",
+    () => {
+      for (const constraints of [[], ["patio", "wheelchair accessible"], ["vegan"]]) {
+        const built = validatePlan(
+          goodPlan({
+            context: {
+              aesthetic: "unspecified",
+              groupContext: "unspecified",
+              budget: null,
+              constraints,
+              location: "",
+            },
+          }),
+          NOW
+        );
+        assert.ok(built.ok);
+        if (!built.ok) return;
+        assert.strictEqual(
+          stripUnprovableConstraints(built.plan),
+          built.plan,
+          "an untouched plan must be the SAME object, not a rebuilt clone"
+        );
+      }
     },
   ],
 ];

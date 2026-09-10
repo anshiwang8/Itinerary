@@ -25,6 +25,7 @@ import {
   planToParsed,
   planWithModel,
   stripLeakedPreferenceConstraints,
+  stripUnprovableConstraints,
 } from "./planner";
 
 // The PLANNER step: natural-language prompt → the SHAPE of a day (which
@@ -151,14 +152,25 @@ export async function POST(request: NextRequest) {
             : (msgs: unknown[]) => callModel(apiKey, msgs, model)
         )
     );
-    // Two floors over the model's answer, both correcting facts it does not
-    // get to be wrong about: the time floors, then the preference-leak strip.
-    // The strip is a no-op (same object) for every caller with no activity
-    // preference, which is every guest and every mock e2e run.
+    // Three floors over the model's answer, all correcting facts it does not
+    // get to be wrong about: the time floors, then the preference-leak strip,
+    // then the provability strip. The preference strip is a no-op (same
+    // object) for every caller with no activity preference — every guest and
+    // every mock e2e run. The provability strip is a no-op for any plan whose
+    // constraints are all provable or all strict dietary words, which is the
+    // ordinary case.
     const timed = applyTimeFloors(modelPlan, prompt, now, timeZone);
-    const plan = stripLeakedPreferenceConstraints(timed, preferences);
+    const leakStripped = stripLeakedPreferenceConstraints(timed, preferences);
+    const plan = stripUnprovableConstraints(leakStripped);
     const strippedConstraints =
-      timed.context.constraints.length - plan.context.constraints.length;
+      timed.context.constraints.length - leakStripped.context.constraints.length;
+    // Constraints removed because no provider evidence could EVER prove them
+    // ("indoor", "waterfront", "seats six"). Same logging shape as
+    // `strippedConstraints`: a COUNT is the tuning signal (how often the
+    // prompt lets an unverifiable word through), a count names nobody's
+    // request, and it is omitted entirely when the strip did nothing.
+    const unprovableConstraints =
+      leakStripped.context.constraints.length - plan.context.constraints.length;
     // Permanent observability at the resolution point, same spirit as
     // [swap-apply] and [reroute-apply]: which rung answered, what shape came
     // back, and — when a rung was rejected — exactly why.
@@ -179,6 +191,7 @@ export async function POST(request: NextRequest) {
       // taste. Omitted entirely when the strip did nothing, which is the
       // ordinary case.
       ...(strippedConstraints > 0 ? { strippedConstraints } : {}),
+      ...(unprovableConstraints > 0 ? { unprovableConstraints } : {}),
       // HOW MANY vague activities the model left without a slot-scoped
       // question — coercePlan synthesized one for each, so this never failed
       // the plan; it is the tuning signal for the prompt's appliesToSlot

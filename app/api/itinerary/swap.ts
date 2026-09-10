@@ -28,7 +28,11 @@ import { withModelFallback } from "../_shared/modelFallback";
 import { getDuration } from "../schedule/durations";
 import { toZonedISO, WINDOW_OVERRUN_TOLERANCE_MINUTES } from "../schedule/schedule";
 import { isParkLike } from "../../lib/categoryTraits";
-import { normalizeConstraint } from "../../lib/constraints";
+import {
+  canEverBeProven,
+  isStrictDietaryConstraint,
+  normalizeConstraint,
+} from "../../lib/constraints";
 import {
   parsePriceDirection,
   priceDirectionSearchTerm,
@@ -1517,10 +1521,24 @@ async function venueSwap(
   // eventually eat it. Normalisation is `normalizeConstraint` — the SAME
   // function the judge normalises with — so this removes exactly the strings
   // that would have choked it, and nothing else.
+  //
+  // THE THIRD DISJUNCT is the general form of the second. The swap model
+  // invents constraints the user never asked for — a live trace had it
+  // return "licensed" on a "bar with live music" complaint that mentioned
+  // neither. A constraint provider evidence could NEVER prove is unprovable
+  // by construction, exactly like a leaked category: it makes
+  // `placeMeetsAllConstraints` false for every candidate and the swap
+  // refuses forever. `canEverBeProven` is derived from
+  // `constraintEvidence`'s own vocabulary, so it stays correct if the
+  // provider mask grows. The strict dietary/religious words
+  // (`isStrictDietaryConstraint`) are the owner's deliberate exception and
+  // stay in — a genuine "vegan" the complaint stated is its intent, and the
+  // refusal it produces reaches the recovery panel like any other.
   const isLeakedConstraint = (constraint: string): boolean =>
     (priceDirection !== null && parsePriceDirection(constraint) !== null) ||
     (changesCategory &&
-      normalizeConstraint(constraint) === normalizeConstraint(poolKey));
+      normalizeConstraint(constraint) === normalizeConstraint(poolKey)) ||
+    (!isStrictDietaryConstraint(constraint) && !canEverBeProven(constraint));
   const interpConstraints = (interp.constraints ?? []).filter(
     (constraint) => !isLeakedConstraint(constraint)
   );

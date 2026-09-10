@@ -659,6 +659,12 @@ export function mockPlan(
   if (/vegetarian/.test(p)) constraints.push("vegetarian");
   if (/wheelchair|accessible/.test(p)) constraints.push("wheelchair accessible");
   if (/live music/.test(p)) constraints.push("live music");
+  // "indoor" is the deterministic UNPROVABLE-constraint trigger: no
+  // provider boolean can ever carry it, so /api/parse's provability strip
+  // must remove it before it reaches the hard pass/fail check. With the
+  // strip in place the plan proceeds; remove the strip and this word
+  // refuses every venue (the revert-run for that fix).
+  if (/\bindoor\b/.test(p)) constraints.push("indoor");
 
   const numericBudget = p.match(
     /\b(?:under|below|less than|up to|max(?:imum)?)\s*(?:us\$|ca\$|c\$|\$|€|£|¥|usd|cad|eur|gbp|jpy)?\s*\d+(?:\.\d{1,2})?(?:\s*(?:usd|cad|eur|gbp|jpy))?\b/i
