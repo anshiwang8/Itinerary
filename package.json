@@ -15,6 +15,8 @@
     "test:e2e": "tsx scripts/run-mock-e2e.ts",
     "test:e2e:headed": "tsx scripts/run-mock-e2e.ts --headed",
     "test:e2e:live": "playwright test --config playwright.live.config.ts --grep-invert @mock",
+    "test:agents": "tsx testing/agent-personas/run-personas.ts",
+    "test:agents:login": "tsx testing/agent-personas/auth/save-storage-state.ts",
     "check": "npm run lint && npm run typecheck && npm run test:unit && npm run build && npm run test:e2e"
   },
   "dependencies": {

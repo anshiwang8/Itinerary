@@ -7,3 +7,8 @@ playwright-report/
 *.log
 
 docs/research/reddit-demand-analysis.md
+
+# Agent persona harness output: reports + screenshots of REAL plans made
+# against the deployed app, plus a saved signed-in session that is a real
+# credential. Point-in-time artifacts of real data; never committed.
+testing/agent-personas/output/
