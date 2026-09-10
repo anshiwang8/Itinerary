@@ -61,7 +61,131 @@ export const SEL = {
   recoveryWiden: ".recover__widen",
   recoveryOverride: ".recover__override",
   recoveryGeocode: ".recover__geocode",
+  topbar: ".topbar",
+  signInPill: ".acct__signin",
+  startMenu: ".startmenu",
+  startMenuItem: ".startmenu__item",
+  startMenuNote: ".startmenu__note",
 } as const;
+
+/**
+ * What a RAW failure looks like on screen, as opposed to a refusal.
+ *
+ * The app's own fail-loud surface (`planGuards.ts`) writes sentences: "That's
+ * a bit contradictory…", "Couldn't find any…". None of those match anything
+ * here. What does match is the app breaking rather than answering — a
+ * framework crash page, an unhandled runtime error, a raw provider status, a
+ * value that escaped its formatter. The list is deliberately tight: a plain
+ * "500" is excluded because it is also a street number, and every entry
+ * below carries punctuation or wording no venue string has.
+ */
+const RAW_ERROR_SIGNATURES = [
+  /internal server error/i,
+  /application error:/i,
+  /unhandled runtime error/i,
+  /unhandled (?:promise )?rejection/i,
+  /\b(?:Type|Reference|Syntax|Range)Error:/,
+  /Cannot read propert(?:y|ies)/i,
+  /\bis not a function\b/i,
+  /\[object Object\]/,
+  /\bundefined\b\s*(?:min|stops?)\b/i,
+  /\bNaN\b/,
+  /\bInvalid Date\b/i,
+];
+
+export interface RawErrorProbe {
+  found: boolean;
+  /** The matching text, trimmed, for the report. */
+  sample: string | null;
+}
+
+/** Scan the rendered page for a raw failure. Reads the body's own text, so
+ *  it sees whatever a person would see, refusal sentences included — and
+ *  none of those match the signatures above. */
+export async function findRawError(page: Page): Promise<RawErrorProbe> {
+  const text = await page
+    .locator("body")
+    .innerText()
+    .catch(() => "");
+  for (const signature of RAW_ERROR_SIGNATURES) {
+    const match = signature.exec(text);
+    if (!match) continue;
+    const at = Math.max(0, match.index - 60);
+    return { found: true, sample: text.slice(at, match.index + 120).replace(/\s+/g, " ").trim() };
+  }
+  return { found: false, sample: null };
+}
+
+/** Is the landing page's sign-in entry point on screen? It lives inside
+ *  `page.tsx`'s `if (!itinerary)` branch, so the answer is also the answer
+ *  to "is a plan currently showing". */
+export async function signInAffordanceVisible(page: Page): Promise<boolean> {
+  return page.locator(SEL.signInPill).first().isVisible().catch(() => false);
+}
+
+export interface StartLocationOutcome {
+  /** The dropdown opened and its one row was pressed. */
+  used: boolean;
+  /** The row's own explanation, when the read failed. */
+  note: string | null;
+  /** What the field holds afterwards. */
+  fieldValue: string;
+  /** The field is still typeable — the contract on every failure path. */
+  fieldEditable: boolean;
+}
+
+/**
+ * Drive the starting-location field's dropdown.
+ *
+ * The menu opens on FOCUS of the field and asks the browser for nothing
+ * until the row itself is pressed — that split is the feature's own
+ * invariant (focusing a text input must never raise a permission dialog),
+ * so this drives it in exactly that order and never shortcuts to the row.
+ * `getCurrentPosition`'s own timeout is 15 s, so the wait below has to
+ * outlast it or a timeout would read as a hang.
+ */
+export async function useCurrentLocationRow(page: Page): Promise<StartLocationOutcome> {
+  const field = page.locator(SEL.startInput);
+  await field.waitFor({ state: "visible", timeout: 30_000 });
+  await field.click();
+  const row = page.locator(SEL.startMenuItem).first();
+  if (!(await row.isVisible().catch(() => false))) {
+    return {
+      used: false,
+      note: null,
+      fieldValue: await field.inputValue().catch(() => ""),
+      fieldEditable: await field.isEditable().catch(() => false),
+    };
+  }
+  await row.click();
+
+  // Outlast the module's own 15 s `getCurrentPosition` timeout, then let the
+  // reverse-geocode round trip land.
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline) {
+    const note = await page
+      .locator(SEL.startMenuNote)
+      .first()
+      .innerText()
+      .catch(() => null);
+    if (note && note.trim()) {
+      return {
+        used: true,
+        note: note.trim(),
+        fieldValue: await field.inputValue().catch(() => ""),
+        fieldEditable: await field.isEditable().catch(() => false),
+      };
+    }
+    if ((await field.inputValue().catch(() => "")).trim()) break;
+    await page.waitForTimeout(500);
+  }
+  return {
+    used: true,
+    note: null,
+    fieldValue: await field.inputValue().catch(() => ""),
+    fieldEditable: await field.isEditable().catch(() => false),
+  };
+}
 
 export interface PlanRequest {
   prompt: string;

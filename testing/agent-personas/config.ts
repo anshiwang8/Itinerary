@@ -32,6 +32,8 @@ export interface RunOptions {
   maxLegTravelMs: number;
   /** Seconds between simulated position updates. */
   fixIntervalMs: number;
+  /** How many personas may be in flight at once. See DEFAULTS below. */
+  concurrency: number;
   headed: boolean;
   keepOpenOnFailure: boolean;
 }
@@ -46,6 +48,24 @@ export const DEFAULTS = {
   // Comfortably under the app's own 45s staleness threshold, so an on-route
   // persona never reads as "paused" purely because of harness pacing.
   fixIntervalMs: 4_000,
+  /**
+   * HOW MANY PERSONAS RUN AT ONCE, and why there is a ceiling at all.
+   *
+   * The app rate-limits per (route, client IP) over a 60-second window, and
+   * every persona in a run shares ONE IP. The tightest limits the pipeline
+   * touches are `/api/places/search` and `/api/geocode` at 60/min, and a
+   * single plan spends two geocodes plus roughly one Places search per
+   * activity. Launching fifty-one personas simultaneously would therefore
+   * spend several hundred calls inside one window and collect 429s, and a
+   * report full of rate-limit failures says nothing about the app.
+   *
+   * EIGHT is deliberately the size of the ORIGINAL persona set, so a run of
+   * those eight still puts all of them in flight at once exactly as it
+   * always did. Larger sets queue behind the pool instead. Lower it with
+   * `--concurrency` if the deployment's limits are tighter, or raise it if
+   * you have raised theirs.
+   */
+  concurrency: 8,
 } as const;
 
 /** True walking / driving ground speeds, before `speedMultiplier`. */
@@ -123,6 +143,7 @@ export function parseArgs(argv: string[]): RunOptions {
   const only = value("only");
   const speed = Number(value("speed") ?? DEFAULTS.speedMultiplier);
   const timeoutMinutes = Number(value("timeout") ?? DEFAULTS.personaTimeoutMs / 60_000);
+  const concurrency = Number(value("concurrency") ?? DEFAULTS.concurrency);
 
   return {
     baseURL: (process.env.AGENT_TEST_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, ""),
@@ -133,6 +154,10 @@ export function parseArgs(argv: string[]): RunOptions {
     speedMultiplier: Number.isFinite(speed) && speed > 0 ? speed : DEFAULTS.speedMultiplier,
     maxLegTravelMs: Number(value("max-leg-ms") ?? DEFAULTS.maxLegTravelMs),
     fixIntervalMs: Number(value("fix-interval-ms") ?? DEFAULTS.fixIntervalMs),
+    concurrency:
+      Number.isFinite(concurrency) && concurrency >= 1
+        ? Math.floor(concurrency)
+        : DEFAULTS.concurrency,
     headed: flag("headed"),
     keepOpenOnFailure: flag("keep-open"),
   };

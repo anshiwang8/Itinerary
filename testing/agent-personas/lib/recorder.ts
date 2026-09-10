@@ -24,6 +24,17 @@ export class Recorder {
   readonly checks: CheckRecord[] = [];
   readonly consoleErrors: string[] = [];
   readonly networkErrors: string[] = [];
+  /**
+   * Every JavaScript dialog the page raised.
+   *
+   * Two reasons this exists. A dialog BLOCKS the browser's event loop, so an
+   * unhandled one freezes the whole persona and every later step reports a
+   * timeout that says nothing; dismissing it keeps the run honest. And a
+   * dialog is itself the finding for the injection-text persona — if
+   * `<script>alert(1)</script>` ever ran, this is where it shows up.
+   * `expectGraceful` reads this list and fails on a non-empty one.
+   */
+  readonly dialogs: string[] = [];
   private shotIndex = 0;
 
   constructor(
@@ -47,6 +58,10 @@ export class Recorder {
     });
     page.on("pageerror", (error) => {
       this.consoleErrors.push(`[pageerror] ${String(error).slice(0, 500)}`);
+    });
+    page.on("dialog", (dialog) => {
+      this.dialogs.push(`${dialog.type()}: ${dialog.message().slice(0, 200)}`);
+      void dialog.dismiss().catch(() => undefined);
     });
     page.on("requestfailed", (request) => {
       const failure = request.failure()?.errorText ?? "unknown";

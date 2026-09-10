@@ -62,11 +62,16 @@ async function main(): Promise<void> {
   const browser = await chromium.launch({ headless: !run.headed });
   let results: PersonaResult[] = [];
   try {
-    // DELIBERATE PARALLELISM: one isolated BrowserContext per persona, all
+    // DELIBERATE PARALLELISM: one isolated BrowserContext per persona, several
     // running at once. Isolated cookies, storage and geolocation mean one
     // persona's simulated position can never leak into another's.
-    results = await Promise.all(
-      personas.map((persona) => runPersona(browser, persona, run, reportDir))
+    //
+    // The POOL exists only because every persona shares one client IP against
+    // the app's own per-route rate limits (60/min on Places search and
+    // geocode) — see `DEFAULTS.concurrency`. Its default is the size of the
+    // original persona set, so a run of those eight is still all-at-once.
+    results = await runPool(personas, run.concurrency, (persona) =>
+      runPersona(browser, persona, run, reportDir)
     );
   } finally {
     await browser.close().catch(() => undefined);
@@ -104,6 +109,30 @@ async function main(): Promise<void> {
     "Both are gitignored. Nothing from this run is committed; open the report locally."
   );
   console.log("─".repeat(72));
+}
+
+/**
+ * Run `tasks` with at most `limit` in flight, preserving input order in the
+ * results. A worker takes the next index whenever it finishes one, so a
+ * persona that ends in ninety seconds does not hold a slot for the twenty
+ * minutes its neighbour needs.
+ */
+async function runPool<T, R>(
+  items: T[],
+  limit: number,
+  work: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await work(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function selectPersonas(run: RunOptions): Persona[] {
@@ -148,17 +177,29 @@ function printPlan(personas: Persona[], run: RunOptions): void {
   console.log("  AGENT PERSONA RUN — against the REAL deployed app");
   console.log("═".repeat(72));
   console.log("");
+  const inFlight = Math.min(run.concurrency, personas.length);
   console.log("  Target        " + run.baseURL);
-  console.log("  Personas      " + personas.length + " (running in parallel)");
+  console.log(
+    "  Personas      " +
+      personas.length +
+      " (" +
+      inFlight +
+      " in flight at a time" +
+      (inFlight < personas.length ? ", the rest queued behind them" : "") +
+      ")"
+  );
   console.log("  Travel speed  " + run.speedMultiplier + "x real pace");
   console.log(
     "  Per-persona   " + Math.round(run.personaTimeoutMs / 60_000) + " min ceiling"
   );
   console.log("");
+  // Widen to the longest name so a long slug cannot push the intents out of
+  // their column and make the list unreadable.
+  const width = personas.reduce((widest, persona) => Math.max(widest, persona.name.length), 0) + 2;
   for (const persona of personas) {
     console.log(
       "    - " +
-        persona.name.padEnd(20) +
+        persona.name.padEnd(width) +
         (persona.signedIn ? "[signed in] " : "[guest]     ") +
         persona.intent
     );
@@ -168,7 +209,7 @@ function printPlan(personas: Persona[], run: RunOptions): void {
   console.log(
     "    " +
       counts.plans +
-      " plan(s), " +
+      " plan attempt(s), " +
       counts.swaps +
       " swap(s), " +
       counts.removes +
@@ -176,6 +217,13 @@ function printPlan(personas: Persona[], run: RunOptions): void {
       counts.modeSwitches +
       " mode switch(es)"
   );
+  console.log(
+    "    (a plan ATTEMPT that the app refuses — a bad address, a contradiction, a"
+  );
+  console.log(
+    "     degenerate prompt — costs far less than a plan that resolves, so the"
+  );
+  console.log("     estimate below is an upper bound for the adversarial personas.)");
   console.log(
     "    against Google Places / Routes / Geocoding / Weather / Maps and OpenRouter."
   );

@@ -60,15 +60,28 @@ export async function runPersona(
       return finish(persona, recorder, probe, startedAt, false, harnessError);
     }
 
+    // A persona that tests REFUSAL gets no geolocation permission and no
+    // starting fix, so Chromium answers every position request the way it
+    // answers one for a user who said no. Everyone else keeps the granted
+    // permission that makes movement simulation possible at all.
+    const denyLocation = persona.denyGeolocation === true;
     context = await browser.newContext({
       // Every `page.goto("/")` in the driver resolves against this, so the
       // persona can never wander off the target deployment.
       baseURL: run.baseURL,
       viewport: { width: 1440, height: 900 },
-      permissions: ["geolocation"],
+      permissions: denyLocation ? [] : ["geolocation"],
       // A plausible starting fix so the very first watchPosition callback is
       // a real one. It is overwritten the moment the persona starts moving.
-      geolocation: { latitude: 43.6511, longitude: -79.3839, accuracy: REPORTED_ACCURACY_M },
+      ...(denyLocation
+        ? {}
+        : {
+            geolocation: {
+              latitude: 43.6511,
+              longitude: -79.3839,
+              accuracy: REPORTED_ACCURACY_M,
+            },
+          }),
       locale: "en-CA",
       timezoneId: "America/Toronto",
       storageState,
@@ -96,6 +109,7 @@ export async function runPersona(
       await performAction(action, {
         page,
         context,
+        browser,
         persona,
         recorder,
         probe,
@@ -132,6 +146,9 @@ export async function runPersona(
 interface ActionContext {
   page: Page;
   context: BrowserContext;
+  /** Only the second-context resume needs this; every other action drives
+   *  the persona's own single context. */
+  browser: Browser;
   persona: Persona;
   recorder: Recorder;
   probe: ItineraryProbe;
@@ -172,6 +189,11 @@ const NEEDS_A_PLAN = new Set<PersonaAction["kind"]>([
   "screenshotTransitLegs",
   "advanceClockPastPlanEnd",
   "end",
+  "expectShortDriveLegsWalk",
+  "reloadDuringSwap",
+  "expectLiveTrackingDenied",
+  "expectNoSignInWhilePlanning",
+  "resumeInSecondContext",
 ]);
 
 /** Actions that additionally need the target stop to be reachable in time.
@@ -345,6 +367,30 @@ async function performAction(action: PersonaAction, ctx: ActionContext): Promise
       return;
     }
 
+    case "expectGraceful":
+      return doExpectGraceful(action, ctx);
+
+    case "expectShortDriveLegsWalk":
+      return doShortDriveLegs(ctx);
+
+    case "endAgain":
+      return doEndAgain(ctx);
+
+    case "reloadDuringSwap":
+      return doReloadDuringSwap(action, ctx);
+
+    case "useCurrentLocation":
+      return doUseCurrentLocation(action, ctx);
+
+    case "expectLiveTrackingDenied":
+      return doLiveTrackingDenied(ctx);
+
+    case "expectNoSignInWhilePlanning":
+      return doNoSignInWhilePlanning(ctx);
+
+    case "resumeInSecondContext":
+      return doResumeInSecondContext(ctx);
+
     case "expectPlanFailsLoud": {
       await recorder.check(page, "plan_fails_loud", action.expect, async () => ({
         pass: false,
@@ -372,21 +418,55 @@ async function doPlan(
   const shot = await recorder.screenshot(page, "plan-created");
   ctx.state.planLive = outcome.ok;
 
+  const expectation = action.expect;
+  const refusalAllowed = expectation?.refusalIsAcceptable === true;
+  const refusalRequired = expectation?.mustRefuse === true;
+
   recorder.record({
     step: "plan_created",
-    expected:
-      "the prompt " + JSON.stringify(action.prompt) + " produces a real itinerary on the map",
+    expected: refusalRequired
+      ? "the prompt " +
+        JSON.stringify(action.prompt) +
+        " is REFUSED before it ever reaches the model: this is one of the pure, deterministic guards in planGuards.ts, so the answer does not depend on the day or on the model"
+      : refusalAllowed
+        ? "the prompt " +
+          JSON.stringify(action.prompt) +
+          " either produces a real itinerary or is refused with an honest reason. Both are legitimate here, and which one happened is recorded rather than judged."
+        : "the prompt " +
+          JSON.stringify(action.prompt) +
+          " produces a real itinerary on the map",
     actual:
       (outcome.ok
         ? "planned in " + Math.round(outcome.elapsedMs / 1000) + "s"
         : "no plan: " + outcome.failure) +
       (outcome.clarified ? "; a clarifying round appeared and was skipped" : "") +
       (outcome.recovered ? "; " + outcome.recovered : ""),
-    pass: outcome.ok,
+    pass: refusalRequired ? !outcome.ok : outcome.ok || refusalAllowed,
     evidence: [shot],
   });
+
+  // When it DID refuse, the wording has to be the app's own. An improvised or
+  // borrowed message is a deviation even where the refusal itself is right.
+  if (!outcome.ok && expectation?.refusalMustMention) {
+    const refusal = (outcome.failure ?? "").toLowerCase();
+    const matched = expectation.refusalMustMention.filter((fragment) =>
+      refusal.includes(fragment.toLowerCase())
+    );
+    recorder.record({
+      step: "refusal_uses_the_app_s_own_wording",
+      expected:
+        "the refusal is one of the app's own documented messages, containing one of: " +
+        expectation.refusalMustMention.map((f) => JSON.stringify(f)).join(", "),
+      actual:
+        (matched.length > 0
+          ? "matched " + matched.map((f) => JSON.stringify(f)).join(", ") + " in: "
+          : "matched none of them: ") + JSON.stringify(outcome.failure ?? ""),
+      pass: matched.length > 0,
+      evidence: [shot],
+    });
+  }
+
   if (!outcome.ok) {
-    const expectation = action.expect;
     if (expectation?.mustNotRefuseCiting) {
       const refusal = (outcome.failure ?? "").toLowerCase();
       const cited = expectation.mustNotRefuseCiting.filter((word) =>
@@ -423,7 +503,6 @@ async function doPlan(
   }
 
   const stops = timedStops(plan);
-  const expectation = action.expect;
   if (expectation?.minStops !== undefined) {
     recorder.record({
       step: "plan_shape",
@@ -433,6 +512,23 @@ async function doPlan(
         " timed stop(s): " +
         stops.map((stop) => (stop.name ?? "?") + " [" + (stop.category ?? "?") + "]").join(" | "),
       pass: stops.length >= expectation.minStops,
+      evidence: [shot],
+    });
+  }
+  if (expectation?.maxStops !== undefined) {
+    recorder.record({
+      step: "plan_shape_capped",
+      expected:
+        "at most " +
+        expectation.maxStops +
+        " timed stops. The app's own hard ceiling is MAX_ACTIVITIES = 8 (app/api/parse/planner.ts, the same number as planSlots.MAX_PLAN_STOPS), enforced by findPlanProblems and its correction retry; a stated window has a lower sensible ceiling of its own.",
+      actual:
+        stops.length +
+        " timed stop(s): " +
+        stops
+          .map((stop) => (stop.name ?? "?") + " [" + (stop.category ?? "?") + "]")
+          .join(" | "),
+      pass: stops.length <= expectation.maxStops,
       evidence: [shot],
     });
   }
@@ -468,6 +564,21 @@ async function doPlan(
         JSON.stringify(expectation.constraint) +
         ".",
       pass: true,
+      evidence: [shot],
+    });
+  }
+
+  if (refusalRequired) {
+    recorder.record({
+      step: "deterministic_guard_did_not_fire",
+      expected:
+        "a pure pre-model guard in planGuards.ts refuses this prompt outright, so no itinerary should exist at all",
+      actual:
+        "an itinerary WAS planned: " +
+        stops
+          .map((stop) => (stop.name ?? "?") + " [" + (stop.category ?? "?") + "]")
+          .join(" | "),
+      pass: false,
       evidence: [shot],
     });
   }
@@ -999,6 +1110,39 @@ async function doRemove(
   );
   const refused = beforeStops.length === afterStops.length;
 
+  // THE DOWN-TO-ZERO GUARD. `removeStop.ts` refuses BEFORE the splice when
+  // no stop with a venue would survive, and points at End instead, because an
+  // empty `stops` array reads as a FINISHED outing: `[].every(...)` is
+  // vacuously true, so the plan would report `completed`, clear the owner's
+  // resume pointer and file a blank record in history, none of it looking
+  // like an error. A persona asking for this expects the plan to SURVIVE.
+  if (action.expect === "refused") {
+    const saidWhy = (outcome.banner ?? outcome.inlineError ?? "").toLowerCase();
+    const pointsAtEnd = saidWhy.includes("end");
+    recorder.record({
+      step: "remove_last_stop_is_refused",
+      expected:
+        "removing the ONLY remaining stop is refused and the plan survives intact, with the refusal pointing at the End control (LAST_STOP_MESSAGE). Deleting your way to zero would make the plan report itself completed, clear the resume pointer and archive a blank record, and none of that would look like an error.",
+      actual:
+        "HTTP " +
+        outcome.status +
+        "; " +
+        beforeStops.length +
+        " stop(s) before, " +
+        afterStops.length +
+        " after; the plan " +
+        (refused ? "SURVIVED" : "was emptied") +
+        "; remaining: [" +
+        afterStops.map((stop) => stop.name ?? "?").join(" | ") +
+        "]; the app said: " +
+        JSON.stringify(outcome.banner ?? outcome.inlineError ?? "nothing") +
+        (pointsAtEnd ? "" : " (which does not mention End)"),
+      pass: refused && afterStops.length === beforeStops.length && afterStops.length > 0,
+      evidence: [shot],
+    });
+    return;
+  }
+
   recorder.record({
     step: "remove_stop_" + index + "_" + String(action.target),
     expected:
@@ -1306,6 +1450,587 @@ async function doCheckHistory(
   await page.keyboard.press("Escape").catch(() => undefined);
   await page.waitForTimeout(500);
   void persona;
+}
+
+// -- adversarial, geography and session additions ------------------------
+
+/**
+ * "The app is still an app."
+ *
+ * The shared check behind every adversarial persona. A REFUSAL is not what
+ * this looks for: the app's fail-loud surface writes whole sentences and
+ * none of them match a raw-error signature. What it looks for is the app
+ * BREAKING rather than answering: a framework crash page, an unhandled
+ * runtime error, a value that escaped its formatter, a JavaScript dialog
+ * that actually ran (the injection persona's real finding), or a page error
+ * the recorder caught.
+ *
+ * The plan's own shape is recorded beside the verdict, times included, so a
+ * reader can eyeball what a hostile prompt actually produced without the
+ * check having to assert on a venue.
+ */
+async function doExpectGraceful(
+  action: Extract<PersonaAction, { kind: "expectGraceful" }>,
+  ctx: ActionContext
+): Promise<void> {
+  const { page, recorder, probe } = ctx;
+  const raw = await app.findRawError(page);
+  const dialogs = [...recorder.dialogs];
+  const pageErrors = recorder.consoleErrors.filter((line) => line.startsWith("[pageerror]"));
+  const banner = await app.readBanner(page).catch(() => null);
+  const plan = probe.current();
+  const stops = plan ? timedStops(plan) : [];
+  const shape =
+    stops.length === 0
+      ? "no timed stops"
+      : stops
+          .map(
+            (stop) =>
+              (stop.name ?? "?") +
+              " [" +
+              (stop.category ?? "?") +
+              "] " +
+              (stop.start_time ?? "?") +
+              " to " +
+              (stop.end_time ?? "?")
+          )
+          .join(" | ");
+  const errorText = await page
+    .locator(app.SEL.landingError + ", " + app.SEL.stageError)
+    .first()
+    .innerText()
+    .catch(() => null);
+
+  const ok = !raw.found && dialogs.length === 0 && pageErrors.length === 0;
+  recorder.record({
+    step: action.step,
+    expected: action.expected,
+    actual:
+      (ok
+        ? "handled gracefully: no raw error text, no JavaScript dialog, no unhandled page error"
+        : "RAW FAILURE" +
+          (raw.found ? ", on-screen text: " + JSON.stringify(raw.sample) : "") +
+          (dialogs.length > 0 ? ", dialog(s) fired: " + dialogs.join("; ") : "") +
+          (pageErrors.length > 0 ? ", page error(s): " + pageErrors.join("; ") : "")) +
+      ". The app said: " +
+      JSON.stringify((errorText ?? banner ?? "nothing").slice(0, 300)) +
+      ". Plan shape: " +
+      shape +
+      ".",
+    pass: ok,
+    evidence: [await recorder.screenshot(page, action.step)],
+  });
+}
+
+/**
+ * The documented short-hop relabel, checked against real provider distances.
+ *
+ * `buildDrivingLeg` relabels a drive under `DRIVING_SHORT_LEG_WALK_METERS`
+ * (700 m) to WALK, so a stored leg that is still `mode: "driving"` under that
+ * distance means the relabel did not happen. There IS one documented reason
+ * for that (a short drive whose WALK route failed to price stays a drive),
+ * and the harness cannot see which happened, so that caveat travels with the
+ * finding instead of being silently allowed.
+ *
+ * The number is transcribed from `app/api/schedule/travel.ts` rather than
+ * imported: this directory must never become a dependency of `app/`.
+ */
+const DRIVING_SHORT_LEG_WALK_METERS = 700;
+
+async function doShortDriveLegs(ctx: ActionContext): Promise<void> {
+  const { page, recorder, probe } = ctx;
+  const plan = probe.current();
+  if (!plan) {
+    recorder.record({
+      step: "short_drive_legs_relabel_to_walk",
+      expected: "a driving plan's short hops are relabelled to WALK",
+      actual: "no plan data available to read leg distances from",
+      pass: false,
+      skipped: true,
+    });
+    return;
+  }
+  const legs = [plan.homeLeg, ...plan.legs].filter(
+    (leg): leg is NonNullable<typeof leg> => Boolean(leg)
+  );
+  const described = legs
+    .map(
+      (leg) =>
+        leg.mode +
+        " " +
+        (leg.distanceMeters === null ? "?" : Math.round(leg.distanceMeters) + " m")
+    )
+    .join(", ");
+  const shortDrives = legs.filter(
+    (leg) =>
+      leg.mode === "driving" &&
+      leg.distanceMeters !== null &&
+      leg.distanceMeters < DRIVING_SHORT_LEG_WALK_METERS
+  );
+  const shortWalks = legs.filter(
+    (leg) =>
+      leg.mode === "walk" &&
+      leg.distanceMeters !== null &&
+      leg.distanceMeters < DRIVING_SHORT_LEG_WALK_METERS
+  );
+
+  recorder.record({
+    step: "short_drive_legs_relabel_to_walk",
+    expected:
+      "on a DRIVING plan, no leg comes back mode 'driving' under " +
+      DRIVING_SHORT_LEG_WALK_METERS +
+      " m: buildDrivingLeg relabels a short hop to WALK. The one documented exception is a short drive whose WALK route did not price, which stays a drive.",
+    actual:
+      "stored travelMode is " +
+      (plan.travelMode ?? "transit (absent)") +
+      "; legs were [" +
+      described +
+      "]; " +
+      shortWalks.length +
+      " short hop(s) relabelled to walk; " +
+      shortDrives.length +
+      " leg(s) still driving under the threshold",
+    pass: shortDrives.length === 0,
+    evidence: [await recorder.screenshot(page, "short-drive-legs")],
+  });
+
+  if (shortWalks.length === 0 && shortDrives.length === 0) {
+    recorder.record({
+      step: "short_hop_present",
+      expected:
+        "at least one hop under " +
+        DRIVING_SHORT_LEG_WALK_METERS +
+        " m, so the relabel rule is actually exercised",
+      actual:
+        "every leg this plan produced is longer than the threshold, so the relabel had nothing to act on: " +
+        described,
+      pass: false,
+      skipped: true,
+    });
+  }
+}
+
+/**
+ * End a SECOND time.
+ *
+ * The UI half first: after a successful end the topbar goes with the plan,
+ * so there is no control left to press, and that IS the app's answer to a
+ * double-submit. Reaching the server's own idempotency then needs the app's
+ * own POST re-issued with the app's own captured Authorization header, the
+ * same seam `probeClock` uses. The end route returns `changed: false` for a
+ * plan that already carries `endedAt` and guards its archive with
+ * `hasBeenArchived`, so a graceful answer with no second history document is
+ * the expectation.
+ */
+async function doEndAgain(ctx: ActionContext): Promise<void> {
+  const { page, recorder, probe, run } = ctx;
+  const planId = probe.seenPlanIds[probe.seenPlanIds.length - 1] ?? null;
+
+  await recorder.check(
+    page,
+    "end_control_gone_after_ending",
+    "once a plan has ended the End control is no longer on screen, so the UI itself cannot submit a second end",
+    async () => {
+      const visible = await page
+        .locator(app.SEL.endButton)
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const onLanding = await page
+        .locator(app.SEL.promptInput)
+        .isVisible()
+        .catch(() => false);
+      return {
+        pass: !visible,
+        actual: "End control visible: " + visible + "; back on the landing page: " + onLanding,
+      };
+    }
+  );
+
+  if (!planId) {
+    recorder.record({
+      step: "double_end_is_idempotent",
+      expected: "a second end request neither errors nor writes a second history document",
+      actual: "no plan id was observed, so the second request could not be addressed",
+      pass: false,
+      skipped: true,
+    });
+    return;
+  }
+
+  const authorization = probe.authHeader();
+  let status: number | null = null;
+  let body: unknown = null;
+  try {
+    const response = await page.request.post(
+      run.baseURL + "/api/itinerary/" + planId + "/end",
+      {
+        headers: {
+          "Content-Type": "application/json",
+          ...(authorization ? { Authorization: authorization } : {}),
+        },
+        data: { choice: "discard-end" },
+        timeout: 45_000,
+      }
+    );
+    status = response.status();
+    body = await response.json().catch(() => null);
+  } catch (error) {
+    status = null;
+    body = String(error).slice(0, 200);
+  }
+
+  const archived =
+    typeof body === "object" && body !== null && "archived" in body
+      ? (body as { archived?: unknown }).archived === true
+      : null;
+  // A 404 is the app's own indistinguishable answer for "not yours / not
+  // there" and is a perfectly graceful second end; a 2xx is the idempotent
+  // path. What must not happen is a 5xx, or an archive on the second pass.
+  const graceful = status !== null && status < 500;
+
+  recorder.record({
+    step: "double_end_is_idempotent",
+    expected:
+      "re-issuing the app's OWN end request for an already-ended plan (same Authorization header the app sent) is handled gracefully and archives nothing a second time: the route returns changed:false for a plan that already carries endedAt, and its archive is guarded by hasBeenArchived",
+    actual:
+      "second POST /api/itinerary/" +
+      planId +
+      "/end answered HTTP " +
+      String(status) +
+      "; body " +
+      JSON.stringify(body).slice(0, 200) +
+      "; archived-on-this-pass: " +
+      String(archived),
+    pass: graceful && archived !== true,
+    evidence: [],
+  });
+}
+
+/**
+ * Reload while a swap POST is still in flight.
+ *
+ * The browser's request dies with the document; the server finishes and
+ * commits through CAS regardless, so BOTH outcomes are legitimate: the swap
+ * landed, or it did not. What must not happen is a plan that will not come
+ * back, a half-applied stop list, or a stuck busy state.
+ */
+async function doReloadDuringSwap(
+  action: Extract<PersonaAction, { kind: "reloadDuringSwap" }>,
+  ctx: ActionContext
+): Promise<void> {
+  const { page, recorder, probe } = ctx;
+  const before = probe.current();
+  const beforeStops = before ? timedStops(before) : [];
+  const index = resolveIndex(action.target, Math.max(1, beforeStops.length));
+
+  try {
+    await app.selectStopByIndex(page, index);
+    const card = app.cardByIndex(page, index);
+    const input = card.locator(app.SEL.swapInput);
+    await input.waitFor({ state: "visible", timeout: 20_000 });
+    await input.fill(action.refinement);
+    // Fire and DO NOT await: the reload below is the point.
+    void card
+      .locator(app.SEL.swapGo)
+      .click()
+      .catch(() => undefined);
+  } catch (error) {
+    recorder.record({
+      step: "reload_during_swap",
+      expected: "a swap is submitted and the page is reloaded before its response returns",
+      actual: "could not submit the swap: " + String(error).slice(0, 240),
+      pass: false,
+      evidence: [await recorder.screenshot(page, "reload-during-swap-setup-failed")],
+    });
+    return;
+  }
+
+  // Long enough that the POST is genuinely on the wire, short enough that it
+  // cannot have come back: a real swap runs a model call plus Places and
+  // Routes and takes seconds, never milliseconds.
+  await sleep(1_200);
+  const reloadedAt = Date.now();
+  await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
+  await probe.waitForReadAfter(reloadedAt, 60_000);
+  await app.expandDesktopItinerary(page).catch(() => undefined);
+
+  const after = probe.current();
+  const afterStops = after ? timedStops(after) : [];
+  const raw = await app.findRawError(page);
+  const samePlan = Boolean(before && after && before.id === after.id);
+  const coherent =
+    afterStops.length > 0 &&
+    afterStops.every((stop) => Boolean(stop.id) && Boolean(stop.start_time));
+  const swapLanded = Boolean(after && before && after.version > before.version);
+
+  recorder.record({
+    step: "reload_during_swap",
+    expected:
+      "reloading mid-swap recovers to a consistent state: the same plan comes back, every stop still has a venue and a time, and nothing is left half-applied. Whether the swap LANDED is not the question, since the server commits through CAS independently of the browser; only that the plan is coherent either way.",
+    actual:
+      (samePlan
+        ? "same plan " + after?.id
+        : "plan " + (before?.id ?? "?") + " became " + (after?.id ?? "none")) +
+      "; version " +
+      (before?.version ?? "?") +
+      " to " +
+      (after?.version ?? "?") +
+      " (the swap " +
+      (swapLanded ? "landed server-side" : "had not landed by the time the reload read") +
+      "); " +
+      beforeStops.length +
+      " stops to " +
+      afterStops.length +
+      " [" +
+      afterStops.map((stop) => stop.name ?? "?").join(" | ") +
+      "]" +
+      (raw.found ? "; RAW ERROR on screen: " + JSON.stringify(raw.sample) : ""),
+    pass: samePlan && coherent && !raw.found,
+    evidence: [await recorder.screenshot(page, "after-reload-during-swap")],
+  });
+}
+
+/**
+ * The starting-location dropdown's one row, with the permission refused.
+ *
+ * The documented contract on every failure path is that the field stays
+ * fully usable for typing and the row NAMES the way out. The exact note
+ * depends on how the browser refuses (denied outright, or the module's own
+ * 15 s timeout), so both are accepted; what is checked is that a note
+ * appeared, that it points at typing an address, and that the field is still
+ * editable and was NOT filled with a guessed location.
+ */
+async function doUseCurrentLocation(
+  action: Extract<PersonaAction, { kind: "useCurrentLocation" }>,
+  ctx: ActionContext
+): Promise<void> {
+  const { page, recorder } = ctx;
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page
+    .locator(app.SEL.promptInput)
+    .waitFor({ state: "visible", timeout: 30_000 })
+    .catch(() => undefined);
+
+  const outcome = await app.useCurrentLocationRow(page);
+  const shot = await recorder.screenshot(page, "use-current-location-" + action.expect);
+
+  if (!outcome.used) {
+    recorder.record({
+      step: "use_current_location_" + action.expect,
+      expected: "the starting location field offers its 'Use current location' row",
+      actual: "the dropdown did not present a row to press",
+      pass: false,
+      evidence: [shot],
+    });
+    return;
+  }
+
+  if (action.expect === "denied") {
+    const note = outcome.note ?? "";
+    const namesAWayOut = /type a starting address/i.test(note);
+    recorder.record({
+      step: "use_current_location_denied",
+      expected:
+        "with location permission refused, the row explains itself and names typing an address as the way out, the field stays editable, and nothing is guessed into it",
+      actual:
+        "note: " +
+        JSON.stringify(note || "(none)") +
+        "; field now holds " +
+        JSON.stringify(outcome.fieldValue) +
+        "; field editable: " +
+        outcome.fieldEditable,
+      pass: note.length > 0 && namesAWayOut && outcome.fieldEditable,
+      evidence: [shot],
+    });
+    // The point of the refusal is that the field still works. Prove it.
+    await recorder.check(
+      page,
+      "typing_still_works_after_refusal",
+      "after a refused location read the field accepts a typed address exactly as it always did (the manual path is untouched by this feature)",
+      async () => {
+        const field = page.locator(app.SEL.startInput);
+        await field.fill("80 Ossington Ave, Toronto");
+        await page.keyboard.press("Escape");
+        const value = await field.inputValue().catch(() => "");
+        return {
+          pass: value.includes("Ossington"),
+          actual: "field holds " + JSON.stringify(value) + " after typing",
+        };
+      }
+    );
+    return;
+  }
+
+  recorder.record({
+    step: "use_current_location_filled",
+    expected: "the row reads the device once and fills the field with a name for that point",
+    actual:
+      "field now holds " +
+      JSON.stringify(outcome.fieldValue) +
+      "; note: " +
+      JSON.stringify(outcome.note ?? "(none)"),
+    pass: outcome.fieldValue.trim().length > 0,
+    evidence: [shot],
+  });
+}
+
+/**
+ * Live tracking with the permission refused.
+ *
+ * `computeYouMarker` returns null for `status: "denied"`, so the honest
+ * outcome is NO you-marker at all, never a stale-looking or invented one,
+ * plus the app's own `LIVE_TRACKING_DENIED_NOTE` in the shared banner.
+ */
+async function doLiveTrackingDenied(ctx: ActionContext): Promise<void> {
+  const { page, recorder } = ctx;
+  const pressed = await app.enableLiveTracking(page).catch(() => false);
+  // The refusal travels through the module's status machine and the page's
+  // own effect before the banner appears.
+  await page.waitForTimeout(6_000);
+
+  const markerCount = await page.locator(app.SEL.youMarker).count().catch(() => 0);
+  const banner = await app.readBanner(page).catch(() => null);
+  const shot = await recorder.screenshot(page, "live-tracking-denied");
+
+  recorder.record({
+    step: "live_tracking_denied_shows_no_marker",
+    expected:
+      "with location permission refused, the map shows NO 'you are here' marker at all, not a stale one and not a guessed one, because computeYouMarker returns null without a real fix",
+    actual:
+      "the live control " +
+      (pressed ? "turned on" : "did not report itself on") +
+      "; " +
+      markerCount +
+      " .mk--you marker(s) rendered",
+    pass: markerCount === 0,
+    evidence: [shot],
+  });
+
+  const saysWhy = /location permission is off/i.test(banner ?? "");
+  recorder.record({
+    step: "live_tracking_denied_says_why",
+    expected:
+      "the app says why in its own words (LIVE_TRACKING_DENIED_NOTE: 'Location permission is off. Turn it on in your browser settings to see yourself on the map.') rather than failing silently or blaming the user",
+    actual: "banner: " + JSON.stringify(banner ?? "none"),
+    pass: saysWhy,
+    evidence: [shot],
+  });
+}
+
+/**
+ * The structural half of "a guest signs in mid-session".
+ *
+ * `page.tsx` mounts the account corner (the sign-in entry point, the History
+ * pill and the account menu) inside `if (!itinerary)`. So while a plan is on
+ * screen there is NO sign-in control to press, by construction and by design
+ * (the same reasoning that makes the preferences editor landing-only). The
+ * OAuth half cannot be automated at all, and is reported as not exercised
+ * rather than guessed at.
+ */
+async function doNoSignInWhilePlanning(ctx: ActionContext): Promise<void> {
+  const { page, recorder } = ctx;
+  const visible = await app.signInAffordanceVisible(page);
+  const shot = await recorder.screenshot(page, "sign-in-affordance-during-plan");
+
+  recorder.record({
+    step: "no_sign_in_control_while_a_plan_is_live",
+    expected:
+      "the sign-in entry point is landing-only: page.tsx mounts the account corner inside `if (!itinerary)`, so a plan on screen has no sign-in control to press. Signing in mid-plan is unreachable by construction, not merely hidden.",
+    actual: visible
+      ? "a .acct__signin control WAS visible over a live plan"
+      : "no sign-in control is present while the plan is showing",
+    pass: !visible,
+    evidence: [shot],
+  });
+
+  recorder.record({
+    step: "guest_upgrades_to_an_account_mid_session",
+    expected:
+      "a guest who signs in keeps the plan they were in the middle of. In code: signIn() calls linkWithPopup for an anonymous user precisely because linking KEEPS the uid, so an in-progress plan stays owned; a RETURNING account instead hits auth/credential-already-in-use and falls to signInWithCredential, which mints a different uid and deliberately leaves the guest's plan with the guest.",
+    actual:
+      "NOT EXERCISED, for two independent reasons, both structural rather than incidental. (1) The only sign-in is Google's OAuth popup, which cannot be automated, the same wall that makes `npm run test:agents:login` a manual interactive step. (2) The control is landing-only, as the check above proves, so there is no in-app path from a live plan to a sign-in at all. Verifying the uid-preserving upgrade needs a person at a real browser: sign in from the landing page as a brand-new account, then confirm the plan created as a guest still resumes.",
+    pass: false,
+    skipped: true,
+    evidence: [shot],
+  });
+}
+
+/**
+ * Open the SAME session in a second browser context.
+ *
+ * Resume is `GET /api/itinerary`, keyed on the VERIFIED caller's uid, so a
+ * second context carrying the same Firebase session must find the same plan.
+ * `indexedDB: true` is load-bearing when copying that state: Firebase Auth
+ * keeps its session there and not in cookies.
+ */
+async function doResumeInSecondContext(ctx: ActionContext): Promise<void> {
+  const { page, recorder, probe, context, browser, run } = ctx;
+  const expected = probe.current();
+  if (!expected) {
+    recorder.record({
+      step: "resume_in_second_context",
+      expected: "the same session opened elsewhere resumes the same plan",
+      actual: "no plan was observed to resume",
+      pass: false,
+      skipped: true,
+    });
+    return;
+  }
+
+  let second: BrowserContext | null = null;
+  try {
+    const state = await context.storageState({ indexedDB: true });
+    second = await browser.newContext({
+      baseURL: run.baseURL,
+      viewport: { width: 1440, height: 900 },
+      permissions: ["geolocation"],
+      geolocation: {
+        latitude: 43.6511,
+        longitude: -79.3839,
+        accuracy: REPORTED_ACCURACY_M,
+      },
+      locale: "en-CA",
+      timezoneId: "America/Toronto",
+      storageState: state,
+    });
+    const secondPage = await second.newPage();
+    const secondProbe = new ItineraryProbe();
+    secondProbe.attach(secondPage);
+    const openedAt = Date.now();
+    await secondPage.goto("/", { waitUntil: "domcontentloaded" });
+    await secondProbe.waitForReadAfter(openedAt, 45_000);
+    await app.expandDesktopItinerary(secondPage).catch(() => undefined);
+
+    const resumed = secondProbe.current();
+    const names = await app.stopCardNames(secondPage).catch(() => []);
+    const shot = await recorder.screenshot(secondPage, "second-context-resume");
+
+    recorder.record({
+      step: "resume_in_second_context",
+      expected:
+        "the same session opened in a second browser context resumes the SAME plan: GET /api/itinerary is keyed on the verified caller's uid, and a guest's anonymous Firebase session is part of the state being copied",
+      actual:
+        "expected plan " +
+        expected.id +
+        "; the second context resumed " +
+        (resumed ? resumed.id + " at version " + resumed.version : "nothing") +
+        "; stops on screen: " +
+        (names.length > 0 ? names.join(" | ") : "none"),
+      pass: Boolean(resumed && resumed.id === expected.id),
+      evidence: [shot],
+    });
+  } catch (error) {
+    recorder.record({
+      step: "resume_in_second_context",
+      expected: "the same session opened elsewhere resumes the same plan",
+      actual: "could not open a second context: " + stripAnsi(String(error)).slice(0, 240),
+      pass: false,
+      evidence: [await recorder.screenshot(page, "second-context-failed")],
+    });
+  } finally {
+    if (second) await second.close().catch(() => undefined);
+  }
 }
 
 // ── plumbing ──────────────────────────────────────────────────────────────
