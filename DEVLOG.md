@@ -1,5 +1,23 @@
 # Devlog — Itinerary
 
+## Design refinement: white landing form (2026-09-09)
+Goal: make the landing textbox lighter on the existing `background` branch.
+What should be done: use a white form surface and readable dark text while preserving the soft pattern and teal actions.
+What was done (technical): changed the unified landing form to 96% white with a solid-white no-blur fallback, navy input text, teal labels, slate placeholders, subtle blue dividers and a lighter shadow. The mode toggle now uses a pale-blue track and dark inactive text; selected mode and submit remain teal with white text. Layout and interactions are unchanged.
+Validation: reviewed desktop, mobile, narrow mobile and landscape screenshots. All four viewports passed the accessibility scan without serious/critical findings, with no horizontal overflow and unobstructed form targets.
+
+## Design refinement: quieter landing pattern (2026-09-09)
+Goal: soften the landing background after the owner found the facets too bold and distracting.
+What should be done: reduce the visible blue intensity and facet contrast while keeping the triangular texture.
+What was done (technical): increased the existing pale-blue scrim from 50–78% to 88–94% opacity, strongest behind the heading and form. The artwork, typography, controls and layout are unchanged.
+Validation: checked desktop, mobile, narrow mobile and landscape; the texture is visibly softer, all form targets remain unobstructed, there is no horizontal overflow, and all four accessibility scans passed without serious/critical findings.
+
+## Design: blue and white faceted landing background (2026-09-09)
+Goal: use the owner's triangular pattern as the landing-page background in the existing blue and white palette, on branch `background`.
+What should be done: recolor the reference, keep the faceted texture, preserve the current desktop/mobile layout, and maintain readable headings and usable form controls.
+What was done (technical): recolored the supplied image with the built-in image-generation tool and saved an optimized local 1536 × 1024 WebP at `public/landing-facets-blue.webp` (82,508 bytes). Replaced the dusk placeholder through `--landing-photo`; added a pale blue wash and paper fallback, switched the hero text to existing navy ink, and strengthened the frosted navy form and inactive mode-label contrast. Background layers remain static, decorative and non-interactive; existing safe areas, responsive placement, form behavior and the planned map are preserved. Updated the canonical landing notes in `CLAUDE.md`; the exact generation prompt and asset provenance are in `docs/design/landing-background.md`.
+Validation: production build (including TypeScript) passed. Reviewed desktop 1440×900, mobile 390×844 and 320×740, and landscape 844×390, including the starting-location dropdown and image-load fallback. All four viewport checks had no horizontal overflow, unobstructed form targets and no serious/critical axe findings. The existing combined landing, location-dropdown, planned and expanded-swap accessibility scenario passed. No new tests were added for this presentation-only change.
+
 ## Feature: "Use current location" on the starting location field (2026-09-08)
 Goal: let someone start a plan from where they actually are, through a one-row dropdown on the starting location field, without touching manual typing or anything else in the UI.
 What should be done: read the current landing markup first rather than any prior description of it; add a dropdown holding exactly one option; read the device position ONCE (never a watch); name that point; refuse a reading too imprecise to be a starting point; handle permission-denied, timeout and position-unavailable so the field stays usable in all three; and make sure a coordinate can never survive behind text the user has since edited.

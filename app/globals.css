@@ -21,34 +21,19 @@
   --accent-soft: rgba(91, 179, 204, 0.15);
   --label: #2A7890;        /* small-caps letter-spaced labels */
 
-  /* ── Landing hero background ──
-     PLACEHOLDER, awaiting real photography. `--landing-photo` is the ONE
-     swap point: drop in `url("/landing.jpg")` here and nothing else in the
-     file changes (the layer that paints it already sets background-size:
-     cover / position: center). Until then it is a warm golden-hour /dusk
-     gradient, kept in-repo so a placeholder never pulls an external image.
-     A bottom-heavy dark scrim (`--landing-scrim`) is painted OVER it so the
-     frosted search card and the white hero text stay legible whatever the
-     photo turns out to be. */
-  --landing-photo: linear-gradient(
-    177deg,
-    #24324e 0%,
-    #3a3a63 26%,
-    #6b4a74 46%,
-    #a55a76 63%,
-    #d97b53 80%,
-    #ed9a4e 100%
-  );
+  /* Faceted triangle artwork, recolored from the owner's reference. Keep
+     it local and static; the pale wash softens contrast behind navy type
+     while leaving the blue/white facets visible across the viewport. */
+  --landing-photo: url("/landing-facets-blue.webp");
   --landing-scrim: linear-gradient(
     to bottom,
-    rgba(12, 15, 23, 0) 0%,
-    rgba(12, 15, 23, 0) 40%,
-    rgba(12, 15, 23, 0.34) 62%,
-    rgba(12, 15, 23, 0.7) 84%,
-    rgba(12, 15, 23, 0.82) 100%
+    rgba(234, 243, 248, 0.88) 0%,
+    rgba(234, 243, 248, 0.93) 35%,
+    rgba(234, 243, 248, 0.94) 65%,
+    rgba(234, 243, 248, 0.88) 100%
   );
-  /* solid behind everything, so a slow photo load never flashes white */
-  --landing-base: #1a2233;
+  /* The same pale ground remains readable before/without the artwork. */
+  --landing-base: var(--paper);
 
   /* RESERVED — "this is happening now / this just changed" only. Kept from
      the original palette unchanged: it is a signal, not decoration, and it
@@ -122,9 +107,8 @@ button { font-family: var(--grot); cursor: pointer; }
 }
 
 /* ────────────────  Empty state — the landing hero  ────────────────
-   Full-bleed background photo (a placeholder gradient for now, see
-   --landing-photo) under a bottom-heavy dark scrim, with the hero text and
-   the frosted search card riding low over the darkest part of the scrim.
+   Full-bleed blue/white facets under a pale wash, with navy hero text and
+   a white frosted search card.
    The two background layers are fixed, decorative and pointer-events:none;
    the content sits above them at z-index 2. */
 .empty {
@@ -136,7 +120,7 @@ button { font-family: var(--grot); cursor: pointer; }
   min-height: 100dvh;
   display: flex; flex-direction: column; align-items: center;
   /* Mobile/default placement; uiLayout.css centres the desktop group.
-     The hero block and card ride low over the scrim. When the
+     The hero block and card ride low over the pattern. When the
      content is taller than the viewport (a recovery panel, a long error)
      the column simply grows and the page scrolls, so the top stays
      reachable — .empty is deliberately NOT a scroll container. */
@@ -154,20 +138,18 @@ button { font-family: var(--grot); cursor: pointer; }
     calc(30px + env(safe-area-inset-bottom))
     max(22px, env(safe-area-inset-left));
 }
-/* the photo. fixed + inset:0 so it always covers the visual viewport
+/* The artwork. fixed + inset:0 so it always covers the visual viewport
    exactly: it re-fills as Safari's address bar animates (no seam top or
    bottom) and never scrolls away under a tall panel. background-size:cover
-   / position:center are set here so swapping --landing-photo to a real
-   url(...) is the only change needed. */
+   / position:center keep the triangle proportions intact at any width. */
 .empty::before {
   content: ""; position: fixed; inset: 0; z-index: 0;
   background: var(--landing-photo);
   background-size: cover; background-position: center;
   pointer-events: none;
 }
-/* the scrim: transparent across the top, ramping to mostly-opaque across
-   the lower part of the screen. This is what guarantees legibility no
-   matter what the eventual photo looks like. */
+/* A light wash calms the facets behind the heading and form. It covers
+   the full viewport so tall recovery content stays readable too. */
 .empty::after {
   content: ""; position: fixed; inset: 0; z-index: 1;
   background: var(--landing-scrim);
@@ -185,8 +167,7 @@ button { font-family: var(--grot); cursor: pointer; }
   position: absolute; top: max(26px, calc(env(safe-area-inset-top) + 12px));
   left: 30px; z-index: 3;
   font-family: var(--disp); font-weight: 600; font-size: 19px;
-  letter-spacing: -0.01em; color: #FFFFFF;
-  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.4);
+  letter-spacing: -0.01em; color: var(--ink);
 }
 .empty__title {
   /* absorbs the column's free space, so the hero block sits at the foot of
@@ -195,43 +176,35 @@ button { font-family: var(--grot); cursor: pointer; }
   margin-top: auto;
   font-family: var(--disp); font-weight: 600;
   font-size: clamp(46px, 8vw, 92px); line-height: 1.0; letter-spacing: -0.025em;
-  font-optical-sizing: auto; max-width: 14ch; color: #FFFFFF;
-  text-shadow: 0 2px 24px rgba(0, 0, 0, 0.4);
+  font-optical-sizing: auto; max-width: 14ch; color: var(--ink);
 }
 .empty__sub {
   font-family: var(--disp); font-style: italic; font-weight: 400;
-  font-size: clamp(15px, 2.2vw, 20px); color: rgba(255, 255, 255, 0.94);
+  font-size: clamp(15px, 2.2vw, 20px); color: var(--ink);
   margin-top: 10px; max-width: 40ch; line-height: 1.5;
-  text-shadow: 0 1px 16px rgba(0, 0, 0, 0.42);
 }
 
-/* ── the unified search pill: three labelled sections, thin dividers, and
-   a circular accent button overlapping the trailing edge. Restyled as a
-   frosted-glass card: a translucent dark fill over a real backdrop blur,
-   a faint white hairline, riding low over the scrim. The blur is what
-   carries legibility (it smooths the photo behind into flat colour); the
-   scrim keeps that blurred backdrop dark, so the light type on the card
-   holds its contrast. ── */
+/* White frosted search pill, with navy text, subtle dividers and a teal
+   action button. Its near-opaque fill keeps the pattern behind the form. */
 .prompt {
   margin-top: 30px; width: min(880px, 94vw);
   display: flex; align-items: stretch;
-  background: rgba(15, 22, 33, 0.36);
+  background: rgba(255, 255, 255, 0.96);
   /* -webkit- first: iOS Safari has needed the prefix well past the point
      the unprefixed property was also recognised. Keep both. */
   -webkit-backdrop-filter: blur(22px) saturate(150%);
   backdrop-filter: blur(22px) saturate(150%);
-  border: 1px solid rgba(255, 255, 255, 0.34);
+  border: 1px solid var(--rule);
   border-radius: 999px;
   padding: 12px 68px 12px 6px;
   box-shadow:
-    0 18px 50px rgba(0, 0, 0, 0.34),
-    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    0 12px 36px rgba(30, 58, 76, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
   position: relative;
 }
-/* if the browser cannot blur the backdrop at all, fall back to a mostly
-   opaque dark fill so the type never sits on a sharp photo */
+/* Without backdrop blur, solid white keeps type clear of the facets. */
 @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-  .prompt { background: rgba(15, 22, 33, 0.82); }
+  .prompt { background: var(--card); }
 }
 .prompt__sec {
   flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
@@ -242,14 +215,12 @@ button { font-family: var(--grot); cursor: pointer; }
 .prompt__sec--search { flex: 1.6 1 0; padding-left: 26px; }
 .prompt__sec + .prompt__sec::before {
   content: ""; position: absolute; left: 0; top: 6px; bottom: 6px;
-  width: 1px; background: rgba(255, 255, 255, 0.16);
+  width: 1px; background: var(--rule);
 }
 .prompt__label {
   font-family: var(--grot); font-size: 10px; font-weight: 600;
   letter-spacing: 0.13em; text-transform: uppercase;
-  /* on the frosted card the teal --label token disappears; a light label
-     is the legible equivalent here */
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--label);
   margin-bottom: 3px;
   /* One line, always. These labels are two words at most, and a wrapped one
      is taller than its neighbours — which pushes its own input below theirs
@@ -263,21 +234,18 @@ button { font-family: var(--grot); cursor: pointer; }
 .prompt__input,
 .prompt__sec .where__input {
   width: 100%; min-height: 44px; border: none; background: transparent;
-  font-family: var(--grot); font-size: 15px; color: #FFFFFF; padding: 0;
+  font-family: var(--grot); font-size: 15px; color: var(--ink); padding: 0;
   flex: none; border-radius: 0; min-width: 0;
 }
 .prompt__input::placeholder,
-.prompt__sec .where__input::placeholder { color: rgba(255, 255, 255, 0.6); }
+.prompt__sec .where__input::placeholder { color: var(--ink-faint); }
 .prompt__sec .where__input:focus { border-color: transparent; }
 
 /* ── the starting location dropdown ──
    An ANCHORED popover on `.prompt__sec` (already `position: relative`),
    reusing `.acctmenu__pop`'s card language and its entry animation rather
-   than inventing a second popover system. It is the app's CARD WHITE and not
-   the pill's dark glass on purpose: everything else that appears below the
-   pill (`.clarify`, `.empty__err`, the recovery panel) is a white card over
-   the photo, so this reads as one of those rather than as a fifth section of
-   the search bar. */
+   than inventing a second popover system. Its opaque white surface matches
+   the form and the other panels that appear below it. */
 .startmenu {
   position: absolute; top: calc(100% + 8px); left: 14px; z-index: 5;
   width: max(100%, 244px); max-width: min(340px, calc(100vw - 28px));
@@ -332,18 +300,17 @@ button { font-family: var(--grot); cursor: pointer; }
 .prompt__sec--mode { flex: 0 0 auto; }
 .modetoggle {
   display: inline-flex; align-items: stretch; align-self: flex-start;
-  /* a recessed track on the frosted card rather than the pale --paper wash */
-  background: rgba(255, 255, 255, 0.12); border-radius: 999px; padding: 3px;
+  background: var(--paper); border-radius: 999px; padding: 3px;
   min-height: 44px;
 }
 .modetoggle__opt {
   border: none; background: transparent; border-radius: 999px;
   padding: 0 14px; min-height: 38px;
   font-family: var(--grot); font-size: 13px; font-weight: 500;
-  letter-spacing: 0.01em; color: rgba(255, 255, 255, 0.72); cursor: pointer;
+  letter-spacing: 0.01em; color: var(--ink-soft); cursor: pointer;
   transition: background 0.16s ease, color 0.16s ease;
 }
-.modetoggle__opt:hover:not(.modetoggle__opt--on):not([disabled]) { color: #FFFFFF; }
+.modetoggle__opt:hover:not(.modetoggle__opt--on):not([disabled]) { color: var(--accent-deep); }
 /* the selected mode keeps the warm-teal accent, unchanged */
 .modetoggle__opt--on {
   background: var(--accent); color: #FFFFFF;
@@ -355,7 +322,7 @@ button { font-family: var(--grot); cursor: pointer; }
    icon rather than a text button */
 .empty__status {
   margin-top: 16px; font-family: var(--grot); font-size: 13px;
-  color: #FFFFFF; background: rgba(10, 15, 23, 0.5);
+  color: #FFFFFF; background: var(--ink);
   padding: 7px 16px; border-radius: 999px; letter-spacing: 0.01em;
   -webkit-backdrop-filter: blur(4px);
   backdrop-filter: blur(4px);
@@ -1541,9 +1508,7 @@ button { font-family: var(--grot); cursor: pointer; }
 /* the entry point, beside Sign in / Sign out in the account corner */
 .acct__hist {
   min-height: 38px; padding: 8px 15px;
-  /* the landing hero behind this pill is now a dark photo, so the fill is
-     bumped from 0.72 to near-opaque and the label to full ink to keep it
-     legible on any part of the image */
+  /* Near-opaque white and full ink stay readable over every facet. */
   background: rgba(255, 255, 255, 0.9); color: var(--ink);
   border: 1px solid rgba(255, 255, 255, 0.85); border-radius: 999px;
   font-family: var(--grot); font-size: 13px; font-weight: 500; white-space: nowrap;
