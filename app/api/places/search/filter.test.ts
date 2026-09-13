@@ -1,6 +1,8 @@
 // Unit tests for filterPools. Run with: npx tsx app/api/places/search/filter.test.ts
 import assert from "node:assert";
 import {
+  capCategoryPool,
+  CATEGORY_POOL_CAP,
   COLD_BLOCK_THRESHOLD_C,
   DropEntry,
   filterPools,
@@ -12,6 +14,8 @@ import {
   WeatherHour,
 } from "./filter";
 import { buildSchedule, resolveStartTime } from "../../schedule/schedule";
+import { ApiError } from "../../_shared/http";
+import { parsePools } from "../../_shared/schemas";
 
 // ── fixtures ──
 // Open the same hours every day of the week (day-independent verdicts,
@@ -522,6 +526,122 @@ const cases: Array<[string, () => void]> = [
       ]);
       assert.strictEqual(dropLog[0].name, "Venue a");
       assert.strictEqual(dropLog[0].category, "cafe");
+    },
+  ],
+
+  // ── pool cap (Finding A: an oversized pool must never reach /api/select's
+  // own candidate-count validator raw) ──
+  [
+    "capCategoryPool: no-op at or under the cap — identical array, untouched order",
+    () => {
+      const places = Array.from({ length: CATEGORY_POOL_CAP }, (_, i) => mkPlace(`p${i}`));
+      const capped = capCategoryPool(places);
+      assert.strictEqual(capped, places, "must return the identical array, not a copy");
+    },
+  ],
+  [
+    "capCategoryPool: truncates an oversized pool to exactly the cap, in relevance (input) order",
+    () => {
+      const places = Array.from({ length: CATEGORY_POOL_CAP + 5 }, (_, i) => mkPlace(`p${i}`));
+      const capped = capCategoryPool(places);
+      assert.strictEqual(capped.length, CATEGORY_POOL_CAP);
+      assert.deepStrictEqual(
+        capped.map((p) => p.id),
+        places.slice(0, CATEGORY_POOL_CAP).map((p) => p.id)
+      );
+    },
+  ],
+  [
+    "capCategoryPool: relevance dominates rating — a later, higher-rated candidate is still dropped",
+    () => {
+      // The single least-relevant candidate carries the best rating in the
+      // whole pool. If rating ever outranked relevance, it would bump an
+      // earlier (more relevant) candidate out of the kept 25; it must not.
+      const places = [
+        ...Array.from({ length: CATEGORY_POOL_CAP }, (_, i) =>
+          mkPlace(`kept${i}`, { rating: 3.5 })
+        ),
+        mkPlace("late-but-best", { rating: 5.0 }),
+      ];
+      const capped = capCategoryPool(places);
+      assert.strictEqual(capped.length, CATEGORY_POOL_CAP);
+      assert.ok(!capped.some((p) => p.id === "late-but-best"));
+      assert.deepStrictEqual(
+        capped.map((p) => p.id),
+        places.slice(0, CATEGORY_POOL_CAP).map((p) => p.id)
+      );
+    },
+  ],
+  [
+    "capCategoryPool: deterministic (stable) across repeated calls on the same input",
+    () => {
+      const places = Array.from({ length: CATEGORY_POOL_CAP + 10 }, (_, i) =>
+        mkPlace(`p${i}`, { rating: 3.5 + (i % 3) * 0.5 })
+      );
+      const first = capCategoryPool(places).map((p) => p.id);
+      const second = capCategoryPool(places).map((p) => p.id);
+      assert.deepStrictEqual(first, second);
+    },
+  ],
+  [
+    "capCategoryPool: a custom limit is honoured, not hardcoded to 25",
+    () => {
+      const places = Array.from({ length: 6 }, (_, i) => mkPlace(`p${i}`));
+      const capped = capCategoryPool(places, 3);
+      assert.strictEqual(capped.length, 3);
+      assert.deepStrictEqual(capped.map((p) => p.id), ["p0", "p1", "p2"]);
+    },
+  ],
+  [
+    "filterPools: an oversized category pool is capped to CATEGORY_POOL_CAP after the objective filter",
+    () => {
+      const oversized = Array.from({ length: CATEGORY_POOL_CAP + 8 }, (_, i) => mkPlace(`c${i}`));
+      const { pools } = filterPools({ cafe: oversized }, mkParsed());
+      assert.strictEqual(pools.cafe.length, CATEGORY_POOL_CAP);
+      assert.deepStrictEqual(
+        pools.cafe.map((p) => p.id),
+        oversized.slice(0, CATEGORY_POOL_CAP).map((p) => p.id)
+      );
+    },
+  ],
+  [
+    "filterPools: capping one oversized category leaves a smaller sibling category untouched",
+    () => {
+      const oversized = Array.from({ length: CATEGORY_POOL_CAP + 8 }, (_, i) => mkPlace(`c${i}`));
+      const small = [mkPlace("s1"), mkPlace("s2")];
+      const { pools } = filterPools({ cafe: oversized, park: small }, mkParsed());
+      assert.strictEqual(pools.cafe.length, CATEGORY_POOL_CAP);
+      assert.deepStrictEqual(pools.park.map((p) => p.id), ["s1", "s2"]);
+    },
+  ],
+  [
+    "filterPools: an already-small pool is a complete no-op through the cap (regression guard)",
+    () => {
+      // filterPools always builds its own survivors array (true regardless
+      // of the cap), so this checks the cap left the CONTENT and ORDER
+      // untouched, not array identity — capCategoryPool's own no-op
+      // identity guarantee is pinned directly above.
+      const places = [mkPlace("a"), mkPlace("b"), mkPlace("c")];
+      const { pools } = filterPools({ cafe: places }, mkParsed());
+      assert.deepStrictEqual(pools.cafe.map((p) => p.id), ["a", "b", "c"]);
+    },
+  ],
+  [
+    "the fix closes the real gap: parsePools rejects a raw oversized pool but accepts filterPools' capped output",
+    () => {
+      const oversized = Array.from({ length: CATEGORY_POOL_CAP + 5 }, (_, i) => mkPlace(`c${i}`));
+      // Uncapped, this is exactly Finding A: the raw pool trips /api/select's
+      // own request validator, and its message reaches the user verbatim.
+      assert.throws(
+        () => parsePools({ cafe: oversized }),
+        (err: unknown) =>
+          err instanceof ApiError &&
+          err.publicMessage === `Each pool may contain at most ${CATEGORY_POOL_CAP} candidates.`
+      );
+      // Through filterPools first — the actual pipeline shape — the same
+      // oversized pool never reaches that validator oversized.
+      const { pools } = filterPools({ cafe: oversized }, mkParsed());
+      assert.doesNotThrow(() => parsePools({ cafe: pools.cafe }));
     },
   ],
 ];

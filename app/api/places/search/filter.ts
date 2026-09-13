@@ -5,7 +5,7 @@ import { CurrentOpeningHours, isOpenAt, TargetTime, targetTimeAt } from "./hours
 import { resolveStartTime } from "../../schedule/schedule";
 import { DEFAULT_ZONE, wallClockParts } from "../../../lib/zoneTime";
 import { isOutdoorCategory } from "../../../lib/categoryTraits";
-import { logEvent } from "../../_shared/http";
+import { logEvent, REQUEST_LIMITS } from "../../_shared/http";
 import { hardPriceLevelMaximum, parseBudget, priceLevelRank } from "../../../lib/budget";
 
 export interface Place {
@@ -134,6 +134,67 @@ function fmtTarget(t: TargetTime): string {
   return `${DAY_NAMES[t.day]} ${String(t.hour).padStart(2, "0")}:${String(
     t.minute
   ).padStart(2, "0")}`;
+}
+
+/** The exact size /api/select's own request validator enforces per category
+ *  (`REQUEST_LIMITS.candidatesPerPool`, `_shared/schemas.ts`'s `parsePools`).
+ *  Exported so a test can pin it against the validator's real number instead
+ *  of a re-typed literal. */
+export const CATEGORY_POOL_CAP = REQUEST_LIMITS.candidatesPerPool;
+
+/**
+ * Trim an already-filtered category pool down to what selectVenues (and its
+ * own request validator) can accept, WITHOUT changing what counts as a valid
+ * candidate — every survivor here already passed every hours/rating/price/
+ * business-status rule above. A broad category, a wide time window, or a
+ * loosely-scoped prompt can leave more than CATEGORY_POOL_CAP survivors;
+ * unbounded, that pool crosses `/api/select`'s own candidate-count validator
+ * (`parsePools` in `_shared/schemas.ts`), which throws its raw internal
+ * message ("Each pool may contain at most 25 candidates.") straight at the
+ * user with no translation through `planGuards.ts`'s designed refusal
+ * surface. This was Finding A from the persona-testing harness's defect
+ * investigation — the single highest-frequency real bug found by the live
+ * 51-persona run (9 of 15 deviations): a bare prompt, a broad/vague
+ * category, or a wide window all overfill a pool the same way. Nothing else
+ * in the pipeline capped pool size anywhere between search and select; this
+ * is the fix, applied at the one place (`filterPools`) every producer of a
+ * category pool — the search route, reroute, and swap — already passes
+ * through before a pool is handed onward.
+ *
+ * Ranked relevance-then-rating, per the owner's decision:
+ *  - "relevance" is the order Places search already returned these survivors
+ *    in — Google Text Search's own default RELEVANCE ranking, preserved
+ *    end to end through `searchPools`' first-occurrence dedupe and this
+ *    function's own in-order filtering above (the same concept `planner.ts`
+ *    calls "Google's relevance ranking" when it justifies keeping an
+ *    unprovable word in `searchQuery`). It is a real signal already present
+ *    in this data, not an invented score.
+ *  - "rating" is `Place.rating`, the same real provider field selectVenues'
+ *    own deterministic `fallbackAssignment` already sorts by.
+ * Every survivor's position in `places` is already unique, so relevance
+ * alone decides the cut for real data — the rating clause is the literal
+ * tiebreak the ranking calls for, and keeps the sort correct (rather than
+ * silently no-op) should two candidates ever carry the same relevance rank.
+ * `Array.prototype.sort` is spec-guaranteed stable (ES2019+, and Node's V8
+ * has honored that since long before this app's Node floor), so the same
+ * pool always caps to the same 25 candidates in the same order.
+ *
+ * A no-op below the cap — the SAME array, untouched order — this is a pure
+ * SIZE reduction, never a second quality filter.
+ */
+export function capCategoryPool(
+  places: Place[],
+  limit: number = CATEGORY_POOL_CAP
+): Place[] {
+  if (places.length <= limit) return places;
+  return places
+    .map((place, relevanceRank) => ({ place, relevanceRank }))
+    .sort(
+      (a, b) =>
+        a.relevanceRank - b.relevanceRank || (b.place.rating ?? -1) - (a.place.rating ?? -1)
+    )
+    .slice(0, limit)
+    .map(({ place }) => place);
 }
 
 export function filterPools(
@@ -267,7 +328,7 @@ export function filterPools(
       seenInCategory.add(place.id);
       survivors.push(place);
     }
-    out[category] = survivors;
+    out[category] = capCategoryPool(survivors);
   }
 
   return { pools: out, dropLog, weatherBlocked };
