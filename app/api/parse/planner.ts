@@ -98,6 +98,15 @@ export interface PlannedActivity {
   /** false when the request does not actually pin this activity down —
    *  code guarantees a matching question exists for every false */
   confident: boolean;
+  /** a neighbourhood WITHIN the city for THIS activity specifically, when
+   *  the request names a different one for it than the rest of the day
+   *  ("dinner in the Distillery District, then live music on Ossington").
+   *  "" (the ordinary case) means this activity has no location of its own
+   *  and every consumer falls back to the plan-level PlanContext.location —
+   *  same optional/fallback shape as Selection.plannedMinutes. Never a city
+   *  name. Absent entirely only on a PlanIntent built without a planner pass
+   *  (coercePlan always sets it, defaulting invalid/missing to ""). */
+  plannedLocation?: string;
 }
 
 export type TimeIntentKind = "explicit" | "relative" | "unspecified";
@@ -161,14 +170,16 @@ Respond with ONLY a single JSON object. No prose, no explanations, no markdown f
       "intent": "a sit-down dinner",
       "searchQuery": "italian restaurant",
       "estimatedMinutes": 90,
-      "confident": true
+      "confident": true,
+      "plannedLocation": ""
     },
     {
       "slot": 1,
       "intent": "something to do after",
       "searchQuery": "things to do",
       "estimatedMinutes": 90,
-      "confident": false
+      "confident": false,
+      "plannedLocation": ""
     }
   ],
   "timeIntent": {
@@ -193,6 +204,7 @@ ACTIVITIES
 - "searchQuery" is what a person would type into a map to find this kind of place: a concrete, searchable PLACE KIND ("ramen restaurant", "ice skating rink", "record store"). Never a specific business you are guessing at, never an abstract mood.
 - "intent" is the same stop in plain words, for the user to read.
 - Order the activities the way the day should actually run (food before drinks before dessert; an outdoor thing before a late indoor one).
+- "plannedLocation" is a neighbourhood WITHIN the city for THIS ACTIVITY, only when the request names a DIFFERENT one for it than the rest of the day: "dinner in the Distillery District, then live music on Ossington" gives the dinner activity "the Distillery District" and the live music activity "Ossington". Leave it "" (the ordinary case, one neighbourhood or none named) so it falls back to "context.location". Never a city name, and never invented when the request names no neighbourhood at all.
 - Every activity must SUIT THE HOURS IT WILL ACTUALLY HAPPEN IN. Work out roughly when each one lands, given the start and the ones before it, and choose accordingly: a window that begins at 3 PM contains no breakfast and no brunch; a plan that begins at 9 PM contains no museum. This is about matching the day you were asked for — it is NOT a rule about what is "open", which is checked later against real data.
 
 FILL THE AVAILABLE TIME
@@ -252,7 +264,7 @@ DURATIONS
 
 CONTEXT
 - "constraints" are HARD requirements only: dietary ("vegetarian"), accessibility ("wheelchair accessible"), and venue features attached to an activity ("patio", "live music", "outdoor seating"). A feature is never its own activity.
-- "location" is a neighbourhood WITHIN the city if the prompt names one ("the west end", "near the harbour"); otherwise "". NEVER a city name — the app supplies the city separately.
+- "location" is a neighbourhood WITHIN the city if the prompt names one ("the west end", "near the harbour"); otherwise "". NEVER a city name — the app supplies the city separately. This is the WHOLE-PLAN default; a request naming a different neighbourhood for one specific activity uses that activity's own "plannedLocation" instead (see ACTIVITIES).
 - "aesthetic" and "groupContext" are "unspecified" when not stated; "budget" is null when not stated.
 
 In every string value you write ("intent", "question", "options", the time label), never use an em dash (—) or en dash as punctuation; use a comma, or write two sentences.
@@ -642,6 +654,17 @@ function coercePlan(raw: Record<string, unknown>, now: Date): PlanIntent {
       searchQuery: (entry.searchQuery as string).trim(),
       estimatedMinutes: clampMinutes(entry.estimatedMinutes as number),
       confident: entry.confident as boolean,
+      // Code-guaranteed default, never a hard requirement (findPlanProblems
+      // does not check this): "the prompt asking for this is not proof that
+      // it happened" applies here exactly as it does to question coverage.
+      // A missing/wrong-typed value is always safe — every consumer already
+      // falls back to the plan-level context.location on "". Not sanitized,
+      // for the same reason context.location isn't: a search input, not a
+      // sentence a person reads.
+      plannedLocation:
+        typeof entry.plannedLocation === "string"
+          ? entry.plannedLocation.trim().slice(0, MAX_TEXT_CHARS)
+          : "",
     };
   });
 

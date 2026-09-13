@@ -1245,6 +1245,65 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(it.stops[1].id, "b1");
     },
   ],
+  // ── per-activity location (the compound-location fix): a swap re-searches
+  // using THIS STOP'S own plannedLocation, not the whole-plan location ──
+  [
+    "a swap on a stop with its own plannedLocation searches THAT neighbourhood, not the plan-level one",
+    async () => {
+      const it = mkItinerary(); // plan-level location: "Ossington"
+      it.stops[1].plannedLocation = "the Distillery District";
+      let searchedLocation: string | null = null;
+      const res = await swapStop(it, 1, "somewhere else", new Date(T(18, 0)), {
+        ...mkDeps({ legMin: 10 }),
+        searchPools: async (parsed, cats) => {
+          searchedLocation = parsed.location;
+          return { [cats[0]]: [mkVenue("distillery_pick")] };
+        },
+      });
+      assert.ok(res.swapped);
+      assert.strictEqual(searchedLocation, "the Distillery District");
+      // the swapped-in stop keeps the SAME plannedLocation — a venue swap
+      // holds the whole slot's intent, location included
+      assert.strictEqual(it.stops[1].plannedLocation, "the Distillery District");
+    },
+  ],
+  [
+    "a swap on a stop with NO plannedLocation falls back to the plan-level location, unaffected",
+    async () => {
+      const it = mkItinerary(); // plan-level location: "Ossington"
+      let searchedLocation: string | null = null;
+      const res = await swapStop(it, 1, "somewhere else", new Date(T(18, 0)), {
+        ...mkDeps({ legMin: 10 }),
+        searchPools: async (parsed, cats) => {
+          searchedLocation = parsed.location;
+          return { [cats[0]]: [mkVenue("ossington_pick")] };
+        },
+      });
+      assert.ok(res.swapped);
+      assert.strictEqual(searchedLocation, "Ossington");
+    },
+  ],
+  [
+    "a TIME swap that must ADAPT the venue re-searches using the stop's own plannedLocation",
+    async () => {
+      const it = mkItinerary();
+      it.stops[1].plannedLocation = "the Distillery District";
+      let searchedLocation: string | null = null;
+      const res = await swapStop(it, 1, "an hour later", new Date(T(18, 0)), {
+        ...mkDeps({
+          time: { mode: "relative", deltaMinutes: 60 },
+          legMin: 10,
+          unusableIds: ["b1"], // the CURRENT venue is unusable at the new time → adapt
+        }),
+        searchPools: async (parsed, cats) => {
+          searchedLocation = parsed.location;
+          return { [cats[0]]: [mkVenue("distillery_time_pick")] };
+        },
+      });
+      assert.ok(res.swapped, !res.swapped ? res.reason : "");
+      assert.strictEqual(searchedLocation, "the Distillery District");
+    },
+  ],
   // ── hours travel WITH the stop (the Group A follow-up gap) ──────────
   // Stored stops used to carry no opening hours, so placeOf() handed the
   // availability seam an hours-less Place, keep-on-missing said "usable",

@@ -474,6 +474,12 @@ export interface SelectionLike {
    * estimate reached this stop (swap, reroute, recovery slots, legacy
    * stored plans) and DURATION_TABLE decides — exactly as it always did. */
   plannedMinutes?: number;
+  /** the activity's own neighbourhood, from the planner's
+   *  PlannedActivity.plannedLocation via Selection — a passthrough field
+   *  like plannedMinutes/priceLevel, never read by scheduling itself.
+   *  Absent (or "") means fall back to the plan-level ParsedPrompt.location,
+   *  exactly as it always did. */
+  plannedLocation?: string;
 }
 
 export interface ScheduledStop extends SelectionLike {

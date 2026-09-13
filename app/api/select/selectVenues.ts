@@ -80,6 +80,14 @@ export interface Selection {
    * reroute, the deterministic fallback), and the scheduler falls back to
    * DURATION_TABLE exactly as it always did. */
   plannedMinutes?: number;
+  /** the activity's own neighbourhood, carried through from the planner's
+   *  PlannedActivity.plannedLocation — like plannedMinutes, rides ON the
+   *  selection so nothing downstream (swap's scoped(), the recovery panel)
+   *  has to re-derive it. Absent (or "") means fall back to the plan-level
+   *  ParsedPrompt.location, exactly as it always did. No model refinement:
+   *  unlike duration, a location isn't judged against the venue picked —
+   *  it's carried through unchanged from the activity's own field. */
+  plannedLocation?: string;
 }
 
 /** Model output was not JSON. Raw model text is deliberately not retained. */
@@ -160,6 +168,9 @@ interface SlotSpec {
   category: string;
   /** the planner's pre-venue estimate for this slot, when there is one */
   estimatedMinutes?: number;
+  /** the planner's per-activity location for this slot, when there is one —
+   *  same absent-means-fallback shape as estimatedMinutes */
+  plannedLocation?: string;
 }
 
 /** Same bounds the planner clamps to. A refined duration is an ESTIMATE,
@@ -391,7 +402,11 @@ export async function selectVenues(
    *  Callers that never saw a planner (swap, reroute) omit it and keep the
    *  DURATION_TABLE behaviour unchanged — the same way home.ts's HOME
    *  constant survives as a legacy fallback. */
-  estimatesIn?: number[]
+  estimatesIn?: number[],
+  /** the planner's per-slot locations, index-aligned with slotsIn. Same
+   *  absent-means-fallback shape as estimatesIn — callers that never saw a
+   *  planner omit it and every consumer falls back to parsed.location. */
+  locationsIn?: string[]
 ): Promise<Selection[]> {
   // Ignore meta keys (e.g. _dropLog passed through by mistake) and
   // split empty pools out — they're answered without the LLM.
@@ -423,13 +438,23 @@ export async function selectVenues(
   const liveSlots: SlotSpec[] = [];
   allSlots.forEach((category, slot) => {
     if (pools[category] && pools[category].length > 0) {
-      liveSlots.push({ slot, category, estimatedMinutes: estimatesIn?.[slot] });
+      liveSlots.push({
+        slot,
+        category,
+        estimatedMinutes: estimatesIn?.[slot],
+        plannedLocation: locationsIn?.[slot],
+      });
     } else if (emptyCategories.has(category) || !pools[category]) {
       emptySelections.push({
         category,
         slot,
         id: null,
         reason: "no venues survived filtering",
+        // Attached even for a zero-pool slot: the recovery panel's widen/
+        // replace offer needs this activity's own location to re-search
+        // correctly, and a totally empty pool is exactly the case it exists
+        // for (§7.1's isEmptyPoolPick / partialEmptySelections both read it).
+        ...(locationsIn?.[slot] ? { plannedLocation: locationsIn[slot] } : {}),
       });
     }
   });
@@ -506,10 +531,16 @@ export async function selectVenues(
   const fallback = useModel
     ? new Map<number, Place>()
     : fallbackAssignment(liveSlots, pools, constraints);
-  const selections = liveSlots.map(({ slot, category, estimatedMinutes }): Selection => {
+  const selections = liveSlots.map(({ slot, category, estimatedMinutes, plannedLocation }): Selection => {
     const places = pools[category];
     const sel = bySlot.get(slot);
     const unmet = unmetOf(sel);
+    // Carried through unchanged from the activity's own field, on every
+    // return path below — including the id:null ones, since the recovery
+    // panel's widen/replace offer needs this activity's own location
+    // regardless of WHY the slot didn't resolve. No model refinement: unlike
+    // duration, a location isn't judged against the venue that was picked.
+    const locSpread = plannedLocation ? { plannedLocation } : {};
     if (useModel && sel && sel.id === null && unmet) {
       const normalizedUnmet = normalizeConstraint(unmet);
       return {
@@ -518,6 +549,7 @@ export async function selectVenues(
         id: null,
         reason: unmetReason(category, normalizedUnmet, constraints),
         unmetConstraint: normalizedUnmet,
+        ...locSpread,
       };
     }
     if (useModel && sel && typeof sel.id === "string") {
@@ -539,6 +571,7 @@ export async function selectVenues(
         description: place.editorialSummary?.text,
         currentOpeningHours: place.currentOpeningHours,
         ...(plannedMinutes !== undefined ? { plannedMinutes } : {}),
+        ...locSpread,
       };
     }
     const fb = fallback.get(slot);
@@ -557,6 +590,7 @@ export async function selectVenues(
           id: null,
           reason: unmetReason(category, unmetConstraint, constraints, true),
           unmetConstraint,
+          ...locSpread,
         };
       }
       return {
@@ -577,6 +611,7 @@ export async function selectVenues(
                 ).length
               )
         } ${category} nearby`,
+        ...locSpread,
       };
     }
     // The MODEL's answer was rejected, so its refined minutes go with it —
@@ -594,6 +629,7 @@ export async function selectVenues(
       description: fb.editorialSummary?.text,
       currentOpeningHours: fb.currentOpeningHours,
       ...(fallbackMinutes !== undefined ? { plannedMinutes: fallbackMinutes } : {}),
+      ...locSpread,
     };
   });
 

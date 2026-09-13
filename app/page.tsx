@@ -252,6 +252,9 @@ interface EmptyRow {
   slot?: number;
   reason: string;
   noWiden?: boolean;
+  /** this activity's own neighbourhood, when the planner gave it one —
+   *  falls back to the plan-level parseData.location when absent/"" */
+  plannedLocation?: string;
 }
 
 /** Stable per-row identity: the slot when known, else the category. */
@@ -834,7 +837,7 @@ export default function Home() {
     | {
         mode: "weather-gate";
         ctx: PlanCtx;
-        blocks: { category: string; slot?: number; reason: string }[];
+        blocks: { category: string; slot?: number; reason: string; plannedLocation?: string }[];
         /** generically-empty categories waiting behind the gate — carried
          * through so they get their normal recovery rows afterwards */
         pendingEmpties: EmptyRow[];
@@ -1301,6 +1304,15 @@ export default function Home() {
           // re-derive an instant from it — one anchor, shared by search,
           // the hours filter, the weather gate and the schedule.
           targetTime: startInstant.toISOString(),
+          // each activity's own neighbourhood, index-aligned with
+          // category_signals — a compound request ("dinner in the
+          // Distillery District, then live music on Ossington") needs each
+          // category searched around ITS OWN area, not the whole plan's
+          // single parsed.location. Same shape as plannedMinutes below.
+          plannedLocations:
+            (parseData.category_signals ?? []).length > 0
+              ? plan.activities.map((a) => a.plannedLocation ?? "")
+              : undefined,
         }),
         parse: parsePlacesPayload,
       });
@@ -1343,6 +1355,13 @@ export default function Home() {
           plannedMinutes:
             (parseData.category_signals ?? []).length > 0
               ? plan.activities.map((a) => a.estimatedMinutes)
+              : undefined,
+          // carried onto each Selection (Selection.plannedLocation) so a
+          // later swap's scoped() and the recovery panel read the
+          // activity's own neighbourhood without re-deriving it
+          plannedLocations:
+            (parseData.category_signals ?? []).length > 0
+              ? plan.activities.map((a) => a.plannedLocation ?? "")
               : undefined,
         }),
         parse: parseSelectionsPayload,
@@ -1436,8 +1455,9 @@ export default function Home() {
           // a NARROWED slot isn't an empty pool — the venue exists, it's
           // just already in the plan, so say that instead (§7.1)
           reason: s.narrowed
-            ? narrowedSlotReason(s.category, parseData.location)
-            : emptyCategoryReason(s.category, drops, parseData.location),
+            ? narrowedSlotReason(s.category, s.plannedLocation || parseData.location)
+            : emptyCategoryReason(s.category, drops, s.plannedLocation || parseData.location),
+          plannedLocation: s.plannedLocation,
         }));
         if (blocked.length > 0) {
           setRecovery({
@@ -1447,6 +1467,7 @@ export default function Home() {
               category: s.category,
               slot: s.slot,
               reason: wxByCat.get(s.category)!,
+              plannedLocation: s.plannedLocation,
             })),
             pendingEmpties: genericEmpties,
             busy: false,
@@ -1776,7 +1797,7 @@ export default function Home() {
   // run for real.
   async function searchSlot(
     ctx: PlanCtx,
-    row: { category: string; slot?: number },
+    row: { category: string; slot?: number; plannedLocation?: string },
     searchCategory: string,
     opts: { dropLocation?: boolean; ignoreWeather?: boolean }
   ): Promise<{
@@ -1795,7 +1816,10 @@ export default function Home() {
       // slot identity just as categoriesOverride scopes the Places search.
       category_signals: [searchCategory],
       stop_count: 1,
-      ...(opts.dropLocation ? { location: "" } : {}),
+      // Widen drops location entirely (city-wide); otherwise this ROW's own
+      // neighbourhood wins over the whole-plan default, exactly like a
+      // swap's scoped() prefers the target's plannedLocation.
+      location: opts.dropLocation ? "" : row.plannedLocation || ctx.parseData.location,
     };
     const targetTime = arrivalForRow(
       ctx.arrivalBySlot,
@@ -1837,6 +1861,13 @@ export default function Home() {
           parsed: scopedParsed,
           pools: { [searchCategory]: availablePool },
           slots: [searchCategory],
+          // so the resolved Selection carries this row's own neighbourhood
+          // forward (mergeSlot replaces the old selection wholesale) rather
+          // than silently losing it the moment recovery resolves the slot.
+          // A widen explicitly asked to look past that neighbourhood, so it
+          // clears the override rather than carrying the narrow one forward
+          // onto a venue found city-wide.
+          plannedLocations: [opts.dropLocation ? "" : row.plannedLocation ?? ""],
         }),
         parse: parseSelectionsPayload,
       });
@@ -1924,10 +1955,11 @@ export default function Home() {
         }
       } else {
         // still nothing — honest note, keep the panel so they can try again
+        const rowLocation = opts.dropLocation ? null : row.plannedLocation || ctx.parseData.location;
         const stillReason = emptyCategoryReason(
           searchCategory,
           newDrops,
-          opts.dropLocation ? null : ctx.parseData.location
+          rowLocation
         );
         setRecovery({
           ...recovery,
@@ -1935,7 +1967,7 @@ export default function Home() {
           note: {
             kind: "status",
             text: onlyUsed
-              ? `${narrowedSlotReason(searchCategory, opts.dropLocation ? null : ctx.parseData.location)} Try a different kind of stop?`
+              ? `${narrowedSlotReason(searchCategory, rowLocation)} Try a different kind of stop?`
               : weatherReason
                 ? `${weatherReason.charAt(0).toUpperCase()}${weatherReason.slice(1)}, ${searchCategory} does not fit this slot right now. Try another?`
                 : opts.dropLocation
@@ -2046,8 +2078,9 @@ export default function Home() {
             category: b.category,
             slot: b.slot,
             reason: onlyUsed
-              ? narrowedSlotReason(b.category, ctx.parseData.location)
-              : emptyCategoryReason(b.category, drops, ctx.parseData.location),
+              ? narrowedSlotReason(b.category, b.plannedLocation || ctx.parseData.location)
+              : emptyCategoryReason(b.category, drops, b.plannedLocation || ctx.parseData.location),
+            plannedLocation: b.plannedLocation,
           });
         }
       }
@@ -2111,6 +2144,7 @@ export default function Home() {
           slot: b.slot,
           reason: `${b.reason.charAt(0).toUpperCase()}${b.reason.slice(1)}, pick something else for this stop?`,
           noWiden: true,
+          plannedLocation: b.plannedLocation,
         })),
         ...gate.pendingEmpties,
       ],
@@ -3243,7 +3277,7 @@ export default function Home() {
                 disabled={busy}
                 onClick={() => resolveEmpty(e, { searchCategory: e.category, dropLocation: true })}
               >
-                {widenOfferLabel(recovery.ctx.parseData.location)}
+                {widenOfferLabel(e.plannedLocation || recovery.ctx.parseData.location)}
               </button>
             )}
             <input

@@ -18,6 +18,7 @@ import {
   parsePools,
   parseSlots,
   parseSlotEstimates,
+  parseSlotLocations,
 } from "../_shared/schemas";
 
 // Thin wrapper over selectVenues (shared with the reroute engine).
@@ -37,6 +38,11 @@ export async function POST(request: NextRequest) {
     // the planner's per-slot duration estimates (index-aligned with slots);
     // absent for callers that never saw a planner
     const estimates = parseSlotEstimates(body.plannedMinutes, slots?.length);
+    // the planner's per-slot locations, same index-aligned/absent-means-
+    // fallback shape as estimates — carried onto the Selection so a swap's
+    // scoped() and the recovery panel can read the activity's own
+    // neighbourhood later without re-deriving it
+    const locations = parseSlotLocations(body.plannedLocations, slots?.length);
 
     // Fixture seam replaces the model completion only. Slot validation,
     // constraint enforcement, correction, and global assignment below are
@@ -48,7 +54,8 @@ export async function POST(request: NextRequest) {
         poolsIn,
         slots,
         mockSelectModelResponse,
-        estimates
+        estimates,
+        locations
       );
       return apiJson(ctx, { selections });
     }
@@ -57,7 +64,7 @@ export async function POST(request: NextRequest) {
     // correction → deterministic fallback) on ONE model; the chain advances
     // only when a model is rate limited
     const selections = await withModelFallback("select", (model) =>
-      selectVenues(apiKey, parsed, poolsIn, slots, selectModelCall(apiKey, model), estimates)
+      selectVenues(apiKey, parsed, poolsIn, slots, selectModelCall(apiKey, model), estimates, locations)
     );
     return apiJson(ctx, { selections });
   } catch (err) {

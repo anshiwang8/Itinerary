@@ -20,6 +20,7 @@ import {
   parseOptionalInstant,
   parseOptionalTimeZone,
   parseParsedPrompt,
+  parseSlotLocations,
   parseWeather,
 } from "../../_shared/schemas";
 
@@ -49,14 +50,32 @@ export async function POST(request: NextRequest) {
     const targetTime = parseOptionalInstant(body.targetTime, "targetTime");
     const categoriesOverride = parseCategories(body.categoriesOverride);
 
+    // The SAME category list searchPools will resolve to, computed once so
+    // a per-slot location can be zipped onto it by index. `plannedLocations`
+    // is index-aligned with THIS list (the exact template plannedMinutes
+    // uses against `slots` in /api/select) — never the deduped Set searchPools
+    // builds internally, so a same-category duplicate (out of scope, see
+    // searchPlaces.ts's dedup comment) still validates against the full
+    // slot count rather than silently accepting a mismatched array length.
+    const cats = (categoriesOverride ?? parsed.category_signals ?? []).filter(
+      (c): c is string => typeof c === "string" && c.trim() !== ""
+    );
+    const plannedLocations = parseSlotLocations(body.plannedLocations, cats.length);
+    // Keyed by category text, same as searchPools' own pools/dedup — a
+    // same-category duplicate contributes one entry (documented limitation).
+    const locationsOverride: Record<string, string> | undefined = plannedLocations
+      ? Object.fromEntries(
+          cats
+            .map((category, i) => [category, plannedLocations[i]] as const)
+            .filter(([, location]) => location !== "")
+        )
+      : undefined;
+
     // observability at the resolution point (like [swap-apply]): what the
     // parse handed us, what instant it resolved to, and under which TZ —
     // a schedule anchored at a nonsense hour is visible right here
     let lateNight = false;
     {
-      const cats = (categoriesOverride ?? parsed.category_signals ?? []).filter(
-        (c): c is string => typeof c === "string" && c.trim() !== ""
-      );
       const resolved =
         targetTime !== undefined
           ? new Date(targetTime)
@@ -84,7 +103,7 @@ export async function POST(request: NextRequest) {
           parsed,
           categoriesOverride,
           searchOut,
-          { lateNight }
+          { lateNight, locationsOverride }
         );
     const { pools, dropLog, weatherBlocked } = filterPools(
       rawPools,

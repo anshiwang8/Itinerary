@@ -531,6 +531,126 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(it.stops[0].id, "d1");
     },
   ],
+  // ── per-activity location (the compound-location fix): a multi-stop
+  // reroute threads EACH downstream stop's own plannedLocation into its OWN
+  // category's search — a per-category MAP, not one shared value ──
+  [
+    "a multi-stop reroute passes a per-category location MAP: each downstream stop's own neighbourhood reaches its own category, never a shared value",
+    async () => {
+      const it = mkItinerary();
+      it.stops[1].plannedLocation = "Kensington"; // bar
+      it.stops[2].plannedLocation = "the Distillery District"; // dessert
+      const legCalls: LegCall[] = [];
+      const now = new Date(T(19, 30)); // mid-dinner: bar + dessert downstream
+      let capturedLocations: Record<string, string> | undefined;
+      const res = await rerouteItinerary(it, { type: "transit_cancelled", legIndex: 0 }, now, {
+        ...mkDeps(legCalls),
+        searchPools: async (_parsed, categories, locationsOverride) => {
+          capturedLocations = locationsOverride;
+          return Object.fromEntries(categories.map((c) => [c, [mkVenue(`${c}_new`)]]));
+        },
+      });
+      assert.ok(res.rerouted);
+      assert.deepStrictEqual(capturedLocations, {
+        bar: "Kensington",
+        dessert: "the Distillery District",
+      });
+      if (!res.rerouted) return;
+      // the replanned stops carry their OWN neighbourhood forward — a
+      // passthrough unaffected by which venue fills the slot
+      assert.strictEqual(it.stops[1].plannedLocation, "Kensington");
+      assert.strictEqual(it.stops[2].plannedLocation, "the Distillery District");
+    },
+  ],
+  [
+    "a downstream stop with NO plannedLocation contributes nothing to the map — its category falls back to parsed.location inside searchPools",
+    async () => {
+      const it = mkItinerary();
+      it.stops[1].plannedLocation = "Kensington"; // bar only; dessert has none
+      const legCalls: LegCall[] = [];
+      const now = new Date(T(19, 30));
+      let capturedLocations: Record<string, string> | undefined;
+      const res = await rerouteItinerary(it, { type: "transit_cancelled", legIndex: 0 }, now, {
+        ...mkDeps(legCalls),
+        searchPools: async (_parsed, categories, locationsOverride) => {
+          capturedLocations = locationsOverride;
+          return Object.fromEntries(categories.map((c) => [c, [mkVenue(`${c}_new`)]]));
+        },
+      });
+      assert.ok(res.rerouted);
+      assert.deepStrictEqual(capturedLocations, { bar: "Kensington" });
+    },
+  ],
+  [
+    "KNOWN LIMITATION, unchanged: two downstream stops sharing ONE category still collapse onto a single search/location, even with different plannedLocations",
+    async () => {
+      // same fixture as the §7.1 two-bars test above, with each bar given a
+      // DIFFERENT plannedLocation — the documented same-category gap.
+      const stops: ScheduledStop[] = [
+        {
+          category: "dinner", id: "d1", name: "Dinner Spot",
+          start_time: T(19, 0), end_time: T(20, 45),
+          durationMinutes: { base: 90, buffer: 15, total: 105 },
+          location: { latitude: 43.647, longitude: -79.42 },
+          travelMinutesToNext: 15, travelToNext: leg(0, "transit", 15),
+        },
+        {
+          category: "bar", id: "b1", name: "First Bar",
+          start_time: T(21, 0), end_time: T(22, 10),
+          durationMinutes: { base: 60, buffer: 10, total: 70 },
+          location: { latitude: 43.649, longitude: -79.41 },
+          travelMinutesToNext: 10, travelToNext: leg(1, "walk", 10),
+          plannedLocation: "Kensington",
+        },
+        {
+          category: "bar", id: "b2", name: "Second Bar",
+          start_time: T(22, 20), end_time: T(23, 30),
+          durationMinutes: { base: 60, buffer: 10, total: 70 },
+          location: { latitude: 43.65, longitude: -79.405 },
+          plannedLocation: "the Distillery District",
+        },
+      ];
+      const it = createItinerary(stops, [leg(0, "transit", 15), leg(1, "walk", 10)], {
+        time_window: "evening", stop_count: null, aesthetic: "lively",
+        category_signals: ["dinner", "bar", "bar"], group_context: "date",
+        budget: null, constraints: [], location: "Ossington",
+      });
+      const now = new Date(T(18, 0));
+      let searchCalls = 0;
+      let capturedLocations: Record<string, string> | undefined;
+      const res = await rerouteItinerary(it, { type: "transit_cancelled", legIndex: 0 }, now, {
+        getWeather: async () => null,
+        searchPools: async (_parsed, categories, locationsOverride) => {
+          searchCalls++;
+          capturedLocations = locationsOverride;
+          return { bar: [mkVenue("bar_A", 43.6515), mkVenue("bar_B", 43.6525)] };
+        },
+        selectVenues: async (_parsed, pools, slots) => {
+          const list = (slots ?? Object.keys(pools)) as string[];
+          const taken = new Set<string>();
+          return list.map((category, slot) => {
+            const pick = (pools[category] ?? []).find((p) => !taken.has(p.id));
+            if (pick) taken.add(pick.id);
+            return pick
+              ? { category, slot, id: pick.id, reason: `Fresh ${category}.`, name: pick.displayName?.text }
+              : { category, slot, id: null, narrowed: true, reason: "only found one bar nearby" };
+          });
+        },
+        getSingleLeg: async (_o, _d, fromIndex, _dep, excludeTransit) => ({
+          fromIndex, mode: excludeTransit ? "walk" : "transit",
+          rawMinutes: 10, marginMinutes: excludeTransit ? 0 : 5,
+          totalMinutes: excludeTransit ? 10 : 15,
+          distanceMeters: 900, encodedPolyline: "enc_new",
+        }),
+      });
+      assert.ok(res.rerouted);
+      // ONE search call for the shared "bar" category — never two
+      assert.strictEqual(searchCalls, 1);
+      // the map has exactly one "bar" entry: whichever stop's location won,
+      // both stops' distinct neighbourhoods could never both survive it
+      assert.deepStrictEqual(Object.keys(capturedLocations ?? {}), ["bar"]);
+    },
+  ],
 ];
 
 (async () => {

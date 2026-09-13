@@ -217,6 +217,77 @@ const searchCases: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    "PER-ACTIVITY LOCATION: distinct categories each get their OWN neighbourhood, not the flat parsed.location — reproduces the compound-location bug's fix",
+    async () => {
+      const queries: string[] = [];
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          queries.push(JSON.parse(String(init?.body)).textQuery as string);
+          return new Response(JSON.stringify({ places: [{ id: `p${queries.length}` }] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        // "dinner in the Distillery District, then live music on Ossington":
+        // each category's location must reach ONLY that category's query.
+        await searchPools(
+          "k",
+          mkParsed({ category_signals: ["italian restaurant", "live music venue"] }),
+          undefined,
+          undefined,
+          {
+            locationsOverride: {
+              "italian restaurant": "the Distillery District",
+              "live music venue": "Ossington",
+            },
+          }
+        );
+        assert.deepStrictEqual(queries, [
+          "italian restaurant the Distillery District Toronto",
+          "live music venue Ossington Toronto",
+        ]);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
+    "PER-ACTIVITY LOCATION: an activity with no override falls back to parsed.location, unaffected by a sibling's override",
+    async () => {
+      const queries: string[] = [];
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          queries.push(JSON.parse(String(init?.body)).textQuery as string);
+          return new Response(JSON.stringify({ places: [{ id: `p${queries.length}` }] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        await searchPools(
+          "k",
+          mkParsed({ location: "Ossington", category_signals: ["lunch", "bar"] }),
+          undefined,
+          undefined,
+          { locationsOverride: { bar: "the Distillery District" } }
+        );
+        assert.deepStrictEqual(queries, [
+          "lunch Ossington Toronto",
+          "bar the Distillery District Toronto",
+        ]);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    },
+  ],
+  [
     "M17 FAILURE POLICY: a failed search is not cached into the next attempt",
     async () => {
       let calls = 0;
@@ -628,6 +699,25 @@ const cases: Array<[string, () => void]> = [
       // neighbourhood "unspecified" (new parse contract: "" / unspecified) drops out
       const bare = buildQuery(mkParsed({ city: "Montreal", location: "" }), "dinner");
       assert.strictEqual(bare, "dinner Montreal");
+    },
+  ],
+  [
+    "PER-ACTIVITY LOCATION: locationOverride wins over parsed.location, and falls back when absent/empty/unspecified",
+    () => {
+      // the compound-location fix's core case: this ONE category's own
+      // neighbourhood is used INSTEAD OF the flat parsed.location
+      const overridden = buildQuery(mkParsed({ location: "Ossington" }), "live music venue", "the Distillery District");
+      assert.strictEqual(overridden, "live music venue the Distillery District Toronto");
+      // absent override → unchanged, byte-identical to every pre-existing call
+      const absent = buildQuery(mkParsed({ location: "Ossington" }), "lunch");
+      assert.strictEqual(absent, "lunch Ossington Toronto");
+      // an empty-string override means "no override for this slot" — falls
+      // back to parsed.location, not to an empty neighbourhood
+      const empty = buildQuery(mkParsed({ location: "Ossington" }), "lunch", "");
+      assert.strictEqual(empty, "lunch Ossington Toronto");
+      // "unspecified" override is treated the same as an absent one
+      const unspecified = buildQuery(mkParsed({ location: "Ossington" }), "lunch", "unspecified");
+      assert.strictEqual(unspecified, "lunch Ossington Toronto");
     },
   ],
   [

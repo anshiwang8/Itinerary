@@ -1396,7 +1396,7 @@ async function durationChange(
   const before = snap(target);
   const anchorOutbound =
     settle.changes[0]?.inbound ?? settle.terminalInbound ?? null;
-  itinerary.stops[stopIndex] = buildStop(category, startISO, { keep: target }, anchorOutbound, newTotal, tz);
+  itinerary.stops[stopIndex] = buildStop(category, startISO, { keep: target }, anchorOutbound, newTotal, tz, target.plannedLocation);
   commitAnchorInbound(itinerary, anchorInbound);
   commitTail(itinerary, settle.changes, settle.terminalInbound);
   rebuildLegs(itinerary);
@@ -1543,15 +1543,20 @@ async function venueSwap(
     (constraint) => !isLeakedConstraint(constraint)
   );
 
+  // The stop's own neighbourhood, when the planner gave it one — wins over
+  // the whole-plan default for every search/judge this swap runs, exactly
+  // like aesthetic/budget/constraints already scope to this ONE stop.
+  // scoped() itself falls back to base.location when this is absent/"".
   const searchParsed =
     path === "refilter"
-      ? scoped(base, { aesthetic: searchAesthetic(base.aesthetic) }, poolKey)
+      ? scoped(base, { aesthetic: searchAesthetic(base.aesthetic), location: target.plannedLocation }, poolKey)
       : scoped(
           base,
           {
             aesthetic: searchAesthetic(interp.aesthetic),
             budget: interp.budget,
             constraints: interpConstraints,
+            location: target.plannedLocation,
           },
           poolKey
         );
@@ -1568,6 +1573,7 @@ async function venueSwap(
       aesthetic: interp.aesthetic,
       budget: priceDirection ? base.budget : interp.budget,
       constraints: interpConstraints,
+      location: target.plannedLocation,
     },
     poolKey
   );
@@ -1823,7 +1829,8 @@ async function timeChange(
       now,
       deps,
       tz,
-      weather
+      weather,
+      target.plannedLocation
     );
     if (!repl) {
       return { swapped: false, reason: `Nothing similar to ${target.name} is open around ${clockLabel(nd, tz)}.` };
@@ -1892,7 +1899,8 @@ async function timeChange(
     anchorPick ? { pick: anchorPick, sel: anchorSel! } : { keep: target },
     anchorOutbound,
     anchorTotal,
-    tz
+    tz,
+    target.plannedLocation
   );
   commitAnchorInbound(itinerary, anchorInboundPlan);
   commitTail(itinerary, settle.changes, settle.terminalInbound);
@@ -2155,7 +2163,8 @@ export async function resettleTail(
           now,
           deps,
           tz,
-          weather
+          weather,
+          stop.plannedLocation
         );
         if (!repl || !validLocation(repl.pick.location)) break;
         const candidateInbound = await proposalLeg(
@@ -2250,12 +2259,16 @@ export function commitTail(
       ch.venue ? { pick: ch.venue, sel: ch.sel! } : { keep: existing },
       outbound,
       ch.totalMinutes,
-      tz
+      tz,
+      existing.plannedLocation
     );
   });
 }
 
 // Re-search a category for a venue usable at `when`, excluding used ids.
+// `location` is the stop's own neighbourhood (target.plannedLocation /
+// stop.plannedLocation at the two call sites) — falls back to base.location
+// exactly as scoped() does when absent.
 async function findReplacement(
   category: string,
   when: Date,
@@ -2264,9 +2277,10 @@ async function findReplacement(
   now: Date,
   deps: SwapDeps,
   timeZone: string = DEFAULT_ZONE,
-  weather: WeatherHour[] | null = null
+  weather: WeatherHour[] | null = null,
+  location?: string
 ): Promise<{ sel: Selection; pick: Place } | null> {
-  const parsed = scoped(base, {}, category);
+  const parsed = scoped(base, { location }, category);
   const rawPools = await deps.searchPools(parsed, [category]);
   const { pools } = filterPools(rawPools, parsed, weather, now, when, timeZone);
   // A replacement always takes the category's default length (the convention
@@ -2299,7 +2313,13 @@ function buildStop(
   src: { pick: Place; sel: Selection } | { keep: ItineraryStop },
   outbound: TravelLeg | null,
   durationOverride?: number,
-  timeZone: string = DEFAULT_ZONE
+  timeZone: string = DEFAULT_ZONE,
+  /** the stop's own neighbourhood, passed through from the ORIGINAL stop
+   *  (never derived from `src` — a venue swap keeps the SAME slot-level
+   *  location intent regardless of which venue fills it, exactly like
+   *  durationMinutes.total survives a venue swap). Every call site passes
+   *  its own target/existing stop's plannedLocation. */
+  plannedLocation?: string
 ): ItineraryStop {
   const def = getDuration(category);
   const total = durationOverride ?? def.baseMinutes + def.bufferMinutes;
@@ -2326,6 +2346,7 @@ function buildStop(
     end_time: endISO,
     durationMinutes: { base: baseMinutes, buffer: bufferMinutes, total },
     ...(outbound ? { travelToNext: outbound, travelMinutesToNext: outbound.totalMinutes } : {}),
+    ...(plannedLocation ? { plannedLocation } : {}),
     status: "upcoming",
     locked: false,
   };
@@ -2333,7 +2354,7 @@ function buildStop(
 
 function scoped(
   base: ParsedPrompt,
-  over: { aesthetic?: string; budget?: string | null; constraints?: string[] },
+  over: { aesthetic?: string; budget?: string | null; constraints?: string[]; location?: string },
   category: string
 ): ParsedPrompt {
   return {
@@ -2342,6 +2363,15 @@ function scoped(
     budget: over.budget !== undefined ? over.budget : base.budget,
     constraints: over.constraints ?? base.constraints,
     category_signals: [category],
+    // A single-category re-search's OWN neighbourhood wins over the
+    // whole-plan default — mirrors how aesthetic/budget/constraints already
+    // override base for this ONE stop. `||`, not `??`: an empty string is
+    // "no override for this slot" throughout this feature (PlannedActivity/
+    // Selection/EmptyRow all use the same convention), so it must fall
+    // through to base.location exactly like a genuinely absent override —
+    // every pre-existing swap call site passes no override at all and stays
+    // byte-identical.
+    location: over.location || base.location,
   };
 }
 
@@ -2513,7 +2543,8 @@ async function finalize(
     { pick, sel },
     outbound,
     total,
-    tz
+    tz,
+    target.plannedLocation
   );
 
   commitAnchorInbound(itinerary, inbound);

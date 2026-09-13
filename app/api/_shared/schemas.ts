@@ -236,6 +236,30 @@ export function parseSlotEstimates(
   });
 }
 
+/** The planner's per-slot locations, index-aligned with `slots` — the exact
+ *  template of parseSlotEstimates above, string-valued instead of numeric.
+ *  An empty string is a valid entry (it means "no override for this slot,
+ *  fall back to the plan-level location") and is not itself a validation
+ *  failure. */
+export function parseSlotLocations(
+  value: unknown,
+  slotCount: number | undefined
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > REQUEST_LIMITS.categories) {
+    badRequest(`\`plannedLocations\` must be an array with at most ${REQUEST_LIMITS.categories} entries.`);
+  }
+  if (slotCount !== undefined && value.length !== slotCount) {
+    badRequest("`plannedLocations` must have exactly one entry per slot.");
+  }
+  return value.map((location, index) => {
+    if (typeof location !== "string" || location.length > REQUEST_LIMITS.textFieldChars) {
+      badRequest(`\`plannedLocations[${index}]\` must be a string no longer than ${REQUEST_LIMITS.textFieldChars} characters.`);
+    }
+    return location;
+  });
+}
+
 export function parseCategories(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   return stringList(value, "categoriesOverride");

@@ -1168,6 +1168,72 @@ const cases: Array<[string, () => void]> = [
       }
     },
   ],
+
+  // ── per-activity location (the compound-location fix) ──
+  [
+    "a model-supplied plannedLocation survives coercion, per activity",
+    () => {
+      const result = validatePlan(
+        goodPlan({
+          activities: [
+            activity({ slot: 0, plannedLocation: "the Distillery District" }),
+            activity({ slot: 1, plannedLocation: "Ossington" }),
+          ],
+        }),
+        NOW
+      );
+      assert.ok(result.ok);
+      if (!result.ok) return;
+      assert.strictEqual(result.plan.activities[0].plannedLocation, "the Distillery District");
+      assert.strictEqual(result.plan.activities[1].plannedLocation, "Ossington");
+    },
+  ],
+  [
+    "a MISSING plannedLocation defaults to \"\" and is NOT a findPlanProblems failure",
+    () => {
+      // the field is absent entirely from the raw activity — the exact
+      // shape a model that ignores the new prompt line would send
+      const raw = goodPlan({ activities: [activity({ slot: 0 })] });
+      assert.deepStrictEqual(findPlanProblems(raw, NOW), []);
+      const result = validatePlan(raw, NOW);
+      assert.ok(result.ok);
+      if (!result.ok) return;
+      assert.strictEqual(result.plan.activities[0].plannedLocation, "");
+    },
+  ],
+  [
+    "an INVALID (wrong-typed) plannedLocation defaults to \"\" and is NOT a findPlanProblems failure",
+    () => {
+      for (const bad of [42, null, {}, ["a"], true]) {
+        const raw = goodPlan({
+          activities: [activity({ slot: 0, plannedLocation: bad })],
+        });
+        assert.deepStrictEqual(findPlanProblems(raw, NOW), [], `${JSON.stringify(bad)} must not be a hard problem`);
+        const result = validatePlan(raw, NOW);
+        assert.ok(result.ok);
+        if (!result.ok) return;
+        assert.strictEqual(result.plan.activities[0].plannedLocation, "", JSON.stringify(bad));
+      }
+    },
+  ],
+  [
+    "a legacy/older-shaped raw plan (no plannedLocation key on ANY activity) validates exactly as before — regression guard",
+    () => {
+      // goodPlan()'s own activities never mention plannedLocation at all —
+      // byte-identical to the pre-feature shape.
+      const result = validatePlan(goodPlan(), NOW);
+      assert.ok(result.ok);
+      if (!result.ok) return;
+      assert.strictEqual(result.plan.activities[0].plannedLocation, "");
+    },
+  ],
+  [
+    "the deterministic fallback plan has no plannedLocation of its own — every consumer falls back to the plan-level location",
+    () => {
+      const plan = fallbackPlan("something to do", NOW, ZONE);
+      assert.strictEqual(plan.activities[0].plannedLocation, undefined);
+    },
+  ],
 ];
 
 async function run() {

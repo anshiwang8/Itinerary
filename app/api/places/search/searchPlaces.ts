@@ -77,7 +77,22 @@ export const MAX_PROVIDER_CALLS_WITH_GENERAL_POOL =
 // The city comes from parsed.city (user-supplied input, injected by the
 // app); itineraries stored before multi-city carry no city and keep the
 // original Toronto behavior.
-export function buildQuery(parsed: ParsedPrompt, category: string): string {
+/**
+ * `locationOverride` is this ONE category's own neighbourhood (the
+ * planner's per-activity PlannedActivity.plannedLocation, threaded through
+ * searchPools) — used INSTEAD OF the flat parsed.location when present,
+ * because a compound request ("dinner in the Distillery District, then live
+ * music on Ossington") has no single neighbourhood that is right for every
+ * category. Falls back to parsed.location exactly as before when absent or
+ * "unspecified", so every caller that never saw a planner (swap via
+ * scoped(), reroute callers with no plannedLocation, every pre-existing
+ * test) is byte-identical.
+ */
+export function buildQuery(
+  parsed: ParsedPrompt,
+  category: string,
+  locationOverride?: string
+): string {
   const aesthetic =
     parsed.aesthetic && parsed.aesthetic.toLowerCase() !== "unspecified"
       ? parsed.aesthetic
@@ -86,7 +101,11 @@ export function buildQuery(parsed: ParsedPrompt, category: string): string {
     .filter((c) => typeof c === "string" && c.trim() !== "")
     .join(" ");
   const neighbourhood =
-    parsed.location && parsed.location.toLowerCase() !== "unspecified" ? parsed.location : "";
+    locationOverride && locationOverride.toLowerCase() !== "unspecified"
+      ? locationOverride
+      : parsed.location && parsed.location.toLowerCase() !== "unspecified"
+      ? parsed.location
+      : "";
   const city = parsed.city?.trim() || "Toronto";
   return [aesthetic, constraints, category, neighbourhood, city]
     .filter(Boolean)
@@ -256,6 +275,15 @@ export async function searchPools(
      * open; the "late night" variant surfaced 8/20 with partial overlap,
      * so the union roughly doubles the genuinely-open pool. */
     lateNight?: boolean;
+    /** per-category location override, keyed the same way `pools`/
+     *  `categories` already are for this call — one entry per requested
+     *  category whose activity named its own neighbourhood. SCOPED to
+     *  DISTINCT categories: two slots sharing one category text still
+     *  collapse onto one pool (and one location) here, exactly as they
+     *  already collapse onto one pool — the narrower same-category/
+     *  different-neighbourhood case is a documented limitation, not solved
+     *  by this map (see the dedup comment on `categories` below). */
+    locationsOverride?: Record<string, string>;
   } = {}
 ): Promise<Record<string, Place[]>> {
   // Pools are keyed by category, so a category requested twice ("a drink,
@@ -264,6 +292,16 @@ export async function searchPools(
   // here also halves the API calls on such a request; the SLOT bookkeeping
   // that keeps two stops distinct lives in selectVenues, which is where
   // "one venue per requested stop" actually belongs.
+  //
+  // KNOWN LIMITATION, not solved here: this dedup is also why a SAME
+  // category with a DIFFERENT neighbourhood per slot ("a bar in Kensington,
+  // then another bar in the Distillery") still collapses onto one pool and
+  // one location — `locationsOverride` below is keyed by category text, so
+  // two same-category slots can only ever contribute one entry to it.
+  // Fixing that would mean re-keying pools by slot everywhere they're
+  // addressed (here, selectVenues, the recovery panel) rather than by
+  // category text — a much larger change, out of scope for the DISTINCT-
+  // category fix this map exists for.
   const categories = [
     ...new Set(
       (categoriesOverride ?? parsed.category_signals ?? []).filter(
@@ -322,12 +360,17 @@ export async function searchPools(
   // The named vague category expands to the same day-and-night union the
   // categoryless path uses; anything else keeps its one query (plus the
   // late-night sibling). The union is already broad, so it never doubles.
-  const queriesFor = (category: string): string[] =>
-    isGeneralCategory(category)
-      ? GENERAL_QUERIES.map((q) => buildQuery(parsed, q))
+  const queriesFor = (category: string): string[] => {
+    const locationOverride = opts.locationsOverride?.[category];
+    return isGeneralCategory(category)
+      ? GENERAL_QUERIES.map((q) => buildQuery(parsed, q, locationOverride))
       : opts.lateNight && !/\blate[\s-]+night\b/i.test(category)
-      ? [buildQuery(parsed, category), buildQuery(parsed, `late night ${category}`)]
-      : [buildQuery(parsed, category)];
+      ? [
+          buildQuery(parsed, category, locationOverride),
+          buildQuery(parsed, `late night ${category}`, locationOverride),
+        ]
+      : [buildQuery(parsed, category, locationOverride)];
+  };
 
   const settled = await Promise.allSettled(
     categories.map(async (category) => {

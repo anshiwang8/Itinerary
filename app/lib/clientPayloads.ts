@@ -323,7 +323,8 @@ function isSelection(value: unknown): value is Selection {
     (selection.slot === undefined ||
       (typeof selection.slot === "number" && Number.isInteger(selection.slot))) &&
     (selection.plannedMinutes === undefined ||
-      (finiteNumber(selection.plannedMinutes) && selection.plannedMinutes > 0))
+      (finiteNumber(selection.plannedMinutes) && selection.plannedMinutes > 0)) &&
+    (selection.plannedLocation === undefined || typeof selection.plannedLocation === "string")
   );
 }
 
@@ -675,7 +676,8 @@ export function parsePlanPayload(value: unknown): {
         a.searchQuery.trim() !== "" &&
         typeof a.estimatedMinutes === "number" &&
         Number.isFinite(a.estimatedMinutes) &&
-        typeof a.confident === "boolean"
+        typeof a.confident === "boolean" &&
+        (a.plannedLocation === undefined || typeof a.plannedLocation === "string")
       );
     })
   ) {

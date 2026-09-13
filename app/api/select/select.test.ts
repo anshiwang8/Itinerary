@@ -903,6 +903,96 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(llmCalls.length, 0);
     },
   ],
+  // ── per-activity location (compound-location fix): plannedLocation rides
+  // on the pick, the exact template plannedMinutes uses above ──
+  [
+    "a planner-supplied plannedLocation rides on the matched pick",
+    async () => {
+      llmCalls = [];
+      responder = () => valid("b");
+      const res = await POST(
+        req({ parsed, pools, slots: ["cafe"], plannedLocations: ["the Distillery District"] })
+      );
+      const data = await res.json();
+      assert.strictEqual(data.selections[0].plannedLocation, "the Distillery District");
+    },
+  ],
+  [
+    "a MISSING plannedLocations means no override on the Selection — falls back to plan-level location",
+    async () => {
+      llmCalls = [];
+      responder = () => valid("b");
+      const res = await POST(req({ parsed, pools, slots: ["cafe"] }));
+      const data = await res.json();
+      assert.strictEqual(data.selections[0].plannedLocation, undefined);
+    },
+  ],
+  [
+    "an empty-string plannedLocation entry is valid (no override), not a validation failure",
+    async () => {
+      llmCalls = [];
+      responder = () => valid("b");
+      const res = await POST(
+        req({ parsed, pools, slots: ["cafe"], plannedLocations: [""] })
+      );
+      assert.strictEqual(res.status, 200);
+      const data = await res.json();
+      assert.strictEqual(data.selections[0].plannedLocation, undefined);
+    },
+  ],
+  [
+    "plannedLocation rides on an unmet-constraint id:null pick too — recovery needs it regardless of why the slot didn't resolve",
+    async () => {
+      llmCalls = [];
+      responder = () =>
+        JSON.stringify({
+          selections: [
+            { category: "cafe", id: null, reason: "", unmet_constraint: "vegan" },
+          ],
+        });
+      const res = await POST(
+        req({
+          parsed: { ...parsed, constraints: ["vegan"] },
+          pools,
+          slots: ["cafe"],
+          plannedLocations: ["Ossington"],
+        })
+      );
+      const data = await res.json();
+      assert.strictEqual(data.selections[0].id, null);
+      assert.strictEqual(data.selections[0].plannedLocation, "Ossington");
+    },
+  ],
+  [
+    "plannedLocation rides on the deterministic fallback pick too",
+    async () => {
+      llmCalls = [];
+      responder = () =>
+        JSON.stringify({
+          selections: [
+            { slot: 0, category: "cafe", id: "ghost-id-999", reason: "no" },
+          ],
+        });
+      const res = await POST(
+        req({ parsed, pools, slots: ["cafe"], plannedLocations: ["the Distillery District"] })
+      );
+      const sel = (await res.json()).selections[0];
+      assert.strictEqual(sel.fallback, true);
+      assert.strictEqual(sel.plannedLocation, "the Distillery District");
+    },
+  ],
+  [
+    "a mismatched locations array is rejected at the boundary, before any model work",
+    async () => {
+      llmCalls = [];
+      responder = () => valid("a");
+      const res = await POST(
+        req({ parsed, pools, slots: ["cafe"], plannedLocations: ["a", "b"] })
+      );
+      assert.strictEqual(res.status, 400);
+      assert.strictEqual(llmCalls.length, 0);
+    },
+  ],
 ];
 
 // ── runner ──

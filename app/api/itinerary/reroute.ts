@@ -65,7 +65,14 @@ export type RerouteResult =
 export interface RerouteDeps {
   searchPools: (
     parsed: ParsedPrompt,
-    categories: string[]
+    categories: string[],
+    /** per-category location override, keyed the same way `categories` is —
+     *  one entry per DOWNSTREAM stop whose own plannedLocation differs from
+     *  the plan-level default. A reroute re-searches MULTIPLE stops in one
+     *  call sharing one `parsed`, unlike swap's single-stop scoped(), so a
+     *  single override value can't carry each stop's own neighbourhood —
+     *  this is the map searchPlaces.ts's searchPools accepts directly. */
+    locationsOverride?: Record<string, string>
   ) => Promise<Record<string, Place[]>>;
   selectVenues: (
     parsed: ParsedPrompt,
@@ -94,8 +101,10 @@ const UNSTABLE_REASON =
 function realDeps(planMode: PlanTravelMode = "transit"): RerouteDeps {
   if (isMockMode()) return mockRerouteDeps(planMode);
   return {
-    searchPools: (parsed, categories) =>
-      realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories),
+    searchPools: (parsed, categories, locationsOverride) =>
+      realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories, undefined, {
+        locationsOverride,
+      }),
     selectVenues: (parsed, pools, slots) =>
       withModelFallback("select", (model) =>
         realSelectVenues(
@@ -303,9 +312,24 @@ export async function rerouteItinerary(
   }
   const departISO = new Date(departMs).toISOString();
 
+  // Each downstream stop's own neighbourhood, keyed by category the same
+  // way `categories`/pools already are — SCOPED to distinct categories,
+  // exactly like searchPlaces.ts's own dedup (two affected stops sharing a
+  // category still collapse onto one location here, a documented
+  // limitation, not solved by this map).
+  const locationsOverride: Record<string, string> = {};
+  affectedIdx.forEach((index, i) => {
+    const loc = work.stops[index].plannedLocation;
+    if (loc) locationsOverride[categories[i]] = loc;
+  });
+
   // Pools and weather are fetched once for the whole proposal. Subsequent
   // stabilization passes only exclude proven-invalid candidate IDs.
-  const rawPools = await deps.searchPools(parsed, categories);
+  const rawPools = await deps.searchPools(
+    parsed,
+    categories,
+    Object.keys(locationsOverride).length > 0 ? locationsOverride : undefined
+  );
   // The CITY's forecast, not the start's: a start may sit up to 75 km
   // outside the city, and every venue this gates is in the city. Older
   // plans carry no cityCenter and keep their original home fallback.
@@ -433,7 +457,14 @@ export async function rerouteItinerary(
       inbound,
       interLegs,
       arrivals,
-      selections: chosen.map(({ selection, place, location }) => ({
+      // `chosen` is index-aligned with `affectedIdx`/`categories` (both built
+      // from `ordered`, itself index-aligned with `categories` by
+      // orderSelections). The re-selected Selection carries no
+      // plannedLocation of its own (deps.selectVenues here is never given
+      // locationsIn), so the ORIGINAL stop's own neighbourhood is
+      // re-attached here — a passthrough, unaffected by which venue fills
+      // the slot, exactly like a venue swap preserves target.plannedLocation.
+      selections: chosen.map(({ selection, place, location }, i) => ({
         ...selection,
         id: place.id,
         name: place.displayName?.text ?? selection.name,
@@ -442,6 +473,9 @@ export async function rerouteItinerary(
         description: place.editorialSummary?.text,
         currentOpeningHours: place.currentOpeningHours,
         location,
+        ...(work.stops[affectedIdx[i]].plannedLocation
+          ? { plannedLocation: work.stops[affectedIdx[i]].plannedLocation }
+          : {}),
       })),
     };
     break;
