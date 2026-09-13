@@ -394,7 +394,18 @@ export function buildGeocodeUrl(request: GeocodeRequest, apiKey: string): URL {
       "bounds",
       boundsParameter(context.bounds ?? fallbackBounds(context.location))
     );
-    url.searchParams.set("components", `country:${context.countryCode}`);
+    // NO `components=country:` filter (removed 2026-09-13, Finding D). Same
+    // reasoning as the reverse branch above, now applied here too: the
+    // filter doesn't just fail to disambiguate a genuine cross-border
+    // start, it makes the provider drop that result entirely, so the
+    // wrongCountry branch below never gets a result to report. `bounds` +
+    // `region` + the administrativeArea/country TEXT suffix above were
+    // measured sufficient on their own, live, across nine in-country
+    // addresses including two border-adjacent ones (Windsor/Detroit; a
+    // Manhattan-adjacent address that resolves correctly to Ottawa either
+    // way). A wrong-country result the provider now returns is the
+    // validation loop's job to catch honestly, not the request's job to
+    // hide.
     url.searchParams.set("region", context.countryCode.toLowerCase());
   }
   url.searchParams.set("address", address);
@@ -747,6 +758,33 @@ export function resolveGeocodeResponse(
     const routeOnly =
       candidate.resultTypes.includes("route") &&
       !hasAcceptedType(candidate.resultTypes, ADDRESS_RESULT_TYPES);
+    if (!routeOnly && !hasAcceptedType(candidate.resultTypes, ADDRESS_RESULT_TYPES)) {
+      // Not address-shaped at all (e.g. a bare locality/political match
+      // returned alongside a real address) — nothing here to judge either
+      // way, so it contributes no flag.
+      continue;
+    }
+
+    // THE COUNTRY CHECK RUNS FIRST, before completeness gets a chance to
+    // `continue` past it (Finding D, 2026-09-13). Removing the hard
+    // `components=country:` filter above means the provider can now
+    // actually return a cross-border result — but the ", <region>,
+    // <country>" text suffix this app appends to every query (still
+    // present, still doing real disambiguation work) also makes Google
+    // mark a genuine cross-border result `partial_match: true`. If
+    // "incomplete" were still checked first, that result would
+    // short-circuit into "looks like a street" and the country mismatch —
+    // the more specific, more actionable fact — would never be recorded.
+    // A result whose country actually matches falls through unaffected and
+    // is still judged for completeness immediately below.
+    if (
+      !candidate.countryCode ||
+      normalized(candidate.countryCode) !== normalized(context.countryCode)
+    ) {
+      wrongCountry = true;
+      continue;
+    }
+
     const missingStreetNumber =
       (candidate.resultTypes.includes("street_address") ||
         candidate.resultTypes.includes("subpremise")) &&
@@ -755,14 +793,7 @@ export function resolveGeocodeResponse(
       incomplete = true;
       continue;
     }
-    if (!hasAcceptedType(candidate.resultTypes, ADDRESS_RESULT_TYPES)) continue;
-    if (
-      !candidate.countryCode ||
-      normalized(candidate.countryCode) !== normalized(context.countryCode)
-    ) {
-      wrongCountry = true;
-      continue;
-    }
+
     // The start does NOT have to be in the selected city. It has to be
     // near enough to it to be a day's start there — which is a DISTANCE,
     // a fact code owns, not a locality-name equality. Name equality used

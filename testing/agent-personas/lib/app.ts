@@ -187,6 +187,70 @@ export async function useCurrentLocationRow(page: Page): Promise<StartLocationOu
   };
 }
 
+/**
+ * The app's own fail-loud vocabulary, as fragments (lowercase, matched by
+ * substring). Every entry is copied verbatim from the source that actually
+ * produces it — `app/lib/planGuards.ts`, `app/api/geocode/geocode.ts`, and
+ * the two generic client-side fallback strings in `app/lib/clientFetch.ts`
+ * and `app/page.tsx`'s `clientErrorMessage` — never guessed or paraphrased.
+ *
+ * WHY THIS EXISTS (added 2026-09-13, the refusalIsAcceptable masking fix).
+ * `refusalIsAcceptable: true` on a persona's plan expectation means "either
+ * a real plan or an honest refusal is fine here" — but on its own it treats
+ * ANY refusal as a pass, including one that never went through this app's
+ * own guards at all (an unhandled exception, a leaking provider message, a
+ * stack trace). Most personas that accept a refusal don't also pin the
+ * SPECIFIC wording with `refusalMustMention` (that assertion is for the
+ * smaller set of personas testing one particular documented guard), which
+ * is exactly the gap that let a raw/leaking message hide behind "a refusal
+ * happened, and that's acceptable here." `isKnownAppRefusal` is the
+ * general-purpose net under `refusalMustMention`'s specific one — it does
+ * not replace it, and both can run in `doPlan`'s expectation checks.
+ */
+export const KNOWN_REFUSAL_PATTERNS: string[] = [
+  // planGuards.ts — pre-model / fail-loud guards
+  "couldn't make sense of that",
+  "contradictory",
+  "pull opposite ways",
+  "everything nearby is closed at that hour",
+  "everything nearby got filtered out",
+  "couldn't find any",
+  "couldn't plan this one",
+  "try an indoor plan",
+  "couldn't confirm anywhere nearby is genuinely",
+  "that's really",
+  "want to look further out",
+  "closed by the time you'd get there",
+  "you asked for more than one",
+  "couldn't fit anything into",
+  "once travel time is counted",
+  "once travel is counted",
+  // geocode.ts — the starting-address/city guards
+  "couldn't find that location",
+  "include a region or country",
+  "very far from",
+  "outside the selected city's country",
+  "in a different region than",
+  "complete starting address",
+  "add a street number or landmark",
+  // generic, still app-authored transport fallbacks (clientFetch.ts /
+  // page.tsx) — legitimate copy for a real network/provider hiccup, not a
+  // leaking error, so they belong in the KNOWN set rather than being
+  // treated the same as an unrecognized raw string
+  "took too long",
+  "could not be reached",
+  "returned an unreadable response",
+  "could not complete that request",
+  "returned an unexpected response",
+  "something went wrong",
+];
+
+/** Case-insensitive substring match against the known-app-refusal list. */
+export function isKnownAppRefusal(text: string): boolean {
+  const lower = text.toLowerCase();
+  return KNOWN_REFUSAL_PATTERNS.some((fragment) => lower.includes(fragment));
+}
+
 export interface PlanRequest {
   prompt: string;
   city?: string;
@@ -329,11 +393,23 @@ export async function skipClarifyIfShown(page: Page, timeoutMs: number): Promise
  *                   own list (the app already refuses to do that); this is a
  *                   deliberate pick from the candidates the app validated and
  *                   offered, and the choice is recorded in the report.
- *   empty        -> "Plan without it", which keeps every stop that DID
- *                   resolve. Offered only when something else resolved, so
- *                   when it is absent the widen offer is taken instead.
- *   weather-gate -> "Still want it", which re-searches that one category with
- *                   only the weather gate skipped.
+ *   empty        -> WIDEN first (re-search the category city-wide) — the
+ *                   non-destructive option. "Plan without it" (which drops
+ *                   the stop outright) is the LAST resort, tried only when
+ *                   nothing non-destructive is offered or the non-destructive
+ *                   attempt doesn't resolve the panel.
+ *   weather-gate -> "Still want it" (re-searches that one category with only
+ *                   the weather gate skipped) — also non-destructive, and
+ *                   tried before any destructive fallback.
+ *
+ * ORDER FIX (2026-09-13): destructive and non-destructive controls can be
+ * offered TOGETHER on the same row — `.recover__widen` and `.recover__skip`
+ * both render for an empty category that has somewhere else to widen into
+ * AND at least one other stop already resolved (`app/page.tsx`'s recovery
+ * panel). Trying `.recover__skip` first, as this used to, meant the harness
+ * itself chose to drop a stop the app would have happily widened for it —
+ * manufacturing a false "dropped activity" deviation rather than observing
+ * a real one. Widen/override now come before skip; skip is checked last.
  *
  * Returns a description of what was answered, or null if no panel appeared.
  */
@@ -360,11 +436,15 @@ export async function resolveRecoveryIfShown(
     .replace(/\s+/g, " ")
     .slice(0, 200);
 
+  // Non-destructive options FIRST, in every case. `recoverySkip` ("Plan
+  // without it") is the one destructive control here — it drops a stop —
+  // and is tried last, only as the fallback when nothing above it is
+  // offered or none of it resolves the panel. See the order-fix note above.
   const attempts: Array<{ locator: string; label: string }> = [
     { locator: SEL.recoveryGeocode, label: "chose the first offered address candidate" },
-    { locator: SEL.recoverySkip, label: 'chose "Plan without it"' },
-    { locator: SEL.recoveryOverride, label: 'chose "Still want it"' },
     { locator: SEL.recoveryWiden, label: "widened the search for the empty category" },
+    { locator: SEL.recoveryOverride, label: 'chose "Still want it"' },
+    { locator: SEL.recoverySkip, label: 'chose "Plan without it"' },
   ];
   for (const attempt of attempts) {
     const button = page.locator(attempt.locator).first();

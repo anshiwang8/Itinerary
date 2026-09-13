@@ -380,8 +380,17 @@ const cases: Array<[string, () => void | Promise<void>]> = [
     },
   ],
   [
-    "an address in the wrong country is rejected against the selected city",
+    "an address in the wrong country is rejected even when Google also flags it a partial match",
     () => {
+      // A REAL provider response shape (Finding D, live probe row B), not
+      // the dead one this replaced. With the hard `components=country:CA`
+      // filter gone, the request's ", Ontario, Canada" text suffix alone is
+      // what disambiguates in-country addresses — but that same suffix
+      // independently makes Google mark a genuine cross-border result
+      // `partial_match: true`, even with a complete street number. Before
+      // the country check ran first, this exact shape short-circuited into
+      // `geocode_incomplete_address` ("looks like a street") and the
+      // cross-border fact was never recorded at all.
       assert.throws(
         () =>
           resolveGeocodeResponse(
@@ -395,6 +404,7 @@ const cases: Array<[string, () => void | Promise<void>]> = [
                 countryCode: "US",
                 lat: 42.8864,
                 lng: -78.8784,
+                partial: true,
               }),
             ]),
             addressRequest
@@ -404,6 +414,83 @@ const cases: Array<[string, () => void | Promise<void>]> = [
           error.status === 422 &&
           error.code === "geocode_wrong_country"
       );
+    },
+  ],
+  [
+    "an in-country address flagged only as a partial match still reaches incomplete, never wrong-country",
+    () => {
+      // The regression guard for the reorder above: a partial match whose
+      // country genuinely agrees must still fall through to
+      // geocode_incomplete_address, not get swept into wrongCountry by a
+      // check that now runs first.
+      assert.throws(
+        () =>
+          resolveGeocodeResponse(
+            response([
+              result({
+                formatted: "100 Queen Street West, Toronto, ON, Canada",
+                types: ["street_address"],
+                partial: true,
+              }),
+            ]),
+            addressRequest
+          ),
+        (error: unknown) =>
+          error instanceof ApiError &&
+          error.status === 422 &&
+          error.code === "geocode_incomplete_address"
+      );
+    },
+  ],
+  [
+    "a Windsor address near the US border still resolves in-country with no hard components filter",
+    () => {
+      // One of the investigation's border-adjacent probe cities. Distance
+      // from Toronto is irrelevant here — Windsor is its OWN selected city,
+      // and the point is that removing components=country:CA must not make
+      // an ordinary in-country, near-the-border address start failing the
+      // country/region checks it always passed.
+      const windsor: CityContext = {
+        locality: "Windsor",
+        administrativeArea: "Ontario",
+        country: "Canada",
+        countryCode: "CA",
+        location: { latitude: 42.3149, longitude: -83.0364 },
+        bounds: {
+          southwest: { latitude: 42.24, longitude: -83.13 },
+          northeast: { latitude: 42.39, longitude: -82.9 },
+        },
+      };
+      const outcome = resolveGeocodeResponse(
+        response([
+          result({
+            formatted: "400 Ouellette Ave, Windsor, ON, Canada",
+            types: ["street_address"],
+            locality: "Windsor",
+            lat: 42.3149,
+            lng: -83.0364,
+          }),
+        ]),
+        { query: "400 Ouellette Ave", kind: "address", cityContext: windsor }
+      );
+      assert.strictEqual(outcome.outcome, "resolved");
+      if (outcome.outcome !== "resolved") return;
+      assert.strictEqual(outcome.countryCode, "CA");
+      assert.strictEqual(outcome.locality, "Windsor");
+    },
+  ],
+  [
+    "a standard Toronto address still resolves correctly with no hard components filter",
+    () => {
+      // Regression check named in the investigation: an ordinary in-country
+      // address must be unaffected by dropping the components filter.
+      const outcome = resolveGeocodeResponse(
+        response([result({ formatted: "100 Queen Street West, Toronto, ON, Canada", types: ["street_address"] })]),
+        addressRequest
+      );
+      assert.strictEqual(outcome.outcome, "resolved");
+      if (outcome.outcome !== "resolved") return;
+      assert.strictEqual(outcome.countryCode, "CA");
     },
   ],
   [
@@ -448,7 +535,7 @@ const cases: Array<[string, () => void | Promise<void>]> = [
     },
   ],
   [
-    "address URL carries city viewport bias and a country restriction",
+    "address URL carries city viewport bias and a region hint, but no hard country filter",
     () => {
       const url = buildGeocodeUrl(addressRequest, "geocoding-only-key");
       assert.strictEqual(url.origin, "https://maps.googleapis.com");
@@ -456,7 +543,8 @@ const cases: Array<[string, () => void | Promise<void>]> = [
       // The city's LOCALITY is deliberately absent: appending it turns a
       // suburb address into an in-city query (or a partial_match), so the
       // validator never sees the address it is meant to judge. Region +
-      // country still disambiguate, and the viewport still biases ranking.
+      // country TEXT still disambiguate, and the viewport still biases
+      // ranking.
       assert.strictEqual(
         url.searchParams.get("address"),
         "100 Queen Street West, Ontario, Canada"
@@ -465,7 +553,10 @@ const cases: Array<[string, () => void | Promise<void>]> = [
         url.searchParams.get("bounds"),
         "43.581,-79.639|43.855,-79.116"
       );
-      assert.strictEqual(url.searchParams.get("components"), "country:CA");
+      // Finding D: the hard `components=country:` filter is gone — it
+      // suppressed genuine cross-border results instead of letting the
+      // validation loop's wrongCountry branch report them honestly.
+      assert.strictEqual(url.searchParams.get("components"), null);
       assert.strictEqual(url.searchParams.get("region"), "ca");
       assert.strictEqual(url.searchParams.get("key"), "geocoding-only-key");
     },

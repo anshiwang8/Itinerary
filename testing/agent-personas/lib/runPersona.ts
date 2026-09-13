@@ -466,6 +466,29 @@ async function doPlan(
     });
   }
 
+  // MASKING FIX (2026-09-13): `refusalIsAcceptable` on its own treats ANY
+  // refusal as a pass, so a raw/leaking message hid behind "a refusal
+  // happened, and that's fine here" in every persona that didn't ALSO pin
+  // `refusalMustMention`. When a specific fragment list is given, that check
+  // above already verified the wording; this is the general net for the
+  // (much larger) set of personas that only assert "graceful" without
+  // naming the exact guard, closing the gap without touching those
+  // stricter, already-correct assertions.
+  if (!outcome.ok && refusalAllowed && !expectation?.refusalMustMention) {
+    const known = app.isKnownAppRefusal(outcome.failure ?? "");
+    recorder.record({
+      step: "refusal_is_a_known_app_message",
+      expected:
+        "a refusal accepted here is still one of the app's own documented messages (planGuards.ts, geocode.ts, or a generic client-fetch fallback), not a raw or unrecognized error string",
+      actual: known
+        ? "matches a known app refusal pattern: " + JSON.stringify(outcome.failure ?? "")
+        : "matches NO known app refusal pattern, possibly a leaking/raw message: " +
+          JSON.stringify(outcome.failure ?? ""),
+      pass: known,
+      evidence: [shot],
+    });
+  }
+
   if (!outcome.ok) {
     if (expectation?.mustNotRefuseCiting) {
       const refusal = (outcome.failure ?? "").toLowerCase();
