@@ -1,5 +1,9 @@
 # Devlog — Itinerary
 
+## Fix: automation-fingerprint suppression for the interactive persona login helper (2026-09-14)
+
+Test tooling only, not application code. `channel: "chrome"` alone still let Google's sign-in block `testing/agent-personas/auth/save-storage-state.ts`'s one-time interactive login ("This browser or app may not be secure"), because Google's automation detection also keys off CDP-set fingerprints (`navigator.webdriver`, empty `navigator.plugins`/`mimeTypes`, missing `window.chrome`, a mismatched `permissions.query("notifications")` result) that persist under any Playwright-driven browser regardless of binary. Added one `context.addInitScript` in that file only, overriding exactly those four well-documented signals before any page script runs. Not yet live-verified — needs a human to run `npm run test:agents:login` and report back; if Google still blocks it, the documented fallback (manual profile export instead of a Playwright-driven login) is next. `run-personas.ts`/`personas.ts` and the main runner are untouched.
+
 ## Fix: a category-shape guard, so a bare abstract searchQuery can't reach a real Places search (2026-09-14)
 
 Goal: fix a live-confirmed bug where the fallback-chain model `gpt-oss-120b` reliably emits a bare, non-place-kind `searchQuery` ("activity"), and a traced mechanism where a user's stray one-word clarifying answer ("further") can get folded into an equally bare `searchQuery`. `findPlanProblems`'s only existing check on `searchQuery` was `isText` — non-empty, ≤240 chars — with no check that it resembles an actual place kind. Sent to Google Places Text Search with no type restriction, this reached a real result: "further" text-matched "Further Capital Partners Ltd." (a marketing consultancy) as a 5.0-rated "date" venue. Explicitly out of scope: the larger, structural fix (a Places `includedType` allowlist) for a well-formed category colliding with an unrelated business's name — a separate future task.
