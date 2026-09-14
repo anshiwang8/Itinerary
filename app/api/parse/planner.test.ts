@@ -16,6 +16,7 @@ import {
   describeNow,
   fallbackPlan,
   findPlanProblems,
+  isPlaceholderCategoryTerm,
   kindQuestion,
   planStartInstant,
   planToParsed,
@@ -176,6 +177,170 @@ const cases: Array<[string, () => void]> = [
         /searchQuery/,
         "oversized searchQuery"
       );
+    },
+  ],
+
+  // ── category-shape guard: a bare abstract word is not a real place kind ──
+  [
+    "a bare denylisted searchQuery ('activity', 'further', etc.) is a real problem, not a valid place kind",
+    () => {
+      const bareTerms = [
+        "activity",
+        "thing",
+        "something",
+        "further",
+        "another",
+        "different",
+        "elsewhere",
+        "anywhere",
+        "somewhere",
+        "place",
+        "spot",
+        "venue",
+        "option",
+      ];
+      for (const term of bareTerms) {
+        expectProblem(
+          goodPlan({ activities: [activity({ searchQuery: term })] }),
+          /vague placeholder/,
+          `bare searchQuery "${term}"`
+        );
+      }
+    },
+  ],
+  [
+    "the placeholder check is case- and whitespace-insensitive",
+    () => {
+      expectProblem(
+        goodPlan({ activities: [activity({ searchQuery: "Activity" })] }),
+        /vague placeholder/,
+        "capitalized"
+      );
+      expectProblem(
+        goodPlan({ activities: [activity({ searchQuery: "  further  " })] }),
+        /vague placeholder/,
+        "padded with whitespace"
+      );
+      expectProblem(
+        goodPlan({ activities: [activity({ searchQuery: "FURTHER" })] }),
+        /vague placeholder/,
+        "all caps"
+      );
+    },
+  ],
+  [
+    "a genuine, well-formed place-kind searchQuery is NEVER flagged (regression guard)",
+    () => {
+      const realCategories = [
+        "cocktail bar",
+        "romantic restaurant",
+        "art gallery",
+        "spa",
+        "museum",
+        "ramen restaurant",
+        "ice skating rink",
+        "record store",
+        // multi-word phrases that CONTAIN a denylisted word must survive —
+        // the check only fires on a searchQuery that IS one bare word
+        "another bar",
+        "a different kind of gallery",
+      ];
+      for (const category of realCategories) {
+        const problems = findPlanProblems(
+          goodPlan({ activities: [activity({ searchQuery: category })] }),
+          NOW
+        );
+        assert.deepStrictEqual(problems, [], `"${category}" was wrongly flagged: ${problems.join(" | ")}`);
+      }
+    },
+  ],
+  [
+    "isPlaceholderCategoryTerm is exported and matches findPlanProblems exactly",
+    () => {
+      assert.strictEqual(isPlaceholderCategoryTerm("activity"), true);
+      assert.strictEqual(isPlaceholderCategoryTerm("Further"), true);
+      assert.strictEqual(isPlaceholderCategoryTerm("cocktail bar"), false);
+      assert.strictEqual(isPlaceholderCategoryTerm("spa"), false);
+      assert.strictEqual(isPlaceholderCategoryTerm(""), false);
+    },
+  ],
+  [
+    "the LIVE-CONFIRMED bug shape: a bare 'activity' searchQuery is caught before it ever reaches a Places search",
+    async () => {
+      // simulates gpt-oss-120b's plain first-pass output: a bare, abstract
+      // searchQuery with no unusual input at all
+      let calls = 0;
+      const outcome = await planWithModel(
+        [],
+        NOW,
+        "plan me a date",
+        ZONE,
+        async () => {
+          calls++;
+          if (calls === 1) {
+            return JSON.stringify(
+              goodPlan({ activities: [activity({ searchQuery: "activity", confident: true })] })
+            );
+          }
+          // the correction retry recovers with a real place kind
+          return JSON.stringify(
+            goodPlan({ activities: [activity({ searchQuery: "wine bar", confident: true })] })
+          );
+        }
+      );
+      assert.strictEqual(calls, 2, "the bad first answer must trigger the correction retry");
+      assert.strictEqual(outcome.source, "retry");
+      assert.ok(
+        outcome.problems.some((p) => /vague placeholder/.test(p)),
+        `expected the correction to name the placeholder problem, got: ${outcome.problems.join(" | ")}`
+      );
+      // the venue that reached selection is a real, checkable place kind —
+      // never "activity", never a bare stray word like "further"
+      assert.strictEqual(outcome.plan.activities[0].searchQuery, "wine bar");
+    },
+  ],
+  [
+    "a stray one-word clarifying answer folded into searchQuery on the SECOND pass is caught identically",
+    async () => {
+      // mirrors the traced second-pass mechanism: a user's bare answer
+      // ('further') lands unchanged in an activity's searchQuery. Whether
+      // this is the first or second model call, findPlanProblems is the same
+      // function — planWithModel does not branch on pass number.
+      const messages = buildPlannerMessages("something more", NOW, ZONE, {
+        answers: [{ question: "What kind of thing?", answer: "further" }],
+      });
+      let calls = 0;
+      const outcome = await planWithModel(messages, NOW, "something more", ZONE, async () => {
+        calls++;
+        if (calls === 1) {
+          return JSON.stringify(
+            goodPlan({ activities: [activity({ searchQuery: "further", confident: true })] })
+          );
+        }
+        return JSON.stringify(goodPlan());
+      });
+      assert.strictEqual(calls, 2, "the second-pass output must be validated exactly like the first");
+      assert.strictEqual(outcome.source, "retry");
+    },
+  ],
+  [
+    "a retry that STILL produces a denylisted searchQuery falls to the SAME terminal fallback every other unresolved violation uses",
+    async () => {
+      let calls = 0;
+      const outcome = await planWithModel([], NOW, "surprise me", ZONE, async () => {
+        calls++;
+        // both attempts are bare placeholders — never a real place kind
+        return JSON.stringify(
+          goodPlan({ activities: [activity({ searchQuery: calls === 1 ? "activity" : "thing" })] })
+        );
+      });
+      assert.strictEqual(calls, 2, "exactly one retry, then the deterministic fallback — no third attempt");
+      assert.strictEqual(outcome.source, "fallback");
+      // the same fallback every other unresolved violation already falls to:
+      // one general, checkable activity, never a bare abstract word
+      assert.strictEqual(outcome.plan.activities.length, 1);
+      assert.strictEqual(outcome.plan.activities[0].searchQuery, "things to do");
+      assert.strictEqual(isPlaceholderCategoryTerm(outcome.plan.activities[0].searchQuery), false);
     },
   ],
   [

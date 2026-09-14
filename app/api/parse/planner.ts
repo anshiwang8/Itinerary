@@ -347,6 +347,61 @@ function isText(value: unknown, maxChars = MAX_TEXT_CHARS): value is string {
   return typeof value === "string" && value.trim() !== "" && value.length <= maxChars;
 }
 
+/**
+ * `searchQuery` is search INPUT, not prose — it becomes ParsedPrompt's
+ * `category_signals` and is spliced straight into a Google Places Text
+ * Search with no type restriction (see searchPlaces.ts's `buildQuery`).
+ * `isText` above only checks it is a non-empty, bounded STRING; it has never
+ * checked that the string reads as an actual place kind.
+ *
+ * Live-confirmed failure: the fallback-chain model `gpt-oss-120b` reliably
+ * emits a bare, abstract searchQuery like "activity" with no unusual input,
+ * and a second-pass mechanism exists where a user's stray one-word
+ * clarifying answer ("further") gets folded into an equally bare
+ * searchQuery. Sent to Places with no type filter, "further" text-matched
+ * "Further Capital Partners Ltd." (a marketing consultancy) as a 5.0-rated
+ * "date" venue.
+ *
+ * This is a HEURISTIC, not a grammar/semantic classifier — you cannot
+ * enumerate every bad phrasing, only catch the clearly-bad SHAPE: a single
+ * word from a small, explicit denylist of abstract/meta/directional terms
+ * that describe "some place" rather than any actual KIND of place. It
+ * cannot catch a well-formed category that happens to collide with an
+ * unrelated business's name (e.g. "gallery" matching a company literally
+ * named "The Gallery Consulting Group") — that needs a Places includedType
+ * allowlist, a separate, larger, not-yet-built fix (see CLAUDE.md). Kept
+ * deliberately small and defensible: a speculative list broad enough to
+ * guess at every bad phrasing would itself start rejecting legitimate
+ * single-word categories ("spa", "museum", "arcade").
+ */
+const PLACEHOLDER_CATEGORY_TERMS = new Set([
+  // the investigation's own live-confirmed examples
+  "activity",
+  "thing",
+  "something",
+  "further",
+  "another",
+  "different",
+  "elsewhere",
+  "place",
+  "spot",
+  "venue",
+  "option",
+  // obvious siblings of the above, same abstract/directional shape
+  "anywhere",
+  "somewhere",
+]);
+
+/** True when `value` is nothing but a single bare word from that denylist
+ *  (case/whitespace-insensitive) — never for a multi-word phrase, so
+ *  "cocktail bar", "art gallery" and any other real place kind are
+ *  completely unaffected regardless of length. */
+export function isPlaceholderCategoryTerm(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "" || /\s/.test(normalized)) return false;
+  return PLACEHOLDER_CATEGORY_TERMS.has(normalized);
+}
+
 /** Strict-ish ISO instant → Date, or null. Requires a date AND a time, so a
  *  bare "2026-07-27" (which Date would silently read as UTC midnight) is
  *  rejected rather than becoming a wrong-by-hours anchor. */
@@ -423,7 +478,12 @@ export function countCoverageGaps(raw: unknown): number {
  * states (a vague activity carries a question; a question points at a real
  * slot). Bounds that code can simply CLAMP (estimatedMinutes) are not
  * problems — burning the one retry on something arithmetic fixes would be
- * a waste; only a non-numeric estimate is a real problem.
+ * a waste; only a non-numeric estimate is a real problem. It also runs the
+ * `searchQuery` SHAPE check (`isPlaceholderCategoryTerm`) — a bare
+ * "activity"/"further" is a real problem, not something arithmetic can fix.
+ * This function is called identically for the first pass and the answered
+ * second pass (both go through the same `planWithModel` → this ladder), so
+ * every check here, including the new one, guards both.
  */
 export function findPlanProblems(raw: unknown, now: Date): string[] {
   const problems: string[] = [];
@@ -452,6 +512,10 @@ export function findPlanProblems(raw: unknown, now: Date): string[] {
       }
       if (!isText(entry.searchQuery)) {
         problems.push(`activity ${index}: \`searchQuery\` must be a non-empty string`);
+      } else if (isPlaceholderCategoryTerm(entry.searchQuery)) {
+        problems.push(
+          `activity ${index}: \`searchQuery\` "${entry.searchQuery.trim()}" is a vague placeholder, not a real place kind — use a concrete searchable category, e.g. "cocktail bar" or "art gallery"`
+        );
       }
       if (!isText(entry.intent)) {
         problems.push(`activity ${index}: \`intent\` must be a non-empty string`);

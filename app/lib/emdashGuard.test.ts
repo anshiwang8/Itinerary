@@ -67,6 +67,11 @@ const LINE_ALLOWLIST: Array<{ file: string; contains: string; why: string }> = [
     why: "findPlanProblems correction-ladder message, fed back to the MODEL on retry, never shown to a user",
   },
   {
+    file: "api/parse/planner.ts",
+    contains: "is a vague placeholder, not a real place kind",
+    why: "findPlanProblems correction-ladder message, fed back to the MODEL on retry, never shown to a user",
+  },
+  {
     file: "api/select/selectVenues.ts",
     contains: "is already used by an earlier slot",
     why: "findProblems correction-ladder message, fed back to the MODEL on retry, never shown to a user",
