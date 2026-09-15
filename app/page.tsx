@@ -884,6 +884,18 @@ export default function Home() {
   async function runPipeline() {
     const q = prompt.trim();
     if (!q) return;
+    // Replan pressed while an answerable clarify round is open, on the SAME
+    // prompt that round was asked about: route through the exact path "Go"
+    // already uses instead of silently discarding whatever was filled in
+    // and re-asking the same questions with no explanation. `clarify.prompt`
+    // is the trimmed prompt planFrom stored when the round opened, so this
+    // comparison is exact — nothing changed it in between (prompt only ever
+    // moves through its own onChange). An EDITED prompt falls through to the
+    // normal start-fresh path below, which still clears the stale round.
+    if (clarify && q === clarify.prompt) {
+      await submitClarify(false);
+      return;
+    }
     const operation = beginOperation();
     if (!operation) return;
     setError(null);
@@ -3169,6 +3181,13 @@ export default function Home() {
                 value={isPlaceholderChip(answer) ? "" : answer}
                 disabled={busy}
                 onChange={(e) => setAnswer(e.target.value)}
+                onKeyDown={(e) => {
+                  // Not inside a <form> (see the recovery replace input's own
+                  // onKeyDown just below for the same pattern) — Return does
+                  // nothing here on its own, so wire it to the same action
+                  // tapping "Go" already triggers.
+                  if (e.key === "Enter" && !busy) submitClarify(false);
+                }}
                 placeholder="or type one…"
                 aria-label={qq.question}
               />

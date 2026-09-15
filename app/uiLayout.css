@@ -82,6 +82,15 @@
     width: calc(100% - 24px); max-height: 30dvh;
     overflow-y: auto; overscroll-behavior-y: contain;
   }
+  /* A 2+ question round is taller than 30dvh, so Go/Skip (or a recovery
+     row's own action) can render past the scrollport with no visual hint
+     that the panel scrolls. Stick the action row to the bottom of that
+     SAME scrollport as the panel scrolls, rather than raising the cap —
+     the cap itself stays untouched. */
+  .clarify--stage .clarify__actions {
+    position: sticky; bottom: 0; background: var(--card);
+    padding-top: 10px; border-top: 1px solid var(--rule);
+  }
   .mapfallback,
   .stage:has(.dev:not(.dev__collapsed)) .mapfallback {
     top: var(--plan-notice-bottom, 140px); bottom: auto; z-index: 46;
