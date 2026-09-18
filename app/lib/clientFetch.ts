@@ -27,6 +27,18 @@ export type FetchJsonOptions<T> = Omit<RequestInit, "signal"> & {
   timeoutMs?: number;
   guard?: JsonGuard<T>;
   parse?: JsonParser<T>;
+  /**
+   * Overrides the generic "unexpected response" wording when this call's own
+   * shape check (`parse`/`guard`) rejects an otherwise-successful reply. Each
+   * pipeline step names its own honest phrase here (e.g. "Couldn't read the
+   * route times for this plan."); a call site that omits it keeps the
+   * generic `invalid_payload` message. This never changes what is LOGGED —
+   * the real validator reason and the endpoint are always captured (see
+   * `ClientFetchError.reason`/`.endpoint`) regardless of this override, and
+   * the raw reason never becomes part of the public message either way, the
+   * same discipline `safePublicMessage` already applies to server text.
+   */
+  invalidResponseMessage?: string;
 };
 
 const ERROR_MESSAGES = {
@@ -42,17 +54,49 @@ export class ClientFetchError extends Error {
   constructor(
     public readonly status: number | null,
     public readonly code: string,
-    message: string
+    message: string,
+    /** The endpoint this call was made to, when known. Diagnostic only —
+     *  never rendered in the public `message`. */
+    public readonly endpoint?: string,
+    /** The SPECIFIC rejection reason a `parse`/`guard` check produced (e.g.
+     *  "invalid travel legs"), when this is an `invalid_payload` failure.
+     *  Diagnostic only, always logged at the point of failure (see
+     *  `logInvalidPayload`) — never folded into `message`, which stays the
+     *  curated, per-step phrase a user can actually read. */
+    public readonly reason?: string
   ) {
     super(message);
     this.name = "ClientFetchError";
   }
 }
 
+/** Resolve the URL a call was actually made to, for diagnostics only. */
+function endpointOf(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  return input.url;
+}
+
+/**
+ * A previously EMPTY catch swallowed both of these — the shape check's own
+ * rejection reason and which endpoint produced it — so a live "unexpected
+ * response" incident could not be diagnosed without a full code trace. Every
+ * `invalid_payload` failure now logs both, unconditionally, the same
+ * bracket-tag + JSON convention `[window-fit]` already uses for client-side
+ * diagnostics, so a FUTURE incident is readable from the console alone.
+ */
+function logInvalidPayload(endpoint: string, reason: string): void {
+  console.error(
+    "[client-fetch]",
+    JSON.stringify({ endpoint, code: "invalid_payload", reason })
+  );
+}
+
 function transportError(
-  code: "request_timeout" | "request_aborted" | "network_error"
+  code: "request_timeout" | "request_aborted" | "network_error",
+  endpoint: string
 ): ClientFetchError {
-  return new ClientFetchError(null, code, ERROR_MESSAGES[code]);
+  return new ClientFetchError(null, code, ERROR_MESSAGES[code], endpoint);
 }
 
 function validErrorCode(value: unknown): value is string {
@@ -69,7 +113,7 @@ function safePublicMessage(value: unknown): string | null {
     : null;
 }
 
-function httpError(status: number, payload: unknown): ClientFetchError {
+function httpError(status: number, payload: unknown, endpoint: string): ClientFetchError {
   const record =
     typeof payload === "object" && payload !== null && !Array.isArray(payload)
       ? (payload as Record<string, unknown>)
@@ -77,7 +121,7 @@ function httpError(status: number, payload: unknown): ClientFetchError {
   const code = record && validErrorCode(record.code) ? record.code : "http_error";
   const message =
     (record && safePublicMessage(record.error)) ?? ERROR_MESSAGES.http_error;
-  return new ClientFetchError(status, code, message);
+  return new ClientFetchError(status, code, message, endpoint);
 }
 
 /**
@@ -94,11 +138,13 @@ export async function fetchJson<T = unknown>(
     signal: callerSignal,
     guard,
     parse,
+    invalidResponseMessage,
     ...init
   } = options;
+  const endpoint = endpointOf(input);
 
   if (callerSignal?.aborted) {
-    throw transportError("request_aborted");
+    throw transportError("request_aborted", endpoint);
   }
 
   const controller = new AbortController();
@@ -123,49 +169,67 @@ export async function fetchJson<T = unknown>(
     try {
       response = await fetch(input, { ...init, signal: controller.signal });
     } catch {
-      if (timedOut) throw transportError("request_timeout");
+      if (timedOut) throw transportError("request_timeout", endpoint);
       if (callerAborted || callerSignal?.aborted) {
-        throw transportError("request_aborted");
+        throw transportError("request_aborted", endpoint);
       }
-      throw transportError("network_error");
+      throw transportError("network_error", endpoint);
     }
 
     let payload: unknown;
     try {
       payload = await response.json();
     } catch {
-      if (timedOut) throw transportError("request_timeout");
+      if (timedOut) throw transportError("request_timeout", endpoint);
       if (callerAborted || callerSignal?.aborted) {
-        throw transportError("request_aborted");
+        throw transportError("request_aborted", endpoint);
       }
       throw new ClientFetchError(
         response.status,
         response.ok ? "invalid_json" : "http_error",
-        response.ok ? ERROR_MESSAGES.invalid_json : ERROR_MESSAGES.http_error
+        response.ok ? ERROR_MESSAGES.invalid_json : ERROR_MESSAGES.http_error,
+        endpoint
       );
     }
 
     if (!response.ok) {
-      throw httpError(response.status, payload);
+      throw httpError(response.status, payload, endpoint);
     }
 
     if (parse) {
       try {
         return parse(payload);
-      } catch {
+      } catch (parseErr) {
+        // THE BUG: this used to be an empty `catch {}` that discarded both
+        // the validator's own rejection reason (e.g. "invalid travel legs")
+        // and which endpoint produced it — so a live "unexpected response"
+        // incident could not be diagnosed without a full code trace. Both
+        // are captured and logged unconditionally now; only the PUBLIC
+        // message stays generic-unless-overridden, the same
+        // don't-leak-internals discipline `safePublicMessage` already
+        // applies to server error text.
+        const reason =
+          parseErr instanceof Error ? parseErr.message : String(parseErr);
+        logInvalidPayload(endpoint, reason);
         throw new ClientFetchError(
           response.status,
           "invalid_payload",
-          ERROR_MESSAGES.invalid_payload
+          invalidResponseMessage ?? ERROR_MESSAGES.invalid_payload,
+          endpoint,
+          reason
         );
       }
     }
 
     if (guard && !guard(payload)) {
+      const reason = "payload failed the shape guard";
+      logInvalidPayload(endpoint, reason);
       throw new ClientFetchError(
         response.status,
         "invalid_payload",
-        ERROR_MESSAGES.invalid_payload
+        invalidResponseMessage ?? ERROR_MESSAGES.invalid_payload,
+        endpoint,
+        reason
       );
     }
 

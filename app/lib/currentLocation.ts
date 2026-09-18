@@ -37,6 +37,15 @@
 // Locked copy. One definition each, so no screen re-types a literal.
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * The one prefix every `homePoint`/`itinerary.home` label is built with in
+ * `resolvePlace` (`Start · <city> centre`, `Start · <typed address>`,
+ * `Start · <resolved current-location text>`). Exported so `restoredStartAddress`
+ * below and `resolvePlace` share the same literal rather than two copies
+ * that can drift.
+ */
+export const START_LABEL_PREFIX = "Start · ";
+
 /** The dropdown's one row. */
 export const CURRENT_LOCATION_OPTION_LABEL = "Use current location";
 
@@ -282,4 +291,48 @@ export function startFixForField(
 ): StartFix | null {
   if (!fix) return null;
   return fix.label === fieldValue.trim() ? fix : null;
+}
+
+/**
+ * What the START-ADDRESS FIELD should read after RESUMING a plan whose
+ * pipeline already ran once — a `page.tsx` reload only restores the
+ * ITINERARY (`applyItinerary`), never the form state that produced it, so
+ * without this a resumed plan's city/address inputs sit at page defaults
+ * ("Toronto", empty) and a Replan on that resumed plan silently replans in
+ * the wrong place.
+ *
+ * `itinerary.home.label` is always built by `resolvePlace` from one of
+ * THREE templates, never raw typed text, so the ORIGINAL text a user typed
+ * cannot be recovered byte for byte — only two of the three describe real,
+ * forward-geocodable text:
+ *   - `Start · <city> centre`        — no address was given at all; resume
+ *                                      to an EMPTY field, matching that.
+ *   - `Start · <typed address>`      — the server's own formatted address;
+ *                                      safe to feed straight back in.
+ *   - `Start · <resolved address>`   — a current-location fix that named a
+ *                                      real place; also safe, same text a
+ *                                      typed address would have produced.
+ *   - `Start · Current location`     — a current-location fix the reverse
+ *                                      geocoder could not name at all
+ *                                      (`CURRENT_LOCATION_FALLBACK_LABEL`);
+ *                                      forward-geocoding that PHRASE would
+ *                                      search for a place literally named
+ *                                      "Current location", so this also
+ *                                      resumes to an EMPTY field rather than
+ *                                      restoring text that would fail.
+ *
+ * `cityLabel` is the plan's own `parsed.city` (the SAME formatted string
+ * `resolvePlace` built the city-centre template from), needed to recognize
+ * that first case; without it the city-centre default is indistinguishable
+ * from a genuinely short typed address.
+ */
+export function restoredStartAddress(
+  homeLabel: string | null | undefined,
+  cityLabel: string | null | undefined
+): string {
+  if (!homeLabel || !homeLabel.startsWith(START_LABEL_PREFIX)) return "";
+  const remainder = homeLabel.slice(START_LABEL_PREFIX.length);
+  if (remainder === CURRENT_LOCATION_FALLBACK_LABEL) return "";
+  if (cityLabel && remainder === `${cityLabel} centre`) return "";
+  return remainder;
 }

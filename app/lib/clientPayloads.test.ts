@@ -413,6 +413,70 @@ const cases: Array<[string, () => void]> = [
     },
   ],
   [
+    "an ADDRESS result with no locality (a real, valid Places match — a landmark, transit station or airport) is accepted; the same shape on a CITY result is still rejected",
+    () => {
+      // This is the exact shape `geocode.ts`'s server-side `parseResult`
+      // legitimately produces for an address-shaped match with no
+      // locality/postal_town/administrative_area_level_3 component: the
+      // `locality` key is always PRESENT (never omitted) but is the empty
+      // string, `""` — see `parseResult`'s `locality: locality?.longName ??
+      // ""`. The server's address branch (`resolveGeocodeResponse`) never
+      // checks `candidate.locality` at all (only the CITY branch does, at
+      // `Boolean(candidate.locality)`), so this response is a genuine,
+      // currently-producible server reply — not a hand-relaxed fixture.
+      const airportAddress = {
+        label: "Toronto Pearson International Airport",
+        formattedAddress: "Toronto AMF, Mississauga, ON, Canada",
+        location: { latitude: 43.6777, longitude: -79.6248 },
+        timeZone: "America/Toronto",
+        locality: "",
+        administrativeArea: "Ontario",
+        country: "Canada",
+        countryCode: "CA",
+        resultTypes: ["airport", "point_of_interest", "establishment"],
+      };
+      const resolved = parseGeocodePayload({
+        outcome: "resolved",
+        queryType: "address",
+        ...airportAddress,
+      });
+      assert.strictEqual(resolved.outcome, "resolved");
+      if (resolved.outcome === "resolved") {
+        assert.strictEqual(resolved.locality, "");
+      }
+      // An ambiguous address response with a no-locality candidate among
+      // its choices must be accepted too — the recovery panel needs to be
+      // able to offer it as a pickable candidate, not silently drop it.
+      const ambiguousAddress = parseGeocodePayload({
+        outcome: "ambiguous",
+        queryType: "address",
+        code: "geocode_ambiguous",
+        message: "More than one starting address matched. Choose the address you meant.",
+        candidates: [airportAddress, { ...airportAddress, placeId: "second" }],
+      });
+      assert.strictEqual(ambiguousAddress.outcome, "ambiguous");
+      // THE CITY CHECK IS UNCHANGED: identifying a real city still requires
+      // a locality name, so the identical no-locality shape is still
+      // rejected when queryType is "city".
+      assert.throws(() =>
+        parseGeocodePayload({
+          outcome: "resolved",
+          queryType: "city",
+          ...airportAddress,
+        })
+      );
+      assert.throws(() =>
+        parseGeocodePayload({
+          outcome: "ambiguous",
+          queryType: "city",
+          code: "geocode_ambiguous",
+          message: "More than one city matched. Choose the city you meant.",
+          candidates: [airportAddress, { ...airportAddress, placeId: "second" }],
+        })
+      );
+    },
+  ],
+  [
     "reverse geocode validation keeps the coordinate strict and lets the text be empty",
     () => {
       const named = parseReverseGeocodePayload({

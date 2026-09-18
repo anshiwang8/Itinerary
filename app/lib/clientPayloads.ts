@@ -732,7 +732,24 @@ export function parseGeocodePayload(value: unknown): GeocodeOutcome {
     return isLatLng(bounds.southwest) && isLatLng(bounds.northeast);
   };
 
-  const isCandidate = (candidate: unknown): candidate is GeocodeCandidate => {
+  // Locality is required for a CITY result (it IS the thing being named) but
+  // NOT for an ADDRESS result — matching the server's own address branch
+  // (`geocode.ts`'s `resolveGeocodeResponse`), which stopped requiring one
+  // on 2026-08-13: a precise address, a landmark, a transit station or an
+  // airport can legitimately resolve with no locality/postal-town component
+  // at all, and `parseResult` then sets `locality: ""` rather than omitting
+  // the field. This validator used to require a non-empty locality for BOTH
+  // query types, which is a client/server contract drift — a real, valid
+  // address match that has no locality name was rejected here as "invalid
+  // geocode" and fell into the generic client-fetch failure. The text is
+  // still checked as strictly as the CITY branch when queryType is "city";
+  // only "address" relaxes, exactly the shape `parseReverseGeocodePayload`
+  // already uses for the same reason (a device fix legitimately names
+  // nothing), reused here rather than re-invented.
+  const isCandidate = (
+    candidate: unknown,
+    queryType: "city" | "address"
+  ): candidate is GeocodeCandidate => {
     if (
       typeof candidate !== "object" ||
       candidate === null ||
@@ -749,7 +766,7 @@ export function parseGeocodePayload(value: unknown): GeocodeOutcome {
       isLatLng(item.location) &&
       isIanaTimeZone(item.timeZone) &&
       typeof item.locality === "string" &&
-      item.locality.trim().length > 0 &&
+      (queryType === "address" || item.locality.trim().length > 0) &&
       optionalString(item.administrativeArea) &&
       typeof item.country === "string" &&
       item.country.trim().length > 0 &&
@@ -765,7 +782,7 @@ export function parseGeocodePayload(value: unknown): GeocodeOutcome {
   if (
     data.outcome === "resolved" &&
     (data.queryType === "city" || data.queryType === "address") &&
-    isCandidate(data)
+    isCandidate(data, data.queryType)
   ) {
     return data as unknown as GeocodeOutcome;
   }
@@ -778,7 +795,7 @@ export function parseGeocodePayload(value: unknown): GeocodeOutcome {
     Array.isArray(data.candidates) &&
     data.candidates.length > 1 &&
     data.candidates.length <= 5 &&
-    data.candidates.every(isCandidate)
+    data.candidates.every((candidate) => isCandidate(candidate, data.queryType as "city" | "address"))
   ) {
     return data as unknown as GeocodeOutcome;
   }

@@ -17,9 +17,11 @@ import {
   CURRENT_LOCATION_UNAVAILABLE_NOTE,
   CURRENT_LOCATION_UNUSABLE_NOTE,
   MAX_FIX_ACCURACY_METERS,
+  START_LABEL_PREFIX,
   describeAccuracy,
   geolocationErrorNote,
   judgeFix,
+  restoredStartAddress,
   startFixForField,
   startLabelFrom,
   type StartFix,
@@ -240,6 +242,73 @@ const cases: Case[] = [
       assert.strictEqual(CURRENT_LOCATION_POSITION_OPTIONS.maximumAge, 0);
       assert.strictEqual(CURRENT_LOCATION_POSITION_OPTIONS.enableHighAccuracy, true);
       assert.ok((CURRENT_LOCATION_POSITION_OPTIONS.timeout ?? 0) > 0);
+    },
+  ],
+
+  // ── restoring the start-address field on resume ──
+  [
+    "a typed address's stored label round-trips into a geocodable field value",
+    () => {
+      assert.strictEqual(
+        restoredStartAddress(
+          `${START_LABEL_PREFIX}123 Queen St W, Toronto, ON, Canada`,
+          "Toronto, ON, Canada"
+        ),
+        "123 Queen St W, Toronto, ON, Canada"
+      );
+    },
+  ],
+  [
+    "a resolved current-location label round-trips the same way a typed address does",
+    () => {
+      assert.strictEqual(
+        restoredStartAddress(
+          `${START_LABEL_PREFIX}456 King St W, Toronto, ON, Canada`,
+          "Toronto, ON, Canada"
+        ),
+        "456 King St W, Toronto, ON, Canada"
+      );
+    },
+  ],
+  [
+    "the city-centre default (no address was ever given) resumes to an empty field, not the city text",
+    () => {
+      assert.strictEqual(
+        restoredStartAddress(
+          `${START_LABEL_PREFIX}Toronto, ON, Canada centre`,
+          "Toronto, ON, Canada"
+        ),
+        ""
+      );
+    },
+  ],
+  [
+    "an unnamed current-location fix resumes to an empty field rather than the un-geocodable fallback phrase",
+    () => {
+      // Forward-geocoding "Current location" as typed text would search for
+      // a place literally named that, which would fail (or worse, match
+      // something irrelevant) on Replan — worse than the empty-field default.
+      assert.strictEqual(
+        restoredStartAddress(
+          `${START_LABEL_PREFIX}${CURRENT_LOCATION_FALLBACK_LABEL}`,
+          "Toronto, ON, Canada"
+        ),
+        ""
+      );
+    },
+  ],
+  [
+    "a pre-multi-city itinerary (no home label at all) resumes to an empty field, the existing default",
+    () => {
+      assert.strictEqual(restoredStartAddress(null, "Toronto, ON, Canada"), "");
+      assert.strictEqual(restoredStartAddress(undefined, undefined), "");
+    },
+  ],
+  [
+    "a malformed or unrecognized label shape is never guessed at",
+    () => {
+      // no known prefix at all
+      assert.strictEqual(restoredStartAddress("Chestnut Residence", "Toronto"), "");
     },
   ],
 ];

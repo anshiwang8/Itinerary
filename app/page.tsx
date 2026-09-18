@@ -79,8 +79,10 @@ import {
   CURRENT_LOCATION_INSECURE_NOTE,
   CURRENT_LOCATION_POSITION_OPTIONS,
   CURRENT_LOCATION_UNSUPPORTED_NOTE,
+  START_LABEL_PREFIX,
   geolocationErrorNote,
   judgeFix,
+  restoredStartAddress,
   startFixForField,
   startLabelFrom,
   type StartFix,
@@ -137,6 +139,28 @@ const SHOW_DEV_CONTROLS = shouldShowDevControls(
   process.env.NODE_ENV,
   process.env.NEXT_PUBLIC_ENABLE_DEV_CONTROLS
 );
+
+/**
+ * Per-PIPELINE-STEP honest messages for `fetchJson`'s `invalidResponseMessage`
+ * — one file's constants, so the main run and the recovery panel's re-search
+ * of the SAME two endpoints (`searchSlot`) can never drift to two different
+ * phrasings of the same failure. Each replaces the single generic "The
+ * service returned an unexpected response" text that used to cover every
+ * step alike, which made a real incident's cause unrecoverable from the
+ * message a user actually saw. This never changes what the browser LOGS —
+ * `clientFetch.ts` always captures the validator's own reason + the
+ * endpoint (`ClientFetchError.reason`/`.endpoint`) regardless of which
+ * public phrase is shown.
+ */
+const GEOCODE_CITY_INVALID_MESSAGE = "Couldn't confirm that city. Please try again.";
+const GEOCODE_ADDRESS_INVALID_MESSAGE = "Couldn't confirm that address. Please try again.";
+const GEOCODE_CURRENT_LOCATION_INVALID_MESSAGE =
+  "Couldn't confirm your current location. Please try again.";
+const PARSE_INVALID_MESSAGE = "Couldn't read the plan that came back. Please try again.";
+const PLACES_SEARCH_INVALID_MESSAGE =
+  "Couldn't read the places found for this plan. Please try again.";
+const SELECT_INVALID_MESSAGE = "Couldn't read which venues were picked. Please try again.";
+const TRAVEL_INVALID_MESSAGE = "Couldn't read the route times for this plan. Please try again.";
 
 /** Dev-only console trace for the live-location stream (Piece 1 has no real
  *  UI yet). Fires on TRANSITIONS only, never on a timer. Lets the owner
@@ -1047,6 +1071,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: cityQ, kind: "city" }),
         parse: parseGeocodePayload,
+        invalidResponseMessage: GEOCODE_CITY_INVALID_MESSAGE,
       });
       if (cityOutcome.outcome === "ambiguous") {
         setRecovery({
@@ -1075,7 +1100,7 @@ export default function Home() {
     // plan. The day happens in the city, so it is told in the city's time.
     const planZone: string = cityData.timeZone;
     let hp: { label: string; location: { latitude: number; longitude: number } } = {
-      label: `Start · ${cityData.formattedAddress} centre`,
+      label: `${START_LABEL_PREFIX}${cityData.formattedAddress} centre`,
       location: cityData.location,
     };
     const geocode: PipelineGeocode = { city: cityData };
@@ -1107,11 +1132,12 @@ export default function Home() {
             cityContext: cityData,
           }),
           parse: parseReverseGeocodePayload,
+          invalidResponseMessage: GEOCODE_CURRENT_LOCATION_INVALID_MESSAGE,
         });
       }
       geocode.address = fixData;
       hp = {
-        label: `Start · ${startLabelFrom(fixData.formattedAddress)}`,
+        label: `${START_LABEL_PREFIX}${startLabelFrom(fixData.formattedAddress)}`,
         location: fixData.location,
       };
     } else if (addrQ) {
@@ -1123,6 +1149,7 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ query: addrQ, kind: "address", cityContext: cityData }),
           parse: parseGeocodePayload,
+          invalidResponseMessage: GEOCODE_ADDRESS_INVALID_MESSAGE,
         });
         if (addressOutcome.outcome === "ambiguous") {
           setRecovery({
@@ -1139,7 +1166,7 @@ export default function Home() {
         addrData = addressOutcome;
       }
       geocode.address = addrData;
-      hp = { label: `Start · ${addrData.formattedAddress}`, location: addrData.location };
+      hp = { label: `${START_LABEL_PREFIX}${addrData.formattedAddress}`, location: addrData.location };
     }
 
     setHomePoint(hp);
@@ -1200,6 +1227,7 @@ export default function Home() {
         ...(answers && answers.length > 0 ? { answers } : {}),
       }),
       parse: parsePlanPayload,
+      invalidResponseMessage: PARSE_INVALID_MESSAGE,
     });
 
     // the city is app-supplied input, never LLM-inferred — it rides on the
@@ -1327,6 +1355,7 @@ export default function Home() {
               : undefined,
         }),
         parse: parsePlacesPayload,
+        invalidResponseMessage: PLACES_SEARCH_INVALID_MESSAGE,
       });
       setPools(categories);
       setWeatherBlocks(wxBlocks);
@@ -1377,6 +1406,7 @@ export default function Home() {
               : undefined,
         }),
         parse: parseSelectionsPayload,
+        invalidResponseMessage: SELECT_INVALID_MESSAGE,
       });
 
       // A hard constraint nothing verifiably meets. The /api/parse
@@ -1558,6 +1588,7 @@ export default function Home() {
               travelMode,
             }),
             parse: parseTravelPayload,
+            invalidResponseMessage: TRAVEL_INVALID_MESSAGE,
           });
           const split = splitHomeLeg(travelData.legs ?? []);
           hl = split.homeLeg;
@@ -1855,6 +1886,7 @@ export default function Home() {
         targetTime: targetTime.toISOString(),
       }),
       parse: parsePlacesPayload,
+      invalidResponseMessage: PLACES_SEARCH_INVALID_MESSAGE,
     });
     const pool = poolObj[searchCategory] ?? [];
     const usedIds = usedIdsOutsideRow(ctx.sels, row);
@@ -1882,6 +1914,7 @@ export default function Home() {
           plannedLocations: [opts.dropLocation ? "" : row.plannedLocation ?? ""],
         }),
         parse: parseSelectionsPayload,
+        invalidResponseMessage: SELECT_INVALID_MESSAGE,
       });
       sel = selections.find(
         (s) => s.category === searchCategory
@@ -2412,6 +2445,24 @@ export default function Home() {
         if (activeOperation.current || !applyItinerary(stored, null)) return;
         const active = stored.stops.find((s) => s.status === "active");
         if (active?.id) setSelected(active.id);
+        // RESTORE THE FORM STATE THIS PLAN WAS BUILT FROM, not just the
+        // plan itself. `applyItinerary` only ever set `itinerary`/`schedule`/
+        // `mapStops`/`homeLeg` — city/startAddress/travelMode stayed at page
+        // defaults ("Toronto", empty, transit), and the topbar's Replan form
+        // has no city/address inputs of its own: it reuses these SAME state
+        // variables through `runPipeline` → `resolvePlace`. Left unfixed, a
+        // Replan on a resumed non-Toronto plan silently replanned in
+        // Toronto. Every value here is already stored on the itinerary
+        // itself (`parsed.city`, `home`, `timeZone`, `travelMode`) — nothing
+        // new is invented, and each is independently optional exactly as it
+        // is on the stored type, so a pre-multi-city itinerary with none of
+        // them keeps today's defaults untouched.
+        const cityLabel = stored.parsed?.city ?? null;
+        if (cityLabel) setCity(cityLabel);
+        setStartAddress(restoredStartAddress(stored.home?.label ?? null, cityLabel));
+        if (stored.home) setHomePoint({ label: stored.home.label, location: stored.home.location });
+        if (stored.timeZone) setPlanZone(stored.timeZone);
+        setTravelMode(stored.travelMode ?? "transit");
       } catch {
         // A failed resume leaves the landing page — the pre-1B behaviour, and
         // a working app. Never an error banner for something the user did not
