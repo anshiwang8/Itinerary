@@ -12,15 +12,15 @@ import { chromium } from "@playwright/test";
 import path from "node:path";
 import fs from "node:fs/promises";
 import {
-  DEFAULT_BASE_URL,
   OUTPUT_DIR,
   estimatePersonaCostUSD,
-  isLocalURL,
   parseArgs,
+  validateBaseURL,
   type RunOptions,
 } from "./config";
 import { PERSONAS, personaActionCounts } from "./personas";
 import { runPersona } from "./lib/runPersona";
+import { runPool } from "./lib/pool";
 import { writeReport } from "./lib/report";
 import type { Persona, PersonaResult } from "./types";
 
@@ -111,61 +111,9 @@ async function main(): Promise<void> {
   console.log("─".repeat(72));
 }
 
-/**
- * Run `tasks` with at most `limit` in flight, preserving input order in the
- * results. A worker takes the next index whenever it finishes one, so a
- * persona that ends in ninety seconds does not hold a slot for the twenty
- * minutes its neighbour needs.
- */
-async function runPool<T, R>(
-  items: T[],
-  limit: number,
-  work: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
-    for (;;) {
-      const index = next++;
-      if (index >= items.length) return;
-      results[index] = await work(items[index]);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
 function selectPersonas(run: RunOptions): Persona[] {
   if (!run.personaFilter) return PERSONAS;
   return PERSONAS.filter((persona) => run.personaFilter!.includes(persona.name));
-}
-
-function validateBaseURL(run: RunOptions): string | null {
-  if (!/^https?:\/\//.test(run.baseURL)) {
-    return (
-      "AGENT_TEST_BASE_URL is not a URL: " +
-      JSON.stringify(run.baseURL) +
-      "\nSet it to the deployed app, or leave it unset to use " +
-      DEFAULT_BASE_URL +
-      "."
-    );
-  }
-  if (isLocalURL(run.baseURL) && !run.allowLocal) {
-    return (
-      "REFUSING to run against " +
-      run.baseURL +
-      ".\n" +
-      "This harness exists to exercise the REAL deployed app: the live planner,\n" +
-      "real Places results, real route geometry and the real Maps key. A run\n" +
-      "against localhost would produce a report that looks real and proves\n" +
-      "nothing about production.\n\n" +
-      "Either unset AGENT_TEST_BASE_URL (defaults to " +
-      DEFAULT_BASE_URL +
-      "),\n" +
-      "or pass --allow-local if you genuinely mean to point it at a local server."
-    );
-  }
-  return null;
 }
 
 function printPlan(personas: Persona[], run: RunOptions): void {

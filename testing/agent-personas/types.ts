@@ -143,7 +143,53 @@ export type PersonaAction =
    * find the plan. The state is copied with `indexedDB: true`, because
    * Firebase Auth keeps its session there.
    */
-  | { kind: "resumeInSecondContext" };
+  | { kind: "resumeInSecondContext" }
+  /**
+   * BREAK SET (state-machine abuse). Fire several mutations AT ONCE against
+   * the plan currently on screen, using the owner's own captured Authorization
+   * header (the same off-the-wire seam `endAgain`/`probeClock` use). This is
+   * the only reliable way to reproduce "faster than a response could return"
+   * and "while another is still in flight": genuine concurrency, not the
+   * sequential `swap`/`remove` actions. It tests the CAS + engine's own
+   * concurrency handling, NOT ownership — every request is authorized. The
+   * bar is graceful: no 5xx from any request, and the plan re-reads coherent
+   * (every stop keeps a venue and a time, versions never go backwards).
+   */
+  | {
+      kind: "concurrentMutations";
+      ops: ConcurrentOp[];
+      step: string;
+      expected: string;
+    }
+  /**
+   * BREAK SET (guest-to-guest, re-validating the R1 ownership work). A guest's
+   * plan is OWNED (guests are signed in anonymously), so a stranger holding
+   * the id must be able to read and change NOTHING. This attempts the by-id
+   * routes (GET, swap, remove, mode) from an unauthenticated request — a
+   * different, genuinely-guest session relative to the owner — and expects the
+   * app's own indistinguishable 404 for each. If the plan turns out to be
+   * UNOWNED (the documented anonymous-sign-in race, or Firebase unconfigured),
+   * capability-by-id is the correct behaviour and R1 is recorded as NOT
+   * EXERCISED rather than as a deviation.
+   */
+  | {
+      kind: "crossSessionAccessDenied";
+      step: string;
+      expected: string;
+      /** Also mint a SECOND, genuinely-separate anonymous guest session (a
+       *  different uid, its own browser context) and confirm it, too, is
+       *  denied the plan by id. Heavier than the unauthenticated battery, so
+       *  only some personas set it. */
+      alsoSecondContext?: boolean;
+    };
+
+/** One operation in a `concurrentMutations` burst. Deliberately the swap /
+ *  remove / mode trio only: `end` concludes the plan (nothing left to re-read
+ *  coherently), and double-end is already covered by `endAgain`. */
+export type ConcurrentOp =
+  | { op: "swap"; target: StopTarget; refinement: string }
+  | { op: "remove"; target: StopTarget }
+  | { op: "mode"; to: "transit" | "driving" };
 
 export interface PlanExpectation {
   /** Minimum number of timed stops the plan should contain. */
@@ -189,6 +235,15 @@ export interface PlanExpectation {
 }
 
 export interface Persona {
+  /**
+   * Which runner drives this persona. Absent or "browser" means the ordinary
+   * Playwright-driven runner (`runPersona`); the break set's direct-API
+   * personas carry `kind: "api"` on their OWN type (`ApiPersona`, in
+   * `breakTypes.ts`) and never reach this interface. Present here purely so a
+   * `Persona | ApiPersona` union discriminates cleanly, and read by nothing
+   * else — every existing persona omits it and behaves exactly as before.
+   */
+  kind?: "browser";
   /** Stable slug: names the screenshot folder and the report section. */
   name: string;
   /** One line describing what this persona is for. */

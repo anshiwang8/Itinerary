@@ -13,6 +13,22 @@ The output is one markdown report listing **only the deviations**.
 > it runs, and it creates real itineraries in the production store. Port 3000
 > is never touched.
 
+## Two persona sets
+
+There are **two** independent persona sets in this harness, run by two entry
+points that share all the machinery below:
+
+| Set | Personas | Entry point | Intent |
+|---|---|---|---|
+| **Ordinary use** | 51 | `npm run test:agents` | Does a real, sensible day come back — and do plan, edit, movement, arrival and ending all work? |
+| **Break** | 100, all **guest** | `npm run test:agents:break` | Try to *break* the app: hostile input, conflicting/concurrent operations, the exact edges of real guardrails, malformed API requests, bounded rate-limit probing, and re-validation of ownership. |
+
+The two sets never run together and never touch each other's files. The ordinary
+set is described from ["What each persona covers"](#what-each-persona-covers)
+down; the break set has its own section, ["The break set"](#the-break-set),
+immediately after "Running it". Everything else in this README — geolocation
+simulation, output, cost, the concurrency pool, the file list — applies to both.
+
 ---
 
 ## Running it
@@ -46,6 +62,130 @@ report that looks real and proves nothing about production.
 | `--fix-interval-ms <ms>` | 4000 | Gap between simulated position updates. |
 | `--headed` | off | Watch it happen. |
 | `--allow-local` | off | Permit a localhost target. |
+
+---
+
+## The break set
+
+```bash
+npm run test:agents:break                 # prints the plan + cost warning, runs NOTHING
+npm run test:agents:break -- --confirm    # actually runs it
+```
+
+**100 personas, all guest**, whose explicit intent is to *break* the app rather
+than use it normally. Same `--confirm` guard, same batching pool (default
+concurrency **8** — do not raise it; every persona shares one client IP against
+the app's own per-(route, IP) rate limits), same `--only`/`--timeout`/`--headed`
+flags, same localhost refusal, same gitignored output. The report is the same
+format, deviations-only, written to `output/break-run-<timestamp>/` and named
+**`BREAK-REPORT-<timestamp>.md`** (vs the ordinary `REPORT-...`).
+
+**Strictly guest throughout.** No break persona signs in, so this set needs no
+saved session and sidesteps the Google-auth limitation entirely.
+
+### How it differs in *intent* from the ordinary 51
+
+The ordinary set asks "does the app *work*". The break set asks "can I make the
+app *misbehave*" — and its bar is almost always **graceful degradation**, not
+success: a refusal, a clean 4xx, a rate-limit message, a coherent recovery.
+Nearly every break persona is designed to be *refused*, and a refused plan never
+reaches Places or Routes, which is why the ~$16 estimate is a firm upper bound.
+It is **not** a penetration test: the existing set's light injection smoke test
+is the ceiling for exploitation, and the break set does not go further (its
+injection/template/prompt-injection personas only confirm the text is *inert*).
+
+### Two runner kinds
+
+Break personas come in two shapes, both in one runnable list (`breakTypes.ts`):
+
+- **Browser personas** are ordinary `Persona`s and go through the existing
+  `runPersona` unchanged, reusing every action. Two additive actions were added
+  for scenarios the existing ones couldn't express (`concurrentMutations`,
+  `crossSessionAccessDenied`); the ordinary 51 use neither.
+- **Direct-API personas** (`ApiPersona`, `kind: "api"`) go through a **new,
+  lightweight fetch-based runner** (`lib/runApiPersona.ts`): no browser, no page,
+  no navigation — just raw HTTP straight at the routes, testing that server-side
+  validation rejects what it should independent of whatever a real browser would
+  ever send. They **reuse the same `Recorder` and the same report** (a check
+  record needs no page); only the per-persona interpreter differs, because an
+  API persona has no plan on screen, no movement and no actions to interpret.
+  The dispatcher picks the runner by `kind`; a browser is launched only if the
+  selected set contains a browser persona.
+
+### The six categories (~16-17 each, 100 total)
+
+1. **Input-based attacks (17)** — multi-KB prompts, kilobyte-long addresses,
+   emoji-only, right-to-left Arabic, zero-width characters, mixed scripts,
+   combining-mark "Zalgo", control characters, a repeated vowel-less character,
+   HTML/entity/template/JSON/prompt-injection text (each confirmed *inert*), a
+   newline flood, rapid duplicate submissions, and a whitespace-only prompt
+   (which the UI can't even submit, so it's proven at the API).
+2. **State-machine abuse (17)** — conflicting/concurrent operations that timing
+   alone can produce: two removes of the same stop at once, three swaps launched
+   before any response returns, a swap racing a remove, four concurrent mode
+   switches, a five-op storm, reloads at intermediate moments (mid-swap,
+   after-create, after-mode-switch, after-swap), out-of-order sequences, and a
+   double-end. The genuinely-concurrent ones use `concurrentMutations`, which
+   fires raw HTTP with the owner's own captured auth (testing CAS/engine
+   concurrency, never ownership) and asserts no 5xx + a coherent re-read.
+3. **Boundary hammering (17)** — the exact edges of real guardrails, transcribed
+   from the code, approached from **both sides**. The 75 km start cap is
+   bracketed with real geocoded addresses (Guelph ~70.7 km inside; Kitchener /
+   Barrie / London over; Buffalo cross-border trips the country test first;
+   Mississauga and a Gatineau→Ottawa cross-region-but-near case inside
+   `SAME_METRO_METERS`, Montreal→Ottawa over it). The numeric edges that *are*
+   controllable are hit exactly: 2000 vs 2001 prompt chars, 25 vs 26 candidates
+   per pool, 8 vs 9 categories, 8 vs 20 activities, 5-minute clamp to the
+   15-minute floor, 8-hour clamp to the 360-minute ceiling, 13 days inside the
+   14-day horizon, and the 700 m drive-to-walk relabel. An **exact-at** 75 km
+   address isn't addressable with real geocoding, so that one edge is documented
+   as bracketed rather than hit.
+4. **Direct API calls (17)** — malformed bodies straight at the routes: missing
+   required fields, wrong types, extra/`__proto__` fields, invalid JSON, an
+   oversized body (>256 KB → 413), a 3000-deep nested body, invalid optionals,
+   pool/category/total-candidate caps, malformed vs nonexistent itinerary ids,
+   an invalid `?now=`, and wrong HTTP methods / unknown routes. Every one asserts
+   a clean 4xx (or the specific code), **never a 5xx**, and the app's structured
+   JSON error envelope rather than a raw crash page.
+5. **Resource exhaustion — BOUNDED (16)** — confirms the app's rate-limiting
+   *holds and degrades gracefully*, and nothing more. **No burst exceeds
+   `MAX_BURST_REQUESTS` (45)** and **no persona creates more than
+   `MAX_REAL_PLANS_PER_PERSONA` (5)** real plans (the bounded-plan personas
+   actually create only 3). The rate bucket is incremented *before* body parsing
+   or any provider call, so cheap malformed requests trip the limiter with **zero
+   provider spend**. Every 429 is checked for the app's own "Too many requests"
+   message and a `Retry-After` header; a bounded burst that doesn't trip the
+   limit is *recorded, not failed*. This is not a DoS attempt and never resembles
+   one. **The genuinely-tripping bursts target `/reroute` (30/min), which no
+   other persona touches**, so they don't pollute another category's traffic;
+   the mutation-route (30/min) and higher-limit bounded bursts share buckets with
+   other personas' normal traffic in a full run, so **run category 5 with
+   `--only` for a fully isolated read** if you care which bursts tripped.
+6. **Guest-to-guest access (16)** — re-validates the R1 ownership work. A guest's
+   plan is **owned** (guests are signed in anonymously), so half of these create
+   a real owned plan and confirm a stranger — unauthenticated, a forged token,
+   and (for some) a genuinely separate second anonymous guest — is denied every
+   by-id route (GET/swap/remove/mode) with the same indistinguishable **404**. If
+   a plan turns out unowned (the documented anonymous-sign-in race, or Firebase
+   unconfigured) it's recorded as *not exercised* and **no unauthenticated
+   mutation is fired against it**. The other half are cheap API probes of the
+   indistinguishability contract: a nonexistent id, a forged token, a malformed
+   auth header, the guest history/profile/resume reads, and the still-ungated
+   (dev-only) `/reroute` — all confirmed to leak nothing about which ids exist.
+
+Every threshold above is transcribed from the code (see the header comment in
+`breakPersonas.ts` for the exact constants and their source files), never
+guessed. **No persona asserts a venue name** — the same rule as the ordinary set.
+
+### Cost and safety
+
+A dry run (`npm run test:agents:break`, no `--confirm`) prints all 100 personas
+grouped by category, the request counts, and a ~$16 upper-bound estimate, then
+exits having spent nothing. Most of that estimate is the browser personas that
+create real plans; the 40 direct-API personas and the rate-limit bursts are
+rejected at validation or by the limiter *before any provider call*, so they cost
+essentially nothing. A load-time guard throws if the set is not exactly 100
+personas or a name repeats.
 
 ---
 
@@ -386,16 +526,21 @@ be done with the same arithmetic in mind.
 
 | File | Job |
 |---|---|
-| `run-personas.ts` | CLI, cost guard, parallel launch, report handoff |
-| `personas.ts` | the persona configs — **the file you edit to add a scenario** |
-| `types.ts` | action / check / observed-plan shapes |
-| `config.ts` | base URL resolution, pacing defaults, the cost model |
-| `lib/runPersona.ts` | the action interpreter; one persona start to finish |
+| `run-personas.ts` | ordinary-set CLI: cost guard, parallel launch, report handoff |
+| `personas.ts` | the ordinary 51 persona configs — **edit this to add an ordinary scenario** |
+| `run-break-personas.ts` | break-set CLI (`test:agents:break`), reusing the shared pool/report/cost |
+| `breakPersonas.ts` | the 100 break personas + category mapping — **edit this to add a break scenario** |
+| `breakTypes.ts` | the `ApiPersona`/`ApiStep` shapes, the break cost model, the bounded caps |
+| `types.ts` | action / check / observed-plan shapes (shared by both sets) |
+| `config.ts` | base URL resolution + validation, pacing defaults, the cost model |
+| `lib/pool.ts` | the shared batching / concurrency pool (used by both entry points) |
+| `lib/runPersona.ts` | the browser action interpreter; one browser persona start to finish |
+| `lib/runApiPersona.ts` | the fetch-based runner for direct-API break personas (no browser) |
 | `lib/app.ts` | real-UI interactions and the selector inventory |
 | `lib/movement.ts` | the geolocation crawl and dwell |
 | `lib/geo.ts` | polyline decoding, path resampling, jitter |
 | `lib/itineraryProbe.ts` | reads the plan (and the auth header) off the wire |
 | `lib/clock.ts` | the `?now=` natural-completion seam |
 | `lib/recorder.ts` | the expected-vs-actual ledger, screenshots, console/network |
-| `lib/report.ts` | markdown report, deviations only |
-| `auth/save-storage-state.ts` | one-time interactive sign-in capture |
+| `lib/report.ts` | markdown report, deviations only (both sets) |
+| `auth/save-storage-state.ts` | one-time interactive sign-in capture (ordinary set only) |

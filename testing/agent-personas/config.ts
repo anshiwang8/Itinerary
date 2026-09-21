@@ -166,3 +166,38 @@ export function parseArgs(argv: string[]): RunOptions {
 export function isLocalURL(url: string): boolean {
   return /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:|\/|$)/i.test(url);
 }
+
+/**
+ * Validate the resolved target URL, shared by both entry points. Returns an
+ * error string to print (and exit on), or null when the target is acceptable.
+ * A LOCAL url is refused unless `--allow-local` is passed: the whole point of
+ * these harnesses is the real deployment, and silently testing localhost would
+ * produce a report that looks real and proves nothing about production.
+ */
+export function validateBaseURL(run: RunOptions): string | null {
+  if (!/^https?:\/\//.test(run.baseURL)) {
+    return (
+      "AGENT_TEST_BASE_URL is not a URL: " +
+      JSON.stringify(run.baseURL) +
+      "\nSet it to the deployed app, or leave it unset to use " +
+      DEFAULT_BASE_URL +
+      "."
+    );
+  }
+  if (isLocalURL(run.baseURL) && !run.allowLocal) {
+    return (
+      "REFUSING to run against " +
+      run.baseURL +
+      ".\n" +
+      "This harness exists to exercise the REAL deployed app: the live planner,\n" +
+      "real Places results, real route geometry and the real Maps key. A run\n" +
+      "against localhost would produce a report that looks real and proves\n" +
+      "nothing about production.\n\n" +
+      "Either unset AGENT_TEST_BASE_URL (defaults to " +
+      DEFAULT_BASE_URL +
+      "),\n" +
+      "or pass --allow-local if you genuinely mean to point it at a local server."
+    );
+  }
+  return null;
+}

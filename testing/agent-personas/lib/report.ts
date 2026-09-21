@@ -14,6 +14,11 @@ export interface ReportContext {
   finishedAt: Date;
   speedMultiplier: number;
   estimatedCostUSD: number;
+  /** Report filename prefix. Defaults to "REPORT"; the break set passes
+   *  "BREAK-REPORT" so the two runs' reports are distinguishable by name. */
+  filePrefix?: string;
+  /** The report's H1. Defaults to the ordinary run's title. */
+  title?: string;
 }
 
 export async function writeReport(
@@ -26,7 +31,7 @@ export async function writeReport(
     .replace(/[:.]/g, "-")
     .replace("T", "_")
     .slice(0, 19);
-  const file = path.join(reportDir, "REPORT-" + stamp + ".md");
+  const file = path.join(reportDir, (context.filePrefix ?? "REPORT") + "-" + stamp + ".md");
   await fs.mkdir(reportDir, { recursive: true });
   await fs.writeFile(file, render(results, context), "utf8");
   return file;
@@ -42,7 +47,7 @@ function render(results: PersonaResult[], context: ReportContext): string {
   );
 
   const lines: string[] = [];
-  lines.push("# Persona run report");
+  lines.push("# " + (context.title ?? "Persona run report"));
   lines.push("");
   lines.push("| | |");
   lines.push("|---|---|");

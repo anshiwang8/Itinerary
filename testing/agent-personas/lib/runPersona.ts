@@ -194,6 +194,8 @@ const NEEDS_A_PLAN = new Set<PersonaAction["kind"]>([
   "expectLiveTrackingDenied",
   "expectNoSignInWhilePlanning",
   "resumeInSecondContext",
+  "concurrentMutations",
+  "crossSessionAccessDenied",
 ]);
 
 /** Actions that additionally need the target stop to be reachable in time.
@@ -390,6 +392,12 @@ async function performAction(action: PersonaAction, ctx: ActionContext): Promise
 
     case "resumeInSecondContext":
       return doResumeInSecondContext(ctx);
+
+    case "concurrentMutations":
+      return doConcurrentMutations(action, ctx);
+
+    case "crossSessionAccessDenied":
+      return doCrossSessionAccessDenied(action, ctx);
 
     case "expectPlanFailsLoud": {
       await recorder.check(page, "plan_fails_loud", action.expect, async () => ({
@@ -2050,6 +2058,312 @@ async function doResumeInSecondContext(ctx: ActionContext): Promise<void> {
       actual: "could not open a second context: " + stripAnsi(String(error)).slice(0, 240),
       pass: false,
       evidence: [await recorder.screenshot(page, "second-context-failed")],
+    });
+  } finally {
+    if (second) await second.close().catch(() => undefined);
+  }
+}
+
+// ── break set: concurrency and cross-session access ─────────────────────────
+
+/**
+ * Fire several mutations AT ONCE against the plan on screen.
+ *
+ * The point is timing the browser cannot give sequentially: two removes of the
+ * same stop overlapping, three swaps launched before any answer returns, a
+ * swap and a remove racing. Each request carries the owner's OWN captured
+ * Authorization header, so this tests the store's CAS and the engines'
+ * concurrency, never ownership — every request is authorized. The plan is
+ * re-read afterwards and must be coherent; no request may 5xx.
+ */
+async function doConcurrentMutations(
+  action: Extract<PersonaAction, { kind: "concurrentMutations" }>,
+  ctx: ActionContext
+): Promise<void> {
+  const { page, recorder, probe, run } = ctx;
+  const before = probe.current();
+  const stops = before ? timedStops(before) : [];
+  if (!before || stops.length === 0) {
+    recorder.record({
+      step: action.step,
+      expected: action.expected,
+      actual: "no plan was on screen to fire concurrent mutations against",
+      pass: false,
+      skipped: true,
+    });
+    return;
+  }
+  const authorization = probe.authHeader();
+  const base = run.baseURL + "/api/itinerary/" + before.id;
+  const headers = {
+    "Content-Type": "application/json",
+    ...(authorization ? { Authorization: authorization } : {}),
+  };
+
+  // Build every request first, THEN fire them together, so they genuinely
+  // overlap on the wire rather than resolving one before the next is sent.
+  const requests = action.ops.map((op) => {
+    if (op.op === "mode") {
+      return page.request.post(base + "/mode", {
+        headers,
+        data: { travelMode: op.to },
+        timeout: 45_000,
+      });
+    }
+    const index = resolveIndex(op.target, stops.length);
+    if (op.op === "remove") {
+      return page.request.post(base + "/remove", {
+        headers,
+        data: { stopIndex: index },
+        timeout: 45_000,
+      });
+    }
+    return page.request.post(base + "/swap", {
+      headers,
+      data: { stopIndex: index, refinement: op.refinement },
+      timeout: 45_000,
+    });
+  });
+
+  const settled = await Promise.allSettled(requests);
+  const statuses = settled.map((result) =>
+    result.status === "fulfilled" ? result.value.status() : null
+  );
+  const serverErrors = statuses.filter(
+    (status): status is number => status !== null && status >= 500
+  );
+  const rejected = settled.filter((result) => result.status === "rejected").length;
+
+  // Re-read the plan the app's own way (a reload drives the resume GET), so the
+  // "is it coherent" verdict is read from the same source the browser trusts.
+  const reloadedAt = Date.now();
+  await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
+  await probe.waitForReadAfter(reloadedAt, 60_000);
+  await app.expandDesktopItinerary(page).catch(() => undefined);
+  const after = probe.current();
+  const afterStops = after ? timedStops(after) : [];
+  const raw = await app.findRawError(page);
+
+  const coherent =
+    Boolean(after) &&
+    afterStops.length > 0 &&
+    afterStops.every((stop) => Boolean(stop.id) && Boolean(stop.start_time));
+  const versionOk = Boolean(after && before && after.version >= before.version);
+
+  recorder.record({
+    step: action.step,
+    expected: action.expected,
+    actual:
+      action.ops.length +
+      " mutation(s) fired at once (" +
+      action.ops.map((op) => op.op).join(", ") +
+      "); response statuses [" +
+      statuses.map((status) => String(status)).join(", ") +
+      "]" +
+      (rejected > 0 ? "; " + rejected + " transport rejection(s)" : "") +
+      "; after reload " +
+      (before?.version ?? "?") +
+      " -> " +
+      (after?.version ?? "none") +
+      " with " +
+      afterStops.length +
+      " coherent stop(s) [" +
+      afterStops.map((stop) => stop.name ?? "?").join(" | ") +
+      "]" +
+      (raw.found ? "; RAW ERROR on screen: " + JSON.stringify(raw.sample) : ""),
+    pass: serverErrors.length === 0 && coherent && versionOk && !raw.found,
+    evidence: [await recorder.screenshot(page, action.step)],
+  });
+
+  if (serverErrors.length > 0) {
+    recorder.record({
+      step: action.step + "_no_server_error",
+      expected:
+        "concurrent conflicting mutations are serialised by the store's CAS (updateItinerary retries on a version clash) and never surface a 5xx",
+      actual: "at least one request answered a server error: [" + statuses.join(", ") + "]",
+      pass: false,
+    });
+  }
+}
+
+/**
+ * A stranger with the plan's id can read and change NOTHING (R1).
+ *
+ * A guest's plan is OWNED (guests are anonymous-signed-in), so by-id access
+ * from any other caller — unauthenticated, or a different guest — must return
+ * the SAME 404 a missing plan gets. The owner-readable check runs first and
+ * gates the mutation attempts: a plan that turns out to be UNOWNED (the
+ * anonymous-sign-in race, or Firebase unconfigured) is capability-by-id by
+ * design, so R1 is recorded NOT EXERCISED and, crucially, no unauthenticated
+ * mutation is fired against it (that would actually change it).
+ */
+async function doCrossSessionAccessDenied(
+  action: Extract<PersonaAction, { kind: "crossSessionAccessDenied" }>,
+  ctx: ActionContext
+): Promise<void> {
+  const { page, recorder, probe, run, browser } = ctx;
+  const plan = probe.current();
+  if (!plan) {
+    recorder.record({
+      step: action.step,
+      expected: action.expected,
+      actual: "no plan was on screen to probe cross-session access against",
+      pass: false,
+      skipped: true,
+    });
+    return;
+  }
+  const ownerAuth = probe.authHeader();
+  const base = run.baseURL + "/api/itinerary/" + plan.id;
+
+  const statusOf = async (
+    method: "get" | "post",
+    url: string,
+    headers: Record<string, string>,
+    data?: unknown
+  ): Promise<number | null> => {
+    try {
+      const response =
+        method === "get"
+          ? await page.request.get(url, { headers, timeout: 45_000 })
+          : await page.request.post(url, { headers, data, timeout: 45_000 });
+      return response.status();
+    } catch {
+      return null;
+    }
+  };
+
+  // The owner CAN still read it (proof the plan exists and the id is right).
+  const ownerStatus = ownerAuth
+    ? await statusOf("get", base, { Authorization: ownerAuth })
+    : null;
+
+  // The unauthenticated stranger's read.
+  const noAuthGet = await statusOf("get", base, {});
+
+  const owned = noAuthGet === 404;
+  const unowned = noAuthGet !== null && noAuthGet < 400;
+
+  if (unowned) {
+    // A no-auth read succeeded, so this plan is UNOWNED (capability-by-id).
+    // That is correct behaviour, not a defect — but it means R1's ownership
+    // gate was not exercised, and firing unauthenticated mutations now would
+    // genuinely alter the plan, so we stop here.
+    recorder.record({
+      step: action.step,
+      expected: action.expected,
+      actual:
+        "an unauthenticated GET of this plan returned HTTP " +
+        noAuthGet +
+        ", so it is UNOWNED (capability-by-id — the documented anonymous-sign-in race, or Firebase not configured on this deployment). R1's owner gate did not apply, and no unauthenticated mutation was fired against a plan that would have executed it. Owner read status: " +
+        String(ownerStatus) +
+        ".",
+      pass: false,
+      skipped: true,
+    });
+    return;
+  }
+
+  // Owned: the stranger is denied the read AND every mutation, all with the
+  // indistinguishable 404. Only fire the mutations now that a 404 read has
+  // confirmed nothing will actually change.
+  const noAuthSwap = owned
+    ? await statusOf("post", base + "/swap", {}, { stopIndex: 0, refinement: "somewhere else" })
+    : null;
+  const noAuthRemove = owned
+    ? await statusOf("post", base + "/remove", {}, { stopIndex: 0 })
+    : null;
+  const noAuthMode = owned
+    ? await statusOf("post", base + "/mode", {}, { travelMode: "driving" })
+    : null;
+  // A syntactically-valid but forged bearer token is not verifiable, so the
+  // server sees no caller and answers the same 404.
+  const bogusTokenGet = await statusOf("get", base, {
+    Authorization: "Bearer not-a-real-firebase-id-token",
+  });
+
+  const allDenied =
+    noAuthGet === 404 &&
+    (noAuthSwap === null || noAuthSwap === 404) &&
+    (noAuthRemove === null || noAuthRemove === 404) &&
+    (noAuthMode === null || noAuthMode === 404) &&
+    bogusTokenGet === 404;
+
+  recorder.record({
+    step: action.step,
+    expected: action.expected,
+    actual:
+      "owner read " +
+      String(ownerStatus) +
+      "; stranger by-id statuses — no-auth GET " +
+      String(noAuthGet) +
+      ", swap " +
+      String(noAuthSwap) +
+      ", remove " +
+      String(noAuthRemove) +
+      ", mode " +
+      String(noAuthMode) +
+      ", forged-token GET " +
+      String(bogusTokenGet) +
+      " (404 for all is the indistinguishable refusal R1 promises)",
+    pass: allDenied,
+    evidence: [await recorder.screenshot(page, action.step)],
+  });
+
+  if (!action.alsoSecondContext || !owned) return;
+
+  // The stronger proof: a genuinely separate anonymous guest (its own context,
+  // its own uid) still cannot reach the first guest's plan by id.
+  let second: BrowserContext | null = null;
+  try {
+    second = await browser.newContext({
+      baseURL: run.baseURL,
+      viewport: { width: 1440, height: 900 },
+      permissions: ["geolocation"],
+      geolocation: { latitude: 43.6511, longitude: -79.3839, accuracy: REPORTED_ACCURACY_M },
+      locale: "en-CA",
+      timezoneId: "America/Toronto",
+    });
+    const secondPage = await second.newPage();
+    const secondProbe = new ItineraryProbe();
+    secondProbe.attach(secondPage);
+    // Land once so this context signs in anonymously and captures its own
+    // (different) Authorization header.
+    await secondPage.goto("/", { waitUntil: "domcontentloaded" });
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && !secondProbe.authHeader()) {
+      await secondPage.waitForTimeout(500);
+    }
+    const strangerAuth = secondProbe.authHeader();
+    let strangerStatus: number | null = null;
+    try {
+      const response = await secondPage.request.get(base, {
+        headers: strangerAuth ? { Authorization: strangerAuth } : {},
+        timeout: 45_000,
+      });
+      strangerStatus = response.status();
+    } catch {
+      strangerStatus = null;
+    }
+    recorder.record({
+      step: action.step + "_second_guest",
+      expected:
+        "a second, genuinely separate anonymous guest (a different verified uid) is denied the first guest's plan by id with the same 404",
+      actual:
+        "the second guest " +
+        (strangerAuth ? "signed in anonymously and " : "did not capture an auth header but ") +
+        "read the plan by id: HTTP " +
+        String(strangerStatus),
+      pass: strangerStatus === 404,
+      evidence: [await recorder.screenshot(secondPage, action.step + "-second-guest")],
+    });
+  } catch (error) {
+    recorder.record({
+      step: action.step + "_second_guest",
+      expected: "a second anonymous guest is denied the plan by id",
+      actual: "could not open a second guest context: " + stripAnsi(String(error)).slice(0, 240),
+      pass: false,
+      skipped: true,
     });
   } finally {
     if (second) await second.close().catch(() => undefined);
