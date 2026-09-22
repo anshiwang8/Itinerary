@@ -25,6 +25,21 @@ const toronto: CityContext = {
   },
 };
 
+// The geocode distance-reordering fix's own realistic reproduction: the
+// agent-persona BREAK harness's `boundary-start-montreal-cross-region-far`
+// scenario, run live against the deployed app on 2026-09-22.
+const ottawa: CityContext = {
+  locality: "Ottawa",
+  administrativeArea: "Ontario",
+  country: "Canada",
+  countryCode: "CA",
+  location: { latitude: 45.4215, longitude: -75.6972 },
+  bounds: {
+    southwest: { latitude: 45.2, longitude: -75.95 },
+    northeast: { latitude: 45.55, longitude: -75.35 },
+  },
+};
+
 const cityRequest: GeocodeRequest = { query: "London", kind: "city" };
 const addressRequest: GeocodeRequest = {
   query: "100 Queen Street West",
@@ -439,6 +454,75 @@ const cases: Array<[string, () => void | Promise<void>]> = [
           error instanceof ApiError &&
           error.status === 422 &&
           error.code === "geocode_incomplete_address"
+      );
+    },
+  ],
+  [
+    "a same-country, over-distance address is refused for distance even when Google also flags it a partial match",
+    () => {
+      // The mirrored regression for the distance/region axis: the geocode
+      // distance-reordering fix. Same live shape the agent-persona BREAK
+      // harness found against the deployed app on 2026-09-22 (persona
+      // `boundary-start-montreal-cross-region-far`) — a real Montreal
+      // address, ~166 km from an Ottawa city context, was refused as
+      // `geocode_incomplete_address` ("looks like a street") instead of
+      // `geocode_far_from_city`. Same-country, so D12's country-check
+      // reorder does not help here; this is the same query-suffix
+      // `partial_match: true` artifact one axis over, on the distance/
+      // region checks that were never re-audited when D12 shipped. Before
+      // this fix, `incomplete` consumed the candidate first and `tooFar`
+      // was never even computed.
+      assert.throws(
+        () =>
+          resolveGeocodeResponse(
+            response([
+              result({
+                formatted: "1 Place Ville Marie, Montreal, QC, Canada",
+                types: ["street_address"],
+                locality: "Montreal",
+                admin: "Quebec",
+                lat: 45.5017,
+                lng: -73.5673,
+                partial: true,
+              }),
+            ]),
+            { query: "1 Place Ville Marie", kind: "address", cityContext: ottawa }
+          ),
+        (error: unknown) =>
+          error instanceof ApiError &&
+          error.status === 422 &&
+          error.code === "geocode_far_from_city"
+      );
+    },
+  ],
+  [
+    "a same-country, wrong-region address within the distance cap is refused for region even when Google also flags it a partial match",
+    () => {
+      // The wrong-region sibling of the test above: past SAME_METRO_METERS
+      // but still under the 75 km distance cap, so `tooFar` never fires and
+      // the region signal is the one that has to survive the completeness
+      // check now running after it.
+      const across = northOfCity(SAME_METRO_METERS + 200);
+      assert.throws(
+        () =>
+          resolveGeocodeResponse(
+            response([
+              result({
+                formatted: "1 Rue Principale, Elsewhere, QC, Canada",
+                types: ["street_address"],
+                locality: "Elsewhere",
+                admin: "Quebec",
+                lat: across.lat,
+                lng: across.lng,
+                partial: true,
+              }),
+            ]),
+            addressRequest
+          ),
+        (error: unknown) =>
+          error instanceof ApiError &&
+          error.status === 422 &&
+          error.code === "geocode_outside_city"
       );
     },
   ],

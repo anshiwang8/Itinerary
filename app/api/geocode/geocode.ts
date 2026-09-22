@@ -785,20 +785,23 @@ export function resolveGeocodeResponse(
       continue;
     }
 
-    const missingStreetNumber =
-      (candidate.resultTypes.includes("street_address") ||
-        candidate.resultTypes.includes("subpremise")) &&
-      !componentWithType(components, ["street_number"]);
-    if (partial || routeOnly || missingStreetNumber) {
-      incomplete = true;
-      continue;
-    }
-
-    // The start does NOT have to be in the selected city. It has to be
-    // near enough to it to be a day's start there — which is a DISTANCE,
-    // a fact code owns, not a locality-name equality. Name equality used
-    // to decide this, and it refused every commuter suburb while passing
-    // any same-named place the country check let through.
+    // THE DISTANCE/REGION CHECK RUNS NEXT, before completeness gets a
+    // chance to `continue` past it — the SAME reordering principle applied
+    // above for the country check, extended to this axis (the geocode
+    // distance-reordering fix, 2026-09-22, found by the agent-persona BREAK
+    // harness: a real Montreal address, ~166 km from an Ottawa city
+    // context, was refused as `geocode_incomplete_address` instead of
+    // `geocode_far_from_city`). The start does NOT have to be in the
+    // selected city; it has to be near enough to it to be a day's start
+    // there, a DISTANCE, a fact code owns. That fact was never reachable
+    // when the address ALSO tripped Google's `partial_match: true` (the
+    // same query-suffix artifact the country-check fix documents above),
+    // because the completeness check ran first and consumed the candidate
+    // via `incomplete` before distance/region were ever compared. Neither
+    // `regionMatches` nor `judgeStartProximity` reads `partial`,
+    // `routeOnly` or `missingStreetNumber` — `candidate.location` and
+    // `components` are populated identically regardless of completeness —
+    // so this reorder is safe on its own, exactly like the country move.
     const regionMatches =
       !context.administrativeArea ||
       matchesComponent(components, context.administrativeArea, [
@@ -818,6 +821,16 @@ export function resolveGeocodeResponse(
       wrongRegion = true;
       continue;
     }
+
+    const missingStreetNumber =
+      (candidate.resultTypes.includes("street_address") ||
+        candidate.resultTypes.includes("subpremise")) &&
+      !componentWithType(components, ["street_number"]);
+    if (partial || routeOnly || missingStreetNumber) {
+      incomplete = true;
+      continue;
+    }
+
     valid.push(result);
   }
 
