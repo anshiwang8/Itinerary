@@ -79,6 +79,20 @@ export function instantAtWallClock(
   return dt.toJSDate();
 }
 
+/** Whether two instants fall on the same calendar date in `timeZone` — the
+ *  zone-aware comparison a "is this resolved to today?" check needs (see
+ *  planner.ts's past-start-same-day floor). Built from `wallClockParts`
+ *  rather than any UTC/instant arithmetic, so it stays correct across a
+ *  midnight boundary: two instants a few minutes apart can fall on different
+ *  calendar dates in the zone, and two instants many hours apart can still
+ *  share one. */
+export function sameLocalDate(a: Date, b: Date, timeZone: string = DEFAULT_ZONE): boolean {
+  const zone = normalizeZone(timeZone);
+  const pa = wallClockParts(a, zone);
+  const pb = wallClockParts(b, zone);
+  return pa.year === pb.year && pa.month === pb.month && pa.day === pb.day;
+}
+
 export interface LocalDate {
   year: number;
   month: number;

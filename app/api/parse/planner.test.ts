@@ -9,6 +9,7 @@ import {
   MAX_ACTIVITY_MINUTES,
   MAX_PLAN_HORIZON_DAYS,
   MAX_QUESTIONS,
+  MAX_START_LAG_MINUTES,
   MIN_ACTIVITY_MINUTES,
   applyTimeFloors,
   buildPlannerMessages,
@@ -532,19 +533,22 @@ const cases: Array<[string, () => void]> = [
         "the stated end is never touched"
       );
 
-      // The repair is for windows, NOT bare past starts: with no end there is
-      // nothing to say the request is still live, so the lag rule still runs.
+      // A bare past start with no end and NO stated window is a DIFFERENT
+      // case from this test's own "1-6pm" scenario above (see the dedicated
+      // past-start-same-day floor tests below for the same-day carve-out);
+      // resolved to a genuinely WRONG day, it still hard-rejects exactly as
+      // before — that safety valve is untouched.
       expectProblem(
         goodPlan({
           timeIntent: {
-            startISO: "2026-07-27T13:00:00-04:00",
+            startISO: "2026-07-26T13:00:00-04:00", // yesterday 1pm
             endISO: null,
             kind: "explicit",
             label: "1pm",
           },
         }),
         /in the past/,
-        "a past start with no end"
+        "a past start with no end, resolved to the WRONG day"
       );
 
       // And a window whose END has also gone is over, not underway.
@@ -576,6 +580,193 @@ const cases: Array<[string, () => void]> = [
       );
     },
   ],
+
+  // ── the THIRD time floor: a bare start-only phrase already past today ──
+  [
+    "PAST-START-SAME-DAY FLOOR: 'dinner at 7pm' asked at 8:59pm is auto-rolled forward, not rejected",
+    () => {
+      // The owner's own live repro: a bare start-only phrase (no stated end,
+      // per the system prompt's own rule) whose resolved 7pm has since
+      // fallen more than MAX_START_LAG_MINUTES behind the clock, but is
+      // still TODAY's calendar date.
+      const askedAt = new Date("2026-07-27T20:59:00-04:00"); // Monday 8:59 PM, 119 min past 7pm
+      const raw = goodPlan({
+        timeIntent: {
+          startISO: "2026-07-27T19:00:00-04:00", // 7pm, same calendar day
+          endISO: null,
+          kind: "explicit",
+          label: "7pm",
+        },
+      });
+      assert.deepStrictEqual(
+        findPlanProblems(raw, askedAt, ZONE),
+        [],
+        "a same-day bare past start must not be flagged as a problem at all"
+      );
+      const result = validatePlan(raw, askedAt, ZONE);
+      assert.ok(result.ok);
+      if (!result.ok) return;
+      assert.strictEqual(
+        new Date(result.plan.timeIntent.startISO!).getTime(),
+        askedAt.getTime(),
+        "rolled forward to now, the exact same clamping target windowUnderway's own repair uses"
+      );
+      // the real request survives untouched — this is NOT fallbackPlan's
+      // generic single "things to do" stop
+      assert.strictEqual(result.plan.activities.length, 1);
+      assert.strictEqual(result.plan.activities[0].searchQuery, "italian restaurant");
+    },
+  ],
+  [
+    "PAST-START-SAME-DAY FLOOR regression: the SAME phrase asked BEFORE its stated time is completely unaffected",
+    () => {
+      const askedAt = new Date("2026-07-27T18:30:00-04:00"); // Monday 6:30 PM, before 7pm
+      const raw = goodPlan({
+        timeIntent: {
+          startISO: "2026-07-27T19:00:00-04:00",
+          endISO: null,
+          kind: "explicit",
+          label: "7pm",
+        },
+      });
+      assert.deepStrictEqual(findPlanProblems(raw, askedAt, ZONE), []);
+      const result = validatePlan(raw, askedAt, ZONE);
+      assert.ok(result.ok);
+      if (!result.ok) return;
+      assert.strictEqual(
+        result.plan.timeIntent.startISO,
+        "2026-07-27T19:00:00-04:00",
+        "a start that hasn't happened yet is untouched by either floor"
+      );
+    },
+  ],
+  [
+    "PAST-START-SAME-DAY FLOOR boundary: exactly MAX_START_LAG_MINUTES is ordinary slack, one minute past it rolls forward",
+    () => {
+      const askedAt = new Date("2026-07-27T20:00:00-04:00"); // Monday 8:00 PM
+
+      const boundaryISO = new Date(askedAt.getTime() - MAX_START_LAG_MINUTES * 60_000).toISOString();
+      const atBoundary = goodPlan({
+        timeIntent: { startISO: boundaryISO, endISO: null, kind: "explicit", label: "x" },
+      });
+      assert.deepStrictEqual(findPlanProblems(atBoundary, askedAt, ZONE), []);
+      const atBoundaryResult = validatePlan(atBoundary, askedAt, ZONE);
+      assert.ok(atBoundaryResult.ok);
+      if (atBoundaryResult.ok) {
+        assert.strictEqual(
+          atBoundaryResult.plan.timeIntent.startISO,
+          boundaryISO,
+          "exactly at the threshold is the existing ordinary-rounding-slack case, never rolled"
+        );
+      }
+
+      const pastBoundaryISO = new Date(
+        askedAt.getTime() - (MAX_START_LAG_MINUTES + 1) * 60_000
+      ).toISOString();
+      const pastBoundary = goodPlan({
+        timeIntent: { startISO: pastBoundaryISO, endISO: null, kind: "explicit", label: "x" },
+      });
+      assert.deepStrictEqual(findPlanProblems(pastBoundary, askedAt, ZONE), []);
+      const pastBoundaryResult = validatePlan(pastBoundary, askedAt, ZONE);
+      assert.ok(pastBoundaryResult.ok);
+      if (pastBoundaryResult.ok) {
+        assert.strictEqual(
+          new Date(pastBoundaryResult.plan.timeIntent.startISO!).getTime(),
+          askedAt.getTime(),
+          "one minute past the threshold, same day, rolls forward"
+        );
+      }
+    },
+  ],
+  [
+    "PAST-START-SAME-DAY FLOOR safety valve: a WRONG day, at the IDENTICAL lag magnitude, is still hard-rejected",
+    () => {
+      // Same 119-minute lag as the repro above, but resolved onto YESTERDAY's
+      // calendar date rather than today's — a genuinely different failure
+      // (a mis-resolved date) this floor must never silently paper over.
+      const askedAt = new Date("2026-07-27T20:59:00-04:00"); // Monday 8:59 PM
+      const raw = goodPlan({
+        timeIntent: {
+          startISO: "2026-07-26T19:00:00-04:00", // Sunday 7pm — the WRONG day
+          endISO: null,
+          kind: "explicit",
+          label: "7pm",
+        },
+      });
+      const problems = findPlanProblems(raw, askedAt, ZONE);
+      assert.ok(problems.length > 0, "a wrong-day bare start must still be rejected");
+      assert.ok(
+        problems.some((p) => /in the past/.test(p)),
+        `expected the existing lag rejection, got: ${problems.join(" | ")}`
+      );
+    },
+  ],
+  [
+    "PAST-START-SAME-DAY FLOOR does not collide with windowUnderway: '5 to 9pm' asked at 8pm still uses windowUnderway's OWN path unaffected",
+    () => {
+      const askedAt = new Date("2026-07-27T20:00:00-04:00"); // Monday 8:00 PM
+      const raw = goodPlan({
+        timeIntent: {
+          startISO: "2026-07-27T17:00:00-04:00", // 5pm, 3h behind askedAt
+          endISO: "2026-07-27T21:00:00-04:00", // 9pm, still ahead
+          kind: "explicit",
+          label: "5-9pm",
+        },
+      });
+      assert.deepStrictEqual(findPlanProblems(raw, askedAt, ZONE), []);
+      const result = validatePlan(raw, askedAt, ZONE);
+      assert.ok(result.ok);
+      if (!result.ok) return;
+      assert.strictEqual(
+        new Date(result.plan.timeIntent.startISO!).getTime(),
+        askedAt.getTime(),
+        "windowUnderway's own repair target — unchanged by the new floor's presence"
+      );
+      assert.strictEqual(
+        result.plan.timeIntent.endISO,
+        "2026-07-27T21:00:00-04:00",
+        "the stated end survives untouched, exactly as before this fix"
+      );
+    },
+  ],
+  [
+    "PAST-START-SAME-DAY FLOOR end to end: planWithModel never collapses a late bare-start prompt into fallbackPlan's generic stop",
+    async () => {
+      const askedAt = new Date("2026-07-27T20:59:00-04:00"); // Monday 8:59 PM
+      let calls = 0;
+      const outcome = await planWithModel([], askedAt, "dinner at 7pm", ZONE, async () => {
+        calls++;
+        return JSON.stringify(
+          goodPlan({
+            timeIntent: {
+              startISO: "2026-07-27T19:00:00-04:00",
+              endISO: null,
+              kind: "explicit",
+              label: "7pm",
+            },
+          })
+        );
+      });
+      assert.strictEqual(
+        calls,
+        1,
+        "the model's first answer is accepted outright — no correction retry is burned on a fact code can check itself"
+      );
+      assert.strictEqual(outcome.source, "model");
+      assert.strictEqual(outcome.plan.activities.length, 1);
+      assert.strictEqual(outcome.plan.activities[0].searchQuery, "italian restaurant");
+      assert.notStrictEqual(
+        outcome.plan.activities[0].searchQuery,
+        "things to do",
+        "must not be fallbackPlan's generic stop"
+      );
+      assert.strictEqual(
+        new Date(outcome.plan.timeIntent.startISO!).getTime(),
+        askedAt.getTime()
+      );
+    },
+  ],
+
   [
     "an unusual-but-possible hour is NOT refused — hours are decided on real data",
     () => {

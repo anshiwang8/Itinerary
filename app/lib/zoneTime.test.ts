@@ -9,6 +9,7 @@ import {
   instantAtWallClock,
   nextFullHourInZone,
   normalizeZone,
+  sameLocalDate,
   toZonedISO,
   wallClockParts,
 } from "./zoneTime";
@@ -88,6 +89,72 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(
         instantAtWallClock(now, "America/Toronto", 8, 0, 0, false).toISOString(),
         "2026-07-11T12:00:00.000Z"
+      );
+    },
+  ],
+  [
+    "sameLocalDate: compares calendar dates in the zone, not UTC or raw instant proximity",
+    () => {
+      // same Toronto calendar day, hours apart
+      assert.strictEqual(
+        sameLocalDate(
+          new Date("2026-07-27T15:00:00-04:00"),
+          new Date("2026-07-27T20:59:00-04:00"),
+          "America/Toronto"
+        ),
+        true
+      );
+      // different Toronto calendar day, even though less than 24h apart
+      assert.strictEqual(
+        sameLocalDate(
+          new Date("2026-07-27T00:30:00-04:00"),
+          new Date("2026-07-26T23:30:00-04:00"),
+          "America/Toronto"
+        ),
+        false
+      );
+      // the exact midnight-boundary trap this floor exists to avoid: two
+      // instants 40 minutes apart straddling local midnight are NOT the
+      // same calendar day, even though they are UTC-adjacent and far closer
+      // together than two instants safely inside one day
+      assert.strictEqual(
+        sameLocalDate(
+          new Date("2026-07-26T23:50:00-04:00"),
+          new Date("2026-07-27T00:10:00-04:00"),
+          "America/Toronto"
+        ),
+        false
+      );
+      // a naive UTC-date comparison would get this ONE WRONG: 2026-07-11
+      // 02:30 UTC is Toronto's July 10th evening (per the wallClockParts
+      // case above), same Toronto calendar day as July 10th 15:00 UTC
+      // (Toronto 11:00), even though the raw UTC dates differ
+      assert.strictEqual(
+        sameLocalDate(
+          new Date("2026-07-11T02:30:00Z"),
+          new Date("2026-07-10T15:00:00Z"),
+          "America/Toronto"
+        ),
+        true
+      );
+      // different IANA zone, same instants: Vancouver reads the second pair
+      // as its OWN same day too, since both fall on July 10th there also
+      assert.strictEqual(
+        sameLocalDate(
+          new Date("2026-07-11T02:30:00Z"),
+          new Date("2026-07-10T15:00:00Z"),
+          "America/Vancouver"
+        ),
+        true
+      );
+      // an unknown zone falls back to DEFAULT_ZONE rather than throwing
+      assert.strictEqual(
+        sameLocalDate(
+          new Date("2026-07-27T15:00:00-04:00"),
+          new Date("2026-07-27T20:00:00-04:00"),
+          "Not/AZone"
+        ),
+        true
       );
     },
   ],

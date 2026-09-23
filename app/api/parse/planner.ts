@@ -27,6 +27,7 @@ import {
   localDateAfterDays,
   nextFullHourInZone,
   normalizeZone,
+  sameLocalDate,
   toZonedISO,
   wallClockParts,
 } from "../../lib/zoneTime";
@@ -46,7 +47,9 @@ export const MAX_QUESTION_OPTIONS = 8;
  *  than genuinely planned three weeks out. */
 export const MAX_PLAN_HORIZON_DAYS = 14;
 /** A start slightly behind `now` is ordinary rounding ("tonight" resolved at
- *  10:59 for an 11 PM ask). An hour behind is a wrong date, not a rounding. */
+ *  10:59 for an 11 PM ask). An hour behind is a wrong date, not a rounding,
+ *  UNLESS the resolved date is still `now`'s own calendar date — see
+ *  `pastStartSameDay` below, the third time floor. */
 export const MAX_START_LAG_MINUTES = 60;
 const MAX_TEXT_CHARS = 240;
 
@@ -72,6 +75,51 @@ function windowUnderway(start: Date | null, end: Date | null, now: Date): boolea
     start.getTime() < now.getTime() &&
     end.getTime() - now.getTime() >= MIN_ACTIVITY_MINUTES * 60_000
   );
+}
+
+/**
+ * THE THIRD TIME FLOOR — a bare start-only phrase ("dinner at 7pm", no
+ * stated end) has NO repair path through `windowUnderway` above, which
+ * structurally requires an end: the system prompt's own TIME rule ("Set
+ * endISO ONLY when the user stated a FINISH or a DURATION... a phrase that
+ * says when to START... leaves endISO null") guarantees a start-only phrase
+ * never has one. So until this floor, a same-day resolution that had simply
+ * fallen behind `now` by more than MAX_START_LAG_MINUTES was
+ * indistinguishable from a genuinely wrong-day resolution: both failed the
+ * lag check identically, the model got no guidance specific to this mistake
+ * on the one correction retry, and a failed retry collapsed the whole
+ * request into fallbackPlan()'s single generic "things to do" stop —
+ * discarding a correctly-understood request over a fact code can check for
+ * itself. (Owner-reported live repro: "dinner at 7pm" asked well after 7pm.)
+ *
+ * THE DISTINCTION is the CALENDAR DATE, compared in the plan's own zone via
+ * `sameLocalDate` — never a naive UTC or raw-instant comparison, which can
+ * disagree with the user's actual day near midnight. Same calendar date as
+ * `now` means the model understood the day correctly and merely fell behind
+ * the clock while reasoning: a rounding problem exactly like
+ * `windowUnderway`'s "ordinary rounding slack" case one comment up, just
+ * past the threshold that case tolerates, so it is REPAIRED rather than
+ * rejected. A DIFFERENT calendar date is a wrong date outright — the exact
+ * case `MAX_START_LAG_MINUTES`'s own comment describes — and keeps the
+ * existing hard rejection unchanged: this floor must never paper over that
+ * genuinely different failure.
+ *
+ * Deliberately mirrors `windowUnderway`'s shape (a pure `(start, end, now)`
+ * predicate used both as an escape hatch in `findPlanProblems` and as the
+ * repair condition in `coercePlan`) rather than a new mechanism, and is
+ * mutually exclusive with it by construction (`end === null` here,
+ * `!!end` there), so the two floors can never collide or double-apply on
+ * the same plan.
+ */
+function pastStartSameDay(
+  start: Date | null,
+  end: Date | null,
+  now: Date,
+  zone: string
+): boolean {
+  if (!start || end) return false;
+  const lagMinutes = (now.getTime() - start.getTime()) / 60_000;
+  return lagMinutes > MAX_START_LAG_MINUTES && sameLocalDate(start, now, zone);
 }
 
 /** The canonical id for the WHEN question. Code guarantees one exists
@@ -484,10 +532,15 @@ export function countCoverageGaps(raw: unknown): number {
  * This function is called identically for the first pass and the answered
  * second pass (both go through the same `planWithModel` → this ladder), so
  * every check here, including the new one, guards both.
+ *
+ * `timeZone` defaults to `DEFAULT_ZONE` so every existing caller (this
+ * codebase's tests included) that predates the past-start-same-day floor
+ * keeps working unchanged — it is only consulted by that one new check.
  */
-export function findPlanProblems(raw: unknown, now: Date): string[] {
+export function findPlanProblems(raw: unknown, now: Date, timeZone: string = DEFAULT_ZONE): string[] {
   const problems: string[] = [];
   if (!isRecord(raw)) return ["the response is not a JSON object"];
+  const zone = normalizeZone(timeZone);
 
   // ── activities ──
   const activities = raw.activities;
@@ -550,9 +603,14 @@ export function findPlanProblems(raw: unknown, now: Date): string[] {
     if (start) {
       const lagMinutes = (now.getTime() - start.getTime()) / 60_000;
       const horizonDays = (start.getTime() - now.getTime()) / 86_400_000;
-      // a window entered part-way through is repaired in coercePlan, not
-      // rejected here — see windowUnderway
-      if (lagMinutes > MAX_START_LAG_MINUTES && !windowUnderway(start, end, now)) {
+      // a window entered part-way through, or a same-day bare start that
+      // simply fell behind the clock, is repaired in coercePlan, not
+      // rejected here — see windowUnderway and pastStartSameDay
+      if (
+        lagMinutes > MAX_START_LAG_MINUTES &&
+        !windowUnderway(start, end, now) &&
+        !pastStartSameDay(start, end, now, zone)
+      ) {
         problems.push(
           `\`timeIntent.startISO\` is ${Math.round(lagMinutes)} minutes in the past — resolve it against the current instant`
         );
@@ -699,8 +757,11 @@ function capQuestions(
  * from 0, clamp every duration, de-duplicate question ids, guarantee the
  * when-question, and cap the round at three. Assumes findPlanProblems()
  * returned empty — call validatePlan(), not this.
+ *
+ * `timeZone` defaults to `DEFAULT_ZONE`, same reasoning as findPlanProblems.
  */
-function coercePlan(raw: Record<string, unknown>, now: Date): PlanIntent {
+function coercePlan(raw: Record<string, unknown>, now: Date, timeZone: string = DEFAULT_ZONE): PlanIntent {
+  const zone = normalizeZone(timeZone);
   const rawActivities = raw.activities as Array<Record<string, unknown>>;
   // sort by the model's stated slot, then renumber dense from 0 — downstream
   // slot identity (selections, recovery rows, ordering) assumes 0..n-1
@@ -735,14 +796,16 @@ function coercePlan(raw: Record<string, unknown>, now: Date): PlanIntent {
   const rawTime = raw.timeIntent as Record<string, unknown>;
   const rawStartISO = typeof rawTime.startISO === "string" ? rawTime.startISO : null;
   const endISO = typeof rawTime.endISO === "string" ? rawTime.endISO : null;
+  const parsedRawStart = rawStartISO ? parseInstant(rawStartISO) : null;
+  const parsedEnd = endISO ? parseInstant(endISO) : null;
   // a window already underway starts NOW — its stated start has gone, its
-  // stated end has not, and code cannot plan into the past (see windowUnderway)
+  // stated end has not — and so does a bare start-only phrase that resolved
+  // to TODAY but has since fallen more than MAX_START_LAG_MINUTES behind:
+  // code cannot plan into the past (see windowUnderway and pastStartSameDay)
   const startISO =
-    windowUnderway(
-      rawStartISO ? parseInstant(rawStartISO) : null,
-      endISO ? parseInstant(endISO) : null,
-      now
-    ) && rawStartISO
+    rawStartISO &&
+    (windowUnderway(parsedRawStart, parsedEnd, now) ||
+      pastStartSameDay(parsedRawStart, parsedEnd, now, zone))
       ? new Date(now).toISOString()
       : rawStartISO;
   const timeIntent: TimeIntent = {
@@ -825,11 +888,16 @@ export type PlanValidation =
   | { ok: true; plan: PlanIntent }
   | { ok: false; problems: string[] };
 
-/** findPlanProblems + coercePlan — the one entry point callers should use. */
-export function validatePlan(raw: unknown, now: Date): PlanValidation {
-  const problems = findPlanProblems(raw, now);
+/** findPlanProblems + coercePlan — the one entry point callers should use.
+ *  `timeZone` defaults to `DEFAULT_ZONE`, same reasoning as findPlanProblems. */
+export function validatePlan(
+  raw: unknown,
+  now: Date,
+  timeZone: string = DEFAULT_ZONE
+): PlanValidation {
+  const problems = findPlanProblems(raw, now, timeZone);
   if (problems.length > 0) return { ok: false, problems };
-  return { ok: true, plan: coercePlan(raw as Record<string, unknown>, now) };
+  return { ok: true, plan: coercePlan(raw as Record<string, unknown>, now, timeZone) };
 }
 
 // ── the ladder ────────────────────────────────────────────────────────────
@@ -874,7 +942,7 @@ export async function planWithModel(
 ): Promise<PlannerOutcome> {
   const raw = await complete(messages);
   const parsed = parseJson(raw);
-  let attempt = validatePlan(parsed, now);
+  let attempt = validatePlan(parsed, now, timeZone);
   if (attempt.ok) {
     return { plan: attempt.plan, source: "model", problems: [], coverageGaps: countCoverageGaps(parsed) };
   }
@@ -887,7 +955,7 @@ export async function planWithModel(
   ];
   const retryRaw = await complete(retryMessages);
   const retryParsed = parseJson(retryRaw);
-  attempt = validatePlan(retryParsed, now);
+  attempt = validatePlan(retryParsed, now, timeZone);
   if (attempt.ok) {
     return {
       plan: attempt.plan,
