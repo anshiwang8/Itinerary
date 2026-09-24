@@ -1,298 +1,182 @@
-# Itinerary — a hyperlocal AI day-planner
+# Itinerary
 
-Describe a day in plain language and get **one executable plan** — real venues, real times,
-real transit — laid out on a map. Tap any stop to swap it ("somewhere cheaper", "an hour
-earlier", "stay 2 hours"), and when a transit leg is cancelled the plan **reroutes and heals
-itself**, keeping the stops you've already reached unchanged. You pick the **city and starting
-address**, so a plan in Vancouver runs on Vancouver's clock, not Toronto's.
+**Turn “what should we do?” into a day out.**
 
----
+Describe an outing in plain language. Itinerary finds venues, works out how to get between
+them, and puts your stops and times on a map you can adjust as you go.
 
-## Try it — live
+[Try Itinerary](https://itinerary-six.vercel.app/) · [Run locally](#local-development) ·
+[Deployment guide](DEPLOY.md) · [Report an issue](https://github.com/anshiwang8/Itinerary/issues)
 
-### 👉 **https://itinerary-six.vercel.app/**
+## Highlights
 
-Open it and use the full app immediately — real venues, real transit, every feature. No
-install, no keys, nothing to set up. **This is the main way to use it.**
+- **Plan from a sentence.** Ask for dinner and drinks, a quiet afternoon, or a few stops
+  within a time window. Answer a few follow-up questions when more detail would help.
+- **See the whole outing.** Venue cards, a map, and travel times bring the plan together,
+  with a compact itinerary panel on mobile.
+- **Make it fit your day.** Choose Transit or Drive, plan in your city's timezone, and
+  start from an address, the city centre, or your current location.
+- **Change your mind along the way.** Request a cheaper or closer venue, change an upcoming
+  stop's time or duration, or remove it. The remaining schedule adjusts where possible.
+- **Use it as a guest or make it personal.** Planning needs no account. Optional Google
+  sign-in adds saved preferences and account history.
 
----
+## Overview
 
-## How to use it
+Itinerary is a web app for planning outings within one city. It combines an AI planner
+with Google venue, weather, and routing data to turn an idea into a sequence of places to
+visit. If a location is ambiguous, a search comes back empty, or weather rules out an
+activity, the app offers ways to refine the plan.
 
-1. **Say where.** The **city** field is prefilled (Toronto) and the **starting address** is
-   optional — leave it blank and the plan starts from the city centre. Both are plain text
-   queries, geocoded when you plan.
+The AI proposes activities and venue choices; application code validates those choices,
+checks available opening hours and other provider facts, calculates travel, and builds the
+schedule. The app uses **Next.js, React, TypeScript, OpenRouter, Google Maps Platform,
+Firebase Auth, Cloud Firestore, and optional Upstash Redis storage**.
 
-2. **Plan a day.** Type something like **`dinner and drinks`** and hit *Plan it*. You get a
-   plan on the map — venues, times, and the transit/walk leg between stops. The plan is live
-   the moment it appears. (The **weather chip**, top-left, shows the forecast for your city.)
+Created by [Anshi Wang](https://github.com/anshiwang8).
 
-3. **Answer a question or two.** A thin prompt ("not sure what to do") gets 1–3 quick
-   questions — what kind of thing, when, what vibe — with one-tap chips and a *Skip — just
-   plan it* escape. A prompt that already says enough is never interrupted.
+## Try it
 
-   Calendar language is resolved in the plan city's timezone. Supported qualifiers are
-   `today`, `tomorrow`, bare weekdays, `next <weekday>`, ISO dates such as `2026-08-15`,
-   and named dates such as `August 15, 2026`, with or without a clock. A bare weekday means
-   the nearest future occurrence: today when its requested clock is still ahead, otherwise
-   the following week. `next Friday` is also the nearest future Friday, but when today is
-   Friday it means the Friday one week later. Nonexistent DST wall times and fall-back
-   overlaps have deterministic code-side policies (reject the gap; choose the earlier
-   overlap). A current audit follow-up covers malformed raw date/clock syntax on the new
-   planner path; see **Known limitations**.
+Open [the web app](https://itinerary-six.vercel.app/). No installation or API keys are
+needed to use the hosted version.
 
-   The planner treats a stated stop count as authoritative, and downstream selection keeps
-   repeated slots distinct. A current audit follow-up is restoring a deterministic
-   raw-prompt count check so a malformed model response cannot silently ignore that count.
+1. **Choose your starting point.** Enter a city and an optional starting address. Leave
+   the address blank to start from the city centre, or choose **Use current location**
+   and allow the browser's location request.
+2. **Describe your outing.** Select **Transit** or **Drive**, then try:
 
-4. **Swap a stop.** Click a stop card in the top strip to open its inline prompt, then try:
-   - `somewhere cheaper` — swaps in a cheaper venue and holds the time slot (watch `$$$` → `$$`).
-   - `an hour earlier` — moves the stop and reflows everything after it.
-   - `stay 2 hours` — changes how long you're there; later stops shift to fit.
-   - `find a closer one` — ranks by real distance from where you're coming from, and says so
-     honestly if nothing is actually closer.
+   > Dinner and drinks tomorrow at 7pm, somewhere relaxed and affordable.
 
-5. **Watch it reroute and heal.** In local development—or a demo build made with
-   `NEXT_PUBLIC_ENABLE_DEV_CONTROLS=true`—open the **Dev** panel (bottom-right corner):
-   - Pick a **leg** in the dropdown and hit **cancel** → that transit leg is "cancelled" and
-     the app replans: earlier stops stay exactly as they were, only the affected stop and what
-     follows get new venues/times (old time struck through → new time settles in green).
-   - Optional: set the **time** control to a moment during your first stop → it turns
-     chartreuse ("now") and locks, and you'll see a reroute keep it untouched while replanning
-     only the tail.
+3. **Build the plan.** Select **Plan it**, answer any follow-up questions, and explore
+   the venue cards and routes on the map.
+4. **Adjust an upcoming stop.** Open its details and try an edit:
 
----
+| Request | What it changes |
+| --- | --- |
+| `somewhere cheaper` | Looks for a cheaper venue of the same kind; travel changes may adjust its time. |
+| `find a closer one` | Looks for a venue closer to the preceding stop or starting point. |
+| `an hour earlier` | Moves the stop and reschedules later stops where possible. |
+| `stay 2 hours` | Changes the visit duration and adjusts what follows. |
 
-## What it actually does
+You can also remove an upcoming stop or switch travel mode. Edits that cannot fit receive
+an explanation; stops already underway or completed stay protected. Enable **Live location**
+to show your position on the map while you travel. Location access is optional.
 
-- **One executable plan, not a list of options.** Real venues with real opening hours, real
-  travel legs between them (transit or walk, with a departure buffer on transit), and a
-  schedule that adds up.
-- **Multi-city, with real per-city timezones.** The plan's timezone is resolved from the
-  geocoded starting point, and *every* time — scheduling, the hours filter, every label on
-  screen — renders in that zone. A Vancouver plan shows Vancouver's wall clock to a viewer in
-  Toronto, and vice versa.
-- **Distance-aware picks.** Each candidate carries a code-computed straight-line distance from
-  your starting point, so selection treats distance as a real cost instead of picking a
-  slightly-better-rated venue across the region. "Closer" swaps are ranked in code, never by
-  the model.
-- **Self-healing.** A cancelled transit leg replans only what's downstream — stops at or
-  before the current moment, and anything already underway, never change.
-- **It tells you when it can't.** Impossible ("brunch at 3am"), contradictory ("vegan
-  steakhouse"), or unparseable input gets a specific reason and a suggested fix — never an
-  empty map. When a hard constraint has no real match, it says so instead of suggesting a
-  venue and telling you to "check with them".
-- **When something blocks a stop, you get a real choice**, not a dead end. One panel, three
-  situations:
-  - **A city or starting address has multiple matches** → choose the formatted address before
-    any venue search runs; the planner never silently takes the provider's first result.
-  - **A category came back empty** ("the only ramen nearby is permanently closed") → the
-    honest reason, plus an offer to look further out or put something else in that slot.
-  - **Weather blocks it** ("rain likely at 3pm") → *Still want it* skips only the weather
-    check (hours, rating, price, and closures all still apply), *Something else* swaps that
-    one stop.
-- **A walk is only offered when a walk makes sense.** A short or genuinely-faster walk beats
-  transit; a 75-minute walk is never presented over a comparable transit ride — unless transit
-  there is effectively broken (walking at least twice as fast), which is exactly when you'd
-  want to know. Hops under 250 m straight-line skip the transit request entirely. If Routes
-  cannot price either mode, the planner shows an explicitly uncertain estimate (1.35× detour
-  allowance plus a 20%, minimum-five-minute margin), draws no invented route line, and labels
-  every real walking route with the required caution.
-- **The map fails soft.** If Maps JavaScript cannot load or authenticate, the itinerary and
-  deterministic fallback pins remain usable, with bounded retry/remount recovery; mock E2E
-  proves that path without a real browser key.
+## Current boundaries
 
-### How the pipeline is divided
+- Plans cover **one city and one outing**; multi-city trips and manual stop reordering
+  are outside the current scope.
+- Venue hours, prices, and route information depend on provider coverage. A venue with
+  missing hours or price data can remain a candidate; the app does not book reservations
+  or check table availability. Movie durations are estimates, without showtime integration.
+- **Transit-disruption rerouting is a development demo.** The engine replans the affected
+  portion of a trip, but automatic disruption monitoring is not connected. Local development
+  exposes a simulator; production hides the simulator controls unless explicitly enabled.
 
-City/address geocode runs first, establishing the plan's IANA timezone. The LLM planner then
-proposes the activity shape, questions, rough durations, and resolved intent. Code fetches
-weather and Places data, applies objective filters, validates the model's venue IDs and hard
-constraint evidence, computes Routes legs, and builds/checks the schedule against any stated
-window. Model output is always validated; a correction is validated again before a
-deterministic fallback. Planner, selection, and swap use separate ordered OpenRouter model chains;
-only 429 and provider-side 5xx failures advance a chain.
+## Local development
 
-**Places request/cost boundary.** A normal named category uses one complete Text Search because
-hours, status, rating, price, card copy, and structured constraint evidence are all consumed
-before a safe choice exists. Late-night mode is bounded at two variants per distinct category;
-the general pool uses five queries; public input is capped at eight categories, so one search
-attempt makes at most 16 provider calls. Identical query+type work is shared only within that
-attempt (for example, overlapping `bar` / `late night bar` work went from four calls to two).
-Full Places payloads are deliberately not cached across attempts: provider policy restricts
-storage of Places content, and opening hours must remain fresh. Splitting discovery from
-selected-place enrichment would add a Details request without a fact-safe cheaper shortlist.
+To work on the app or run your own copy, install **Node.js 22.12.0 or newer**, npm, and Git.
+Real planning uses external services and requires your own API credentials.
 
----
-
-## Run it locally (optional — requires API keys)
-
-For real venues on your own machine. This calls paid/rate-limited APIs, so it needs keys.
-
-**Prerequisites:** Node.js **22.12.0+** (the repository's `engines.node` minimum) and npm. The current
-application uses React / React DOM 19.2.8.
+### 1. Get the code
 
 ```bash
-git clone <your-repo-url>
-cd <repo-name>
+git clone https://github.com/anshiwang8/Itinerary.git
+cd Itinerary
 npm ci
 ```
 
-**Add the required service keys.** Copy the template and fill in these six values:
+### 2. Configure the services
+
+Copy [`.env.example`](.env.example) to `.env` in the repository root. On macOS/Linux or
+Git Bash, run `cp .env.example .env`; in PowerShell, run `Copy-Item .env.example .env`.
+Fill in these six values:
+
+| Variable | Service |
+| --- | --- |
+| `OPENROUTER_API_KEY` | AI planning, venue selection, and edit interpretation |
+| `GOOGLE_PLACES_API_KEY` | Places API (New) |
+| `GOOGLE_GEOCODING_API_KEY` | Geocoding API |
+| `GOOGLE_ROUTES_API_KEY` | Routes API |
+| `GOOGLE_WEATHER_API_KEY` | Weather API |
+| `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` | Maps JavaScript API |
+
+Create an [OpenRouter key](https://openrouter.ai/keys) and enable the listed Google APIs
+in [Google Cloud Console](https://console.cloud.google.com/), with billing configured as
+required. Live planning consumes API quota and may incur charges.
+
+Use a separately API-restricted server key for each Google service. Restrict the
+browser-visible Maps key to your site's referrers, including `http://localhost:3000/*`
+for development. Keep server credentials in the gitignored `.env` file.
+
+### 3. Start the app
 
 ```bash
-cp .env.example .env
+npm run dev
 ```
+
+Open [localhost:3000](http://localhost:3000).
+
+### Optional accounts and persistent storage
+
+- **Google sign-in:** configure Firebase Authentication for Google and anonymous users,
+  then fill in all six `NEXT_PUBLIC_FIREBASE_*` values in your `.env`. Verified
+  ownership, active-plan resume, history, and personalization also require
+  `FIREBASE_ADMIN_PROJECT_ID`, `FIREBASE_ADMIN_CLIENT_EMAIL`, and
+  `FIREBASE_ADMIN_PRIVATE_KEY` from the same project. Enable Cloud Firestore for account
+  history and preferences. Client configuration alone does not enable those server
+  features. Account history and preferences require a non-anonymous sign-in.
+- **Live-plan storage:** without Redis configuration, local plans use memory and disappear
+  when the server restarts. Set `KV_REST_API_URL` and `KV_REST_API_TOKEN` for persistent
+  Redis storage; `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are accepted
+  aliases. Redis is required on Vercel; Firestore handles account history and preferences
+  separately.
+
+See [DEPLOY.md](DEPLOY.md) for Vercel setup, Firebase authorized domains, environment
+variables, key restrictions, and deployment limitations.
+
+### Run the checks
+
+Install the browser used by the end-to-end tests once:
 
 ```bash
-# .env
-OPENROUTER_API_KEY=...              # LLM: parse prompt, pick venues, interpret swaps
-GOOGLE_PLACES_API_KEY=...           # venue search (Places API — New)
-GOOGLE_GEOCODING_API_KEY=...        # city/address resolution (Geocoding API)
-GOOGLE_ROUTES_API_KEY=...           # transit / walk legs (Routes API)
-GOOGLE_WEATHER_API_KEY=...          # hourly forecast (Weather API)
-NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=... # browser map tiles (Maps JavaScript API)
+npx playwright install chromium
+npm run check
 ```
 
-Where to get them:
+`npm run check` runs lint, TypeScript checks, unit tests, a production build, and mock
+Playwright tests. For a focused run:
 
-- **OpenRouter** — key at <https://openrouter.ai/keys>. Planner and selection default to
-  `meta-llama/llama-3.3-70b-instruct`; separate ordered fallback chains are defined in
-  `app/api/_shared/models.ts` and can be overridden per call type in deployment.
-- **The five Google keys** — [Google Cloud Console](https://console.cloud.google.com) →
-  enable **Places API (New)**, **Geocoding API**, **Routes API**, **Weather API**, and
-  **Maps JavaScript API**, then create keys under *APIs & Services → Credentials*. The code
-  reads a dedicated `GOOGLE_GEOCODING_API_KEY`; in production, use a separately
-  API-restricted server key for each Google service.
-- **Maps key referrer restriction** — the Maps key is a browser-visible service credential.
-  Restrict it (Cloud Console → the key → *Application restrictions → Websites*) to
-  `http://localhost:3000/*` for local use.
+| Command | Purpose |
+| --- | --- |
+| `npm run lint` | Check code style and lint rules. |
+| `npm run typecheck` | Check TypeScript types. |
+| `npm run test:unit` | Run all unit suites under `app/`. |
+| `npm run test:e2e` | Run mock browser tests on port 3100. |
+| `npm run test:e2e:headed` | Run the same tests in a visible browser. |
+| `npm run build` | Create a production build. |
+| `npm run start` | Serve that production build. |
 
-**Optional Google sign-in.** Sign-in is not required and never gates the app. To
-enable it, add all six Firebase Web config values below; partial or missing configuration
-degrades to “sign-in unavailable” while guest planning keeps working. These are client config
-by design, not server secrets:
+Mock browser tests replace external data sources with fixtures while exercising the real
+filtering, scheduling, and edit logic. They do not consume Google or OpenRouter quota.
+See the [E2E guide](e2e/README.md) for fixtures and live tests; live tests use real APIs.
 
-```bash
-NEXT_PUBLIC_FIREBASE_API_KEY=...
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=...
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=...
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=...
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=...
-NEXT_PUBLIC_FIREBASE_APP_ID=...
-```
+## Feedback and contributing
 
-For server token verification, also set `FIREBASE_ADMIN_PROJECT_ID`,
-`FIREBASE_ADMIN_CLIENT_EMAIL`, and `FIREBASE_ADMIN_PRIVATE_KEY` from the same Firebase
-project's service account (see `.env.example` and `DEPLOY.md`). These are **server-side
-secrets**, never browser config. Without all three, client sign-in can appear to work while
-the server treats callers as unauthenticated: ownership, resume, history, and personalization
-are unavailable, without a user-facing configuration error.
+Found a bug or have an idea? [Open an issue](https://github.com/anshiwang8/Itinerary/issues).
+For planning problems, include the prompt, city, expected result, and what happened.
 
-Server token verification, itinerary ownership, active-plan resume, account history/archive,
-and profile-based personalization are implemented. Guests can receive an anonymous Firebase
-identity; account history and personalization require a non-anonymous identity. `/end`, the
-by-id `GET`, and the by-id mutations `/swap`, `/remove` and `/mode` verify the caller and
-enforce ownership: an owned plan is readable/mutable only by its verified owner, and every
-other caller gets a 404 indistinguishable from a missing plan (unowned/legacy plans,
-including mock e2e, stay accessible to anyone with the id). One route is still open: `/reroute`
-does **no caller verification** and accepts the itinerary ID alone; it is dev-only (behind
-`SHOW_DEV_CONTROLS`) and unreachable from the production UI. The broader authorization/sharing
-contract for legacy and shared plans remains an open product decision.
+Code fixes, documentation improvements, and reproducible bug reports are welcome. Before
+changing behavior, read [CLAUDE.md](CLAUDE.md), the canonical architecture and contributor
+rules. Run `npm run check` for changes and record them in [DEVLOG.md](DEVLOG.md).
 
-`.env` is gitignored, so your keys are never committed.
+Useful starting points:
 
-**Run:**
+- [Deployment and configuration](DEPLOY.md)
+- [Architecture and project rules](CLAUDE.md)
+- [Browser tests and fixtures](e2e/README.md)
+- [Development history](DEVLOG.md)
 
-```bash
-npm run dev      # → http://localhost:3000
-```
+## License
 
-### Other environment variables the code reads
-
-Not needed for local dev — listed so the full set is in one place.
-
-| Variable | Read by | Purpose |
-| --- | --- | --- |
-| `KV_REST_API_URL` + `KV_REST_API_TOKEN` | `app/api/itinerary/store.ts` | Redis REST endpoint (Vercel KV / Upstash). **Set → Redis is the single source of truth for stored plans; unset → an in-memory Map.** Required in production: on serverless each request can land on a different instance, so an in-memory plan would 404 between the POST that stores it and the GET that reads it. |
-| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | `app/api/itinerary/store.ts` | Accepted as aliases for the pair above. |
-| `VERCEL` | `app/api/itinerary/store.ts` | Set by the platform. On Vercel **without** KV configured, the store refuses loudly instead of serving silent 404s. |
-| `NEXT_PUBLIC_ENABLE_DEV_CONTROLS` | `app/page.tsx` | Optional build-time flag. Production hides the time/disruption simulator unless this is exactly `true`; local development keeps it available. Rebuild after changing it. |
-| `OPENROUTER_MODELS_PLANNER` / `OPENROUTER_MODELS_SELECT` / `OPENROUTER_MODELS_SWAP` | `app/api/_shared/models.ts` | Optional comma-separated per-call model-chain overrides. Blank/unset uses the validated in-code defaults. |
-| `NEXT_PUBLIC_FIREBASE_*` (six values above) | `app/lib/firebase.ts` | Optional public Web configuration for Google sign-in and anonymous guest identity. Set all six together; server identity features also require the Admin credentials described above. |
-| `E2E_MOCK` | `app/api/_mock/fixtures.ts` | `=1` swaps the pipeline's **data sources** (OpenRouter, Places, Routes, Weather, geocode) for deterministic fixtures. Playwright sets it on its own server; never set it for real use. |
-| `TZ` | Runtime compatibility / logs | Optional. Scheduling, hours checks, status math, and display are per-plan zone-aware and do not depend on the server wall clock. |
-
-Full deployment instructions (Vercel + Upstash, the env table, the Maps referrer
-restriction) live in **`DEPLOY.md`**.
-
----
-
-## Tests (optional)
-
-Run from `itinerary/`.
-
-**End-to-end (Playwright):**
-
-```bash
-npm run test:e2e          # mock mode (default) — Playwright's own server on :3100
-npm run test:e2e:headed   # same, with a visible browser
-npm run test:e2e:live     # run against a live dev server on :3000 (start `npm run dev` first)
-```
-
-Mock mode burns no API quota and never touches a server on :3000. The objective filter,
-scheduling, floor guards, and both the swap and reroute engines run **for real** over fixture
-data — only the data sources are swapped. Non-local browser traffic is aborted, and the
-fixture seams prevent OpenRouter/Google provider calls. `e2e/README.md` documents every fixture, including
-which venue names and prompts trigger which scenario.
-
-**Project checks:**
-
-```bash
-npm run lint
-npm run typecheck
-npm run test:unit       # aggregate runner: every app/**/*.test.ts suite
-npm run build
-npm run check           # lint → typecheck → unit → build → mock E2E
-```
-
-Run an individual unit suite directly with `tsx` when investigating a focused behavior:
-
-```bash
-npx tsx app/api/itinerary/swap.test.ts        # per-stop swap engine
-npx tsx app/api/itinerary/reroute.test.ts     # reroute / self-healing
-npx tsx app/lib/planGuards.test.ts            # bad-input handling
-npx tsx app/lib/zoneTime.test.ts              # per-plan timezone math
-```
-
-The aggregate runner discovers every `*.test.ts` file under `app/`.
-
----
-
-## Known limitations
-
-Deliberate scope choices, not bugs. `CLAUDE.md` keeps the authoritative list ("Open gaps");
-this is the short version.
-
-- **One city per plan.** City and starting address are plain query inputs — there's no
-  geolocation, and a prompt that spans two cities is planned in the city you entered.
-- **No reservations or real-time availability.** "Is it open" is opening-hours data only;
-  there's no OpenTable/Resy check behind it.
-- **Transit disruptions are simulated.** The reroute engine is real; the trigger is a
-  development control because GTFS-realtime isn't wired up yet. Production hides that
-  control by default; set `NEXT_PUBLIC_ENABLE_DEV_CONTROLS=true` at build time only for
-  an intentional demo deployment. There's no rideshare fallback.
-- **Movie runtimes are a placeholder** (a 2-hour assumption) — real showtimes need an
-  external source.
-- **Authentication is login-only.** Guest and signed-in users currently have identical
-  itinerary access. Server-side ownership, migration, sharing, deletion, and history/archive
-  are unresolved Stage 1B product/security work.
-- **Planner raw-fact guards need restoration.** The new planner path does not yet
-  deterministically cross-check malformed raw date/clock syntax or a stated count against an
-  otherwise-valid model response. The audit tracker records these as `H8/M3-F1` and `M1-F1`.
-- **The source limiter is per process.** A public serverless deployment still needs a shared
-  edge/Redis/platform limiter plus OpenRouter/Google quota caps and billing alerts; see `DEPLOY.md`.
-- **Stops can't be reordered** by hand, and pick reasons are written before the schedule is
-  computed, so a reason never refers to a stop's final time.
-- **The dev `?now=` time picker reads your browser's zone**, so simulating time on a
-  non-local-zone plan is offset. It's a dev control only — the plan's own status logic is
-  correct regardless.
+No license file is currently included in this repository.
