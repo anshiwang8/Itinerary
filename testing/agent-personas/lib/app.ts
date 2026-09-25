@@ -288,8 +288,7 @@ export async function planFromLanding(
   }
   await page.locator(SEL.planGo).click();
 
-  const clarified = await skipClarifyIfShown(page, timeoutMs);
-  const recovered = await resolveRecoveryIfShown(page, timeoutMs);
+  const { clarified, recovered } = await answerBuildQuestions(page, timeoutMs);
 
   const outcome = page
     .locator(
@@ -353,28 +352,77 @@ async function fillLandingForm(page: Page, request: PlanRequest): Promise<void> 
   }
 }
 
-/** A thin prompt may raise the clarifying round first. Skipping it runs the
- *  default pipeline. Targeted by accessible NAME, because the recovery
- *  panel's "Plan without it" shares the same class and clicking that would
- *  silently drop a stop. */
-export async function skipClarifyIfShown(page: Page, timeoutMs: number): Promise<boolean> {
-  const anything = page
-    .locator(
-      ".clarify:visible, " + SEL.dock + ":visible, " + SEL.strip + ":visible, " +
-        SEL.sheet + ":visible, " + SEL.landingError + ", " + SEL.stageError
+/**
+ * The most answer-then-look-again rounds `answerBuildQuestions` will take.
+ * A real build can legitimately ask more than once (a city geocode choice, an
+ * address geocode choice, the clarifying round, then an empty-category
+ * recovery), so this is set above that worst case but stays a bound: a panel
+ * that will not go away must end in the caller's own timeout, never a loop.
+ */
+const MAX_ANSWER_ROUNDS = 6;
+
+/**
+ * Answer whatever the app asks while it builds a plan, until it stops asking.
+ *
+ * WHY THIS IS A LOOP (2026-09-25). This used to be two single-shot calls in a
+ * fixed order, clarifying round first, then recovery panel. That order is not
+ * the app's: the geocode-choice recovery panel RESUMES INTO A FRESH PLANNER
+ * PASS (`page.tsx`'s `chooseGeocodeCandidate` -> `planFrom`), and a fresh
+ * first pass raises its own clarifying round. So "address is ambiguous, pick
+ * a candidate, then a thin prompt asks what kind of dinner" left the second
+ * question open with nobody left to skip it, and the run reported "timed out
+ * waiting for a plan or an error" while screenshotting the app politely
+ * waiting for an answer. Live-reproduced in five persona reports (all four
+ * `second-city-timezone` runs, plus `r1-multicity-plan-stranger-denied` in
+ * the BREAK run, which recorded the recovery step verbatim). Mock e2e never
+ * showed it because the mock geocode is never ambiguous.
+ *
+ * Each round waits for the first of: the clarifying round's Skip button, a
+ * recovery panel, or a settled outcome (itinerary or fail-loud error). It
+ * answers the first two and stops at the third. The clarifying round is
+ * targeted by accessible NAME, because the recovery panel's "Plan without it"
+ * shares the same class and clicking that would silently drop a stop.
+ */
+export async function answerBuildQuestions(
+  page: Page,
+  timeoutMs: number
+): Promise<{ clarified: boolean; recovered: string | null }> {
+  const skip = page.getByRole("button", { name: SEL.clarifySkip });
+  const somethingToAnswerOrSettled = skip
+    .or(
+      page.locator(
+        SEL.recoveryPanel + ":visible, " + SEL.dock + ":visible, " + SEL.strip +
+          ":visible, " + SEL.sheet + ":visible, " + SEL.landingError + ", " + SEL.stageError
+      )
     )
     .first();
-  try {
-    await anything.waitFor({ state: "visible", timeout: timeoutMs });
-  } catch {
-    return false;
+
+  let clarified = false;
+  const recovered: string[] = [];
+  for (let round = 0; round < MAX_ANSWER_ROUNDS; round++) {
+    try {
+      await somethingToAnswerOrSettled.waitFor({ state: "visible", timeout: timeoutMs });
+    } catch {
+      break;
+    }
+    if (await skip.isVisible().catch(() => false)) {
+      await skip.click();
+      clarified = true;
+      // The round unmounts on the click. Wait for that, so the next pass
+      // cannot re-match the same button mid-teardown and click it twice.
+      await skip.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => undefined);
+      continue;
+    }
+    const answered = await resolveRecoveryIfShown(page, timeoutMs);
+    // No recovery panel either: a plan or an error is showing, so the app has
+    // nothing left to ask.
+    if (answered === null) break;
+    recovered.push(answered);
   }
-  const skip = page.getByRole("button", { name: SEL.clarifySkip });
-  if (await skip.isVisible().catch(() => false)) {
-    await skip.click();
-    return true;
-  }
-  return false;
+  return {
+    clarified,
+    recovered: recovered.length > 0 ? recovered.join("; then ") : null,
+  };
 }
 
 /**
@@ -441,7 +489,7 @@ export async function resolveRecoveryIfShown(
   // and is tried last, only as the fallback when nothing above it is
   // offered or none of it resolves the panel. See the order-fix note above.
   const attempts: Array<{ locator: string; label: string }> = [
-    { locator: SEL.recoveryGeocode, label: "chose the first offered address candidate" },
+    { locator: SEL.recoveryGeocode, label: "chose the first offered location candidate (city or address)" },
     { locator: SEL.recoveryWiden, label: "widened the search for the empty category" },
     { locator: SEL.recoveryOverride, label: 'chose "Still want it"' },
     { locator: SEL.recoverySkip, label: 'chose "Plan without it"' },
