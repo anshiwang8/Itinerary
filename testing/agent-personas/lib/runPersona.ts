@@ -541,7 +541,19 @@ async function doPlan(
       actual:
         stops.length +
         " timed stop(s): " +
-        stops.map((stop) => (stop.name ?? "?") + " [" + (stop.category ?? "?") + "]").join(" | "),
+        stops.map((stop) => (stop.name ?? "?") + " [" + (stop.category ?? "?") + "]").join(" | ") +
+        // A shortfall is only readable next to its CAUSE. A "right now" prompt
+        // resolves to the wall clock of the run, so an activity can be
+        // legitimately closed at that hour and the app's own recovery panel
+        // then asks whether to plan without it. Without the answer given and
+        // the hour it happened at, "1 stop where 2 were expected" is
+        // indistinguishable from a real planning shortfall (transit-rider was
+        // recorded as one in three full runs, all at 10:45, 11:30 and 01:46
+        // local, and none at 17:05).
+        (stops.length < expectation.minStops
+          ? (outcome.recovered ? " | while planning, the run answered: " + outcome.recovered : "") +
+            (stops[0]?.start_time ? " | first stop starts " + stops[0].start_time : "")
+          : ""),
       pass: stops.length >= expectation.minStops,
       evidence: [shot],
     });
