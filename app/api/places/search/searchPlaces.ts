@@ -2,6 +2,7 @@
 // the reroute engine (which re-searches only the affected categories).
 import { DropEntry, ParsedPrompt, Place } from "./filter";
 import { isParkLike } from "../../../lib/categoryTraits";
+import { wallClockParts } from "../../../lib/zoneTime";
 import {
   badRequest,
   finiteNumber,
@@ -56,6 +57,28 @@ export const SEARCH_FIELD_GROUPS = {
 
 export const SEARCH_FIELD_MASK_FIELDS = Object.values(SEARCH_FIELD_GROUPS).flat();
 export const SEARCH_FIELD_MASK = SEARCH_FIELD_MASK_FIELDS.join(",");
+
+/**
+ * When the search broadens with a "late night <category>" sibling query.
+ *
+ * ONE definition, shared by the search route and both engines (swap, reroute).
+ * It was inline in the route alone until 2026-09-25, so a swap or reroute at
+ * midnight searched WITHOUT the broadening the initial plan had: the same
+ * category that returned a decent pool when planned came back thin when the
+ * replacement was hunted at 11 PM. Judged in the PLAN's zone, like every other
+ * hour in the pipeline, never the server's.
+ *
+ * The bounds are search policy, not a measurement: a probe at 23:30 Toronto
+ * showed "restaurant" returning 6/20 open venues and the "late night" variant 8/20
+ * with partial overlap, so the union roughly doubles the genuinely-open pool.
+ */
+export const LATE_NIGHT_FROM_HOUR = 21;
+export const LATE_NIGHT_BEFORE_HOUR = 5;
+
+export function isLateNightAt(instant: Date, timeZone?: string): boolean {
+  const { hour } = wallClockParts(instant, timeZone);
+  return hour >= LATE_NIGHT_FROM_HOUR || hour < LATE_NIGHT_BEFORE_HOUR;
+}
 
 /** Public request schemas allow at most eight categories. A late-night plan
  * runs two variants per distinct category, so one searchPools call is bounded

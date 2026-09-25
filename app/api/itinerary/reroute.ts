@@ -19,7 +19,7 @@ import {
 } from "../places/search/filter";
 import { withModelFallback } from "../_shared/modelFallback";
 import { fetchWeatherHours } from "../weather/fetchWeather";
-import { searchPools as realSearchPools } from "../places/search/searchPlaces";
+import { isLateNightAt, searchPools as realSearchPools } from "../places/search/searchPlaces";
 import {
   selectVenues as realSelectVenues,
   selectModelCall,
@@ -72,7 +72,10 @@ export interface RerouteDeps {
      *  call sharing one `parsed`, unlike swap's single-stop scoped(), so a
      *  single override value can't carry each stop's own neighbourhood —
      *  this is the map searchPlaces.ts's searchPools accepts directly. */
-    locationsOverride?: Record<string, string>
+    locationsOverride?: Record<string, string>,
+    /** `lateNight`: broaden with each category's "late night" sibling query,
+     *  as the initial plan's search does at a late hour. See `isLateNightAt`. */
+    opts?: { lateNight?: boolean }
   ) => Promise<Record<string, Place[]>>;
   selectVenues: (
     parsed: ParsedPrompt,
@@ -101,9 +104,10 @@ const UNSTABLE_REASON =
 function realDeps(planMode: PlanTravelMode = "transit"): RerouteDeps {
   if (isMockMode()) return mockRerouteDeps(planMode);
   return {
-    searchPools: (parsed, categories, locationsOverride) =>
+    searchPools: (parsed, categories, locationsOverride, opts) =>
       realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories, undefined, {
         locationsOverride,
+        lateNight: opts?.lateNight,
       }),
     selectVenues: (parsed, pools, slots) =>
       withModelFallback("select", (model) =>
@@ -325,10 +329,22 @@ export async function rerouteItinerary(
 
   // Pools and weather are fetched once for the whole proposal. Subsequent
   // stabilization passes only exclude proven-invalid candidate IDs.
+  // Late-night broadening if ANY stop this reroute replans (or the moment it
+  // departs) falls in the late window, judged in the plan's zone: the one search
+  // below serves the whole tail, so the flag must cover its latest stop, not
+  // only its first. The flag only ADDS a sibling query per category, so being
+  // generous here costs calls, never a venue.
+  const lateNight =
+    isLateNightAt(new Date(departMs), timeZone) ||
+    affectedIdx.some((index) => {
+      const start = work.stops[index].start_time;
+      return start ? isLateNightAt(new Date(start), timeZone) : false;
+    });
   const rawPools = await deps.searchPools(
     parsed,
     categories,
-    Object.keys(locationsOverride).length > 0 ? locationsOverride : undefined
+    Object.keys(locationsOverride).length > 0 ? locationsOverride : undefined,
+    { lateNight }
   );
   // The CITY's forecast, not the start's: a start may sit up to 75 km
   // outside the city, and every venue this gates is in the city. Older

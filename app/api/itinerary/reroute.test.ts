@@ -531,6 +531,49 @@ const cases: Array<[string, () => Promise<void>]> = [
       assert.strictEqual(it.stops[0].id, "d1");
     },
   ],
+  // ── late-night search parity ──
+  [
+    "LATE-NIGHT PARITY: a reroute whose tail falls in the late window searches with the late-night broadening",
+    async () => {
+      const it = mkItinerary();
+      const legCalls: LegCall[] = [];
+      const now = new Date(T(19, 30)); // mid-dinner: the 21:00 bar and 22:20 dessert are downstream
+      let lateNight: boolean | undefined;
+      const res = await rerouteItinerary(it, { type: "transit_cancelled", legIndex: 0 }, now, {
+        ...mkDeps(legCalls),
+        searchPools: async (_parsed, categories, _locationsOverride, opts) => {
+          lateNight = opts?.lateNight;
+          return Object.fromEntries(categories.map((c) => [c, [mkVenue(`${c}_new`)]]));
+        },
+      });
+      assert.ok(res.rerouted);
+      assert.strictEqual(lateNight, true, "the tail reaches 22:20, inside the late window");
+    },
+  ],
+  [
+    "LATE-NIGHT PARITY: a reroute whose whole tail is early does NOT broaden the search",
+    async () => {
+      const it = mkItinerary();
+      // move the whole evening earlier so nothing replanned reaches 21:00
+      const shift = 4 * 60 * 60_000;
+      for (const stop of it.stops) {
+        stop.start_time = new Date(new Date(stop.start_time!).getTime() - shift).toISOString();
+        stop.end_time = new Date(new Date(stop.end_time!).getTime() - shift).toISOString();
+      }
+      const legCalls: LegCall[] = [];
+      const now = new Date(new Date(T(19, 30)).getTime() - shift); // mid-dinner, 15:30
+      let lateNight: boolean | undefined;
+      const res = await rerouteItinerary(it, { type: "transit_cancelled", legIndex: 0 }, now, {
+        ...mkDeps(legCalls),
+        searchPools: async (_parsed, categories, _locationsOverride, opts) => {
+          lateNight = opts?.lateNight;
+          return Object.fromEntries(categories.map((c) => [c, [mkVenue(`${c}_new`)]]));
+        },
+      });
+      assert.ok(res.rerouted);
+      assert.strictEqual(lateNight, false);
+    },
+  ],
   // ── per-activity location (the compound-location fix): a multi-stop
   // reroute threads EACH downstream stop's own plannedLocation into its OWN
   // category's search — a per-category MAP, not one shared value ──

@@ -5,6 +5,7 @@ import {
   buildQuery,
   GENERAL_QUERIES,
   includedTypeFor,
+  isLateNightAt,
   MAX_PROVIDER_CALLS_PER_SEARCH,
   SEARCH_FIELD_GROUPS,
   SEARCH_FIELD_MASK,
@@ -789,6 +790,22 @@ const cases: Array<[string, () => void]> = [
         buildQuery(mkParsed({ aesthetic: "lively" }), "bar"),
         "lively bar Ossington Toronto"
       );
+    },
+  ],
+  [
+    "isLateNightAt: 21:00 up to (not including) 05:00 in the PLAN's zone, boundaries pinned both sides",
+    () => {
+      const at = (iso: string, zone?: string) => isLateNightAt(new Date(iso), zone);
+      assert.strictEqual(at("2026-07-03T20:59:00-04:00"), false);
+      assert.strictEqual(at("2026-07-03T21:00:00-04:00"), true);
+      assert.strictEqual(at("2026-07-04T04:59:00-04:00"), true);
+      assert.strictEqual(at("2026-07-04T05:00:00-04:00"), false);
+      // the hour is read in the ZONE given, never the server's: the same instant
+      // is 21:00 in Toronto and 18:00 in Vancouver
+      assert.strictEqual(at("2026-07-03T21:00:00-04:00", "America/Toronto"), true);
+      assert.strictEqual(at("2026-07-03T21:00:00-04:00", "America/Vancouver"), false);
+      // an absent zone is the default zone (Toronto), exactly as the route always did
+      assert.strictEqual(at("2026-07-03T21:30:00-04:00", undefined), true);
     },
   ],
   [
