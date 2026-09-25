@@ -1,7 +1,7 @@
 // Places Text Search core, shared by the /api/places/search route and
 // the reroute engine (which re-searches only the affected categories).
 import { DropEntry, ParsedPrompt, Place } from "./filter";
-import { isParkLike } from "../../../lib/categoryTraits";
+import { typeFilterFor, type TypeFilter } from "./typeFilters";
 import {
   badRequest,
   finiteNumber,
@@ -112,28 +112,38 @@ export function buildQuery(
     .join(" ");
 }
 
-// Some categories get a hard Places type filter (includedType) because
-// free-text relevance alone drifts into lookalike venues:
-//  - green space → "park": a "scenic lounge" or view-restaurant can't
-//    leak into the pool (pattern aligned with the park resolver in
-//    durations.ts)
-//  - casino → "casino": the text query "casino <city>" returns poker
-//    clubs, arcade bars, and jazz lounges — often HIGHER-rated than the
-//    real casinos, so select drifts to a nightclub without the filter
-const TYPE_FILTERS: Array<[RegExp, string]> = [[/\bcasinos?\b/i, "casino"]];
-
-/** Places type filter for a category, when one applies. Park membership
- *  comes from the shared traits table (§5.3), not a fourth local regex. */
+// Some categories get a Places type filter (includedType) because free-text
+// relevance alone drifts into lookalike venues, and, worse, into businesses
+// that merely share a NAME with the kind ("The Gallery Consulting Group" for
+// "gallery"). The rules live in ./typeFilters.ts:
+//  - green space -> "park" and casino -> "casino": non-strict BIASES, exactly
+//    as before (live-verified); request shape unchanged.
+//  - a confidently-unambiguous kind (restaurant, bar, cafe, museum, ...) ->
+//    its classic Places type WITH strictTypeFiltering, so a non-venue business
+//    cannot surface for it.
+//  - everything else: no restriction, today's behaviour.
+/** The type string alone, for callers and tests that do not care whether the
+ *  filter is strict. Park membership still comes from the shared traits table
+ *  (§5.3), not a local regex. */
 export function includedTypeFor(category: string): string | undefined {
-  if (isParkLike(category ?? "")) return "park";
-  return TYPE_FILTERS.find(([pattern]) => pattern.test(category ?? ""))?.[1];
+  return typeFilterFor(category)?.includedType;
 }
 
-async function searchText(
+/** The request-body fragment for a filter. Untyped and non-strict requests are
+ *  byte-identical to what they were before strict filtering existed. */
+function typeFilterBody(filter?: TypeFilter): Record<string, unknown> {
+  if (!filter) return {};
+  return {
+    includedType: filter.includedType,
+    ...(filter.strict ? { strictTypeFiltering: true } : {}),
+  };
+}
+
+async function fetchSearchData(
   apiKey: string,
   textQuery: string,
-  includedType?: string
-): Promise<Place[]> {
+  filter?: TypeFilter
+): Promise<Record<string, unknown>> {
   const res = await fetchProvider("places", SEARCH_TEXT_URL, {
     method: "POST",
     headers: {
@@ -141,10 +151,41 @@ async function searchText(
       "X-Goog-Api-Key": apiKey,
       "X-Goog-FieldMask": SEARCH_FIELD_MASK,
     },
-    body: JSON.stringify({ textQuery, ...(includedType ? { includedType } : {}) }),
+    body: JSON.stringify({ textQuery, ...typeFilterBody(filter) }),
     cache: "no-store",
   });
-  const data = requireProviderRecord("places", await readProviderJson("places", res));
+  return requireProviderRecord("places", await readProviderJson("places", res));
+}
+
+async function searchText(
+  apiKey: string,
+  textQuery: string,
+  filter?: TypeFilter
+): Promise<Place[]> {
+  let data: Record<string, unknown>;
+  try {
+    data = await fetchSearchData(apiKey, textQuery, filter);
+  } catch (err) {
+    // A type filter is OUR guess at Google's vocabulary, and a rejected guess
+    // (an upstream 400, e.g. a type that was renamed or never existed) must
+    // degrade to today's untyped search rather than delete the whole category
+    // as "search unavailable". Only a 400 on a TYPED request qualifies: a 5xx,
+    // a 429, a timeout or a 4xx on an untyped request is the provider being
+    // unwell, and retrying without the type would not help. Logged, because a
+    // silently degraded filter is the failure this table exists to prevent.
+    if (
+      !filter ||
+      !(err instanceof ProviderError) ||
+      err.failure?.upstreamStatus !== 400
+    ) {
+      throw err;
+    }
+    console.warn(
+      "[places-type-rejected]",
+      JSON.stringify({ includedType: filter.includedType, strict: filter.strict })
+    );
+    data = await fetchSearchData(apiKey, textQuery);
+  }
   if (!Array.isArray(data.places)) {
     // Google may omit `places` for a valid empty result.
     if (data.places === undefined) return [];
@@ -173,12 +214,16 @@ async function searchText(
   });
 }
 
-function normalizedSearchKey(textQuery: string, includedType?: string): string {
+function normalizedSearchKey(textQuery: string, filter?: TypeFilter): string {
   // buildQuery embeds aesthetic, constraints, category, neighbourhood and
-  // city. includedType is separate provider behavior and therefore part of
+  // city. The type filter is separate provider behavior and therefore part of
   // the key. lateNight changes the query set itself.
   const query = textQuery.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
-  const type = includedType?.normalize("NFKC").trim().toLowerCase() ?? "";
+  // strictness changes what the provider RETURNS for the same type, so it is
+  // part of the key exactly like the type itself
+  const type = filter
+    ? `${filter.includedType.normalize("NFKC").trim().toLowerCase()}${filter.strict ? "!" : ""}`
+    : "";
   return `${type}\u0000${query}`;
 }
 
@@ -194,12 +239,12 @@ function normalizedSearchKey(textQuery: string, includedType?: string): string {
  */
 function requestScopedSearch(apiKey: string) {
   const inFlight = new Map<string, Promise<Place[]>>();
-  return (textQuery: string, includedType?: string): Promise<Place[]> => {
-    const key = normalizedSearchKey(textQuery, includedType);
+  return (textQuery: string, filter?: TypeFilter): Promise<Place[]> => {
+    const key = normalizedSearchKey(textQuery, filter);
     const existing = inFlight.get(key);
     if (existing) return existing;
 
-    const pending = searchText(apiKey, textQuery, includedType);
+    const pending = searchText(apiKey, textQuery, filter);
     inFlight.set(key, pending);
     void pending.catch(() => {
       if (inFlight.get(key) === pending) inFlight.delete(key);
@@ -340,7 +385,7 @@ export async function searchPools(
 
   if (categories.length === 0) {
     const settled = await Promise.allSettled(
-      GENERAL_QUERIES.map((q) => search(buildQuery(parsed, q)))
+      GENERAL_QUERIES.map((q) => search(buildQuery(parsed, q), typeFilterFor(q)))
     );
     const ok = settled.filter(
       (r): r is PromiseFulfilledResult<Place[]> => r.status === "fulfilled"
@@ -360,22 +405,33 @@ export async function searchPools(
   // The named vague category expands to the same day-and-night union the
   // categoryless path uses; anything else keeps its one query (plus the
   // late-night sibling). The union is already broad, so it never doubles.
-  const queriesFor = (category: string): string[] => {
+  //
+  // Each query carries its own type filter. The union's members are looked up
+  // by their OWN text (only its "bar" query is a confident kind); a named
+  // category and its late-night sibling share the category's filter.
+  const queriesFor = (
+    category: string
+  ): Array<{ query: string; filter?: TypeFilter }> => {
     const locationOverride = opts.locationsOverride?.[category];
-    return isGeneralCategory(category)
-      ? GENERAL_QUERIES.map((q) => buildQuery(parsed, q, locationOverride))
-      : opts.lateNight && !/\blate[\s-]+night\b/i.test(category)
+    if (isGeneralCategory(category)) {
+      return GENERAL_QUERIES.map((q) => ({
+        query: buildQuery(parsed, q, locationOverride),
+        filter: typeFilterFor(q),
+      }));
+    }
+    const filter = typeFilterFor(category);
+    return opts.lateNight && !/\blate[\s-]+night\b/i.test(category)
       ? [
-          buildQuery(parsed, category, locationOverride),
-          buildQuery(parsed, `late night ${category}`, locationOverride),
+          { query: buildQuery(parsed, category, locationOverride), filter },
+          { query: buildQuery(parsed, `late night ${category}`, locationOverride), filter },
         ]
-      : [buildQuery(parsed, category, locationOverride)];
+      : [{ query: buildQuery(parsed, category, locationOverride), filter }];
   };
 
   const settled = await Promise.allSettled(
     categories.map(async (category) => {
       const variants = await Promise.allSettled(
-        queriesFor(category).map((q) => search(q, includedTypeFor(category)))
+        queriesFor(category).map(({ query, filter }) => search(query, filter))
       );
       const successful = variants.filter(
         (result): result is PromiseFulfilledResult<Place[]> =>

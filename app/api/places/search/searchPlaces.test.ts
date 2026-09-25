@@ -30,6 +30,74 @@ function mkParsed(overrides: Partial<ParsedPrompt> = {}): ParsedPrompt {
   };
 }
 
+
+// ── type-filter tests ────────────────────────────────────────────────────
+// A stand-in for Google's Text Search that honours the DOCUMENTED type
+// semantics (strictTypeFiltering: true returns only places carrying the
+// included type; otherwise the type is just a bias, so everything text-matches)
+// over a dataset that includes the non-venue businesses the filter exists to
+// keep out. It cannot prove Google's real behaviour (that is a live-probe item,
+// see REPORT-places-type-allowlist.md); it proves the REQUEST we send and that,
+// given the documented semantics, the decoys stay out of a typed pool.
+interface StubPlace {
+  id: string;
+  displayName: { text: string };
+  types: string[];
+}
+const STUB_DATASET: StubPlace[] = [
+  { id: "velvet", displayName: { text: "Velvet Fig" }, types: ["restaurant", "food", "point_of_interest", "establishment"] },
+  { id: "nona", displayName: { text: "Trattoria Nona" }, types: ["italian_restaurant", "restaurant", "food", "point_of_interest", "establishment"] },
+  { id: "aog", displayName: { text: "Art Gallery of Ontario" }, types: ["art_gallery", "museum", "point_of_interest", "establishment"] },
+  // the decoys: real shapes seen live (a consultancy that text-matched "gallery",
+  // one that text-matched "further", and a neighbourhood offered as a restaurant)
+  { id: "gallery-consulting", displayName: { text: "The Gallery Consulting Group" }, types: ["marketing_consultant", "consultant", "point_of_interest", "establishment"] },
+  { id: "law", displayName: { text: "Smith & Partners LLP" }, types: ["lawyer", "point_of_interest", "establishment"] },
+  { id: "distillery", displayName: { text: "The Distillery District" }, types: ["tourist_attraction", "historical_landmark", "point_of_interest"] },
+];
+
+interface StubOptions {
+  /** status to answer a request that carries includedType with */
+  typedStatus?: number;
+  /** status to answer a request with NO includedType with */
+  untypedStatus?: number;
+}
+
+async function withGoogleStub<T>(
+  options: StubOptions,
+  run: (bodies: Array<Record<string, unknown>>) => Promise<T>
+): Promise<T> {
+  const bodies: Array<Record<string, unknown>> = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (!String(url).includes("places.googleapis.com")) return realFetch(url as never, init);
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    bodies.push(body);
+    const typed = typeof body.includedType === "string";
+    const status = typed ? options.typedStatus : options.untypedStatus;
+    if (status && status !== 200) {
+      return new Response(JSON.stringify({ error: { code: status, message: "stub" } }), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const matches =
+      typed && body.strictTypeFiltering === true
+        ? STUB_DATASET.filter((place) => place.types.includes(body.includedType as string))
+        : STUB_DATASET;
+    return new Response(
+      JSON.stringify({ places: matches.map((place) => ({ id: place.id, displayName: place.displayName })) }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }) as typeof fetch;
+  try {
+    return await run(bodies);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+const poolIds = (places: Array<{ id: string }> | undefined) => (places ?? []).map((p) => p.id).sort();
+
 // A repeated category must not cost a second identical Places call — the
 // pools are keyed by category, so the duplicate would just overwrite the
 // first (code-audit 2026-07-18 §7.1). Slot bookkeeping lives in select.
@@ -599,6 +667,125 @@ const searchCases: Array<[string, () => Promise<void>]> = [
       }
     },
   ],
+  [
+    "TYPE ALLOWLIST: a strictly-typed category keeps non-venue businesses out, an unmapped one is exactly today's behaviour",
+    async () => {
+      await withGoogleStub({}, async (bodies) => {
+        const pools = await searchPools(
+          "k",
+          mkParsed({ category_signals: ["restaurant", "art gallery", "arcade"] })
+        );
+        // the marketing consultancy, the law office and the neighbourhood landmark
+        // never reach a restaurant or a gallery pool, real venues still do
+        assert.deepStrictEqual(poolIds(pools.restaurant), ["nona", "velvet"]);
+        assert.deepStrictEqual(poolIds(pools["art gallery"]), ["aog"]);
+        // an UNMAPPED kind is deliberately unchanged (the honest limit: a lookalike
+        // can still surface where no confident type exists)
+        assert.strictEqual(pools.arcade.length, STUB_DATASET.length);
+        assert.ok(pools.arcade.some((p) => p.id === "gallery-consulting"));
+        assert.strictEqual(bodies.length, 3);
+      });
+    },
+  ],
+  [
+    "TYPE REQUEST SHAPE: strict only where mapped, park and casino stay byte-identical non-strict, unmapped sends no type at all",
+    async () => {
+      await withGoogleStub({}, async (bodies) => {
+        await searchPools(
+          "k",
+          mkParsed({ category_signals: ["restaurant", "park", "casino", "arcade"] })
+        );
+        const byQuery = new Map(bodies.map((b) => [String(b.textQuery), b]));
+        assert.deepStrictEqual(byQuery.get("restaurant Ossington Toronto"), {
+          textQuery: "restaurant Ossington Toronto",
+          includedType: "restaurant",
+          strictTypeFiltering: true,
+        });
+        // exactly the pre-existing request bodies: no strictTypeFiltering key at all
+        assert.deepStrictEqual(byQuery.get("park Ossington Toronto"), {
+          textQuery: "park Ossington Toronto",
+          includedType: "park",
+        });
+        assert.deepStrictEqual(byQuery.get("casino Ossington Toronto"), {
+          textQuery: "casino Ossington Toronto",
+          includedType: "casino",
+        });
+        assert.deepStrictEqual(byQuery.get("arcade Ossington Toronto"), {
+          textQuery: "arcade Ossington Toronto",
+        });
+      });
+    },
+  ],
+  [
+    "TYPE FALLBACK: a type Google rejects (400) degrades to the untyped search instead of deleting the category",
+    async () => {
+      const warnings: string[] = [];
+      const realWarn = console.warn;
+      console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+      try {
+        await withGoogleStub({ typedStatus: 400 }, async (bodies) => {
+          const failures: DropEntry[] = [];
+          const pools = await searchPools(
+            "k",
+            mkParsed({ category_signals: ["restaurant"] }),
+            undefined,
+            { failures }
+          );
+          // typed first, then the untyped retry, exactly two calls
+          assert.strictEqual(bodies.length, 2);
+          assert.strictEqual(bodies[0].includedType, "restaurant");
+          assert.strictEqual("includedType" in bodies[1], false);
+          // the category survived (today's behaviour) and is not reported as unavailable
+          assert.strictEqual(pools.restaurant.length, STUB_DATASET.length);
+          assert.strictEqual(failures.length, 0);
+        });
+      } finally {
+        console.warn = realWarn;
+      }
+      assert.ok(
+        warnings.some((w) => w.includes("[places-type-rejected]") && w.includes("restaurant")),
+        "a degraded filter must be logged, not silent"
+      );
+    },
+  ],
+  [
+    "TYPE FALLBACK IS NARROW: only a 400 on a TYPED request retries untyped",
+    async () => {
+      // a provider that is merely unwell (5xx, rate limit) would not be fixed by dropping the type
+      for (const typedStatus of [500, 429, 403]) {
+        await withGoogleStub({ typedStatus }, async (bodies) => {
+          await assert.rejects(() => searchPools("k", mkParsed({ category_signals: ["restaurant"] })));
+          assert.strictEqual(bodies.length, 1, `typed ${typedStatus} must not be retried`);
+        });
+      }
+      // a 400 on a request that never carried a type has nothing to degrade
+      await withGoogleStub({ untypedStatus: 400 }, async (bodies) => {
+        await assert.rejects(() => searchPools("k", mkParsed({ category_signals: ["arcade"] })));
+        assert.strictEqual(bodies.length, 1);
+      });
+    },
+  ],
+  [
+    "TYPE + GENERAL UNION: only the union's bar query is typed, and a named bar in the same attempt still shares that one call",
+    async () => {
+      await withGoogleStub({}, async (bodies) => {
+        await searchPools("k", mkParsed({ category_signals: [] }));
+        assert.strictEqual(bodies.length, GENERAL_QUERIES.length);
+        const typed = bodies.filter((b) => "includedType" in b);
+        assert.deepStrictEqual(typed, [
+          { textQuery: "bar Ossington Toronto", includedType: "bar", strictTypeFiltering: true },
+        ]);
+      });
+      // the cost boundary is unchanged: the named "bar" and the union's "bar" are
+      // one identical typed request, so the attempt is still five calls, not six
+      await withGoogleStub({}, async (bodies) => {
+        await searchPools("k", mkParsed({ category_signals: ["bar", "things to do"] }));
+        assert.strictEqual(bodies.length, GENERAL_QUERIES.length);
+        const bar = bodies.filter((b) => b.textQuery === "bar Ossington Toronto");
+        assert.strictEqual(bar.length, 1, "the shared typed bar query must dedupe to one call");
+      });
+    },
+  ],
 ];
 
 const cases: Array<[string, () => void]> = [
@@ -728,10 +915,13 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(includedTypeFor("park walk"), "park");
       assert.strictEqual(includedTypeFor("garden"), "park");
       assert.strictEqual(includedTypeFor("quiet trail"), "park");
-      // commercial categories stay unfiltered free-text searches
-      assert.strictEqual(includedTypeFor("bar"), undefined);
-      assert.strictEqual(includedTypeFor("dinner"), undefined);
-      assert.strictEqual(includedTypeFor("boardwalk cafe"), undefined); // \bwalk\b — a boardwalk CAFE is commercial
+      // commercial categories are no longer all unfiltered free-text searches:
+      // a confidently-unambiguous kind now gets its classic type (STRICT, see
+      // typeFilters.ts), but a lookalike must still never be read as a park
+      assert.strictEqual(includedTypeFor("bar"), "bar");
+      assert.strictEqual(includedTypeFor("dinner"), "restaurant");
+      assert.notStrictEqual(includedTypeFor("bar"), "park");
+      assert.strictEqual(includedTypeFor("boardwalk cafe"), undefined); // \bwalk\b — a boardwalk CAFE is commercial, and not a mapped kind either
       // the text query itself is unchanged for parks (type filter does the work)
       const q = buildQuery(mkParsed({ aesthetic: "quiet" }), "park");
       assert.strictEqual(q, "quiet park Ossington Toronto");
@@ -800,8 +990,10 @@ const cases: Array<[string, () => void]> = [
       assert.strictEqual(includedTypeFor("casino"), "casino");
       assert.strictEqual(includedTypeFor("casinos"), "casino");
       assert.strictEqual(includedTypeFor("casino night"), "casino");
-      // nightlife lookalikes stay unfiltered free-text searches
-      assert.strictEqual(includedTypeFor("nightclub"), undefined);
+      // a nightclub is a night_club (strict), never a casino
+      assert.strictEqual(includedTypeFor("nightclub"), "night_club");
+      assert.notStrictEqual(includedTypeFor("nightclub"), "casino");
+      // other nightlife lookalikes stay unfiltered free-text searches
       assert.strictEqual(includedTypeFor("club"), undefined);
       assert.strictEqual(includedTypeFor("poker club"), undefined);
       // the text query itself is unchanged (type filter does the work)
