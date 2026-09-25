@@ -416,8 +416,10 @@ function isText(value: unknown, maxChars = MAX_TEXT_CHARS): value is string {
  * that describe "some place" rather than any actual KIND of place. It
  * cannot catch a well-formed category that happens to collide with an
  * unrelated business's name (e.g. "gallery" matching a company literally
- * named "The Gallery Consulting Group") — that needs a Places includedType
- * allowlist, a separate, larger, not-yet-built fix (see CLAUDE.md). Kept
+ * named "The Gallery Consulting Group") — that is what the Places
+ * includedType table in places/search/typeFilters.ts is for (built
+ * 2026-09-25, deliberately conservative: an unmapped kind is still an
+ * unrestricted search, so this shape guard stays necessary). Kept
  * deliberately small and defensible: a speculative list broad enough to
  * guess at every bad phrasing would itself start rejecting legitimate
  * single-word categories ("spa", "museum", "arcade").
