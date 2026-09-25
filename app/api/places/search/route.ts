@@ -1,8 +1,7 @@
 import { NextRequest } from "next/server";
 import { DropEntry, filterPools, ParsedPrompt, WeatherHour } from "./filter";
-import { searchPools } from "./searchPlaces";
+import { isLateNightAt, searchPools } from "./searchPlaces";
 import { resolveStartTime } from "../../schedule/schedule";
-import { wallClockParts } from "../../../lib/zoneTime";
 import { isMockMode, mockPools } from "../../_mock/fixtures";
 import {
   apiError,
@@ -81,9 +80,9 @@ export async function POST(request: NextRequest) {
           ? new Date(targetTime)
           : resolveStartTime(parsed.time_window ?? "", new Date(), cats, timeZone);
       // late-night broadening kicks in when the PLAN's local hour is late —
-      // judged in the plan's zone, like every other hour in the pipeline
-      const localHour = wallClockParts(resolved, timeZone).hour;
-      lateNight = localHour >= 21 || localHour < 5;
+      // judged in the plan's zone, like every other hour in the pipeline.
+      // The definition is shared with the swap and reroute engines.
+      lateNight = isLateNightAt(resolved, timeZone);
       logEvent("info", "schedule_resolved", {
         categoryCount: cats.length,
         timeZone: timeZone ?? "America/Toronto",

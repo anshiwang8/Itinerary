@@ -18,7 +18,7 @@
 import { Itinerary, ItineraryStop, withStatuses, floorTime, timedIndexes, rebuildLegs } from "./store";
 import { filterPools, ParsedPrompt, Place, WeatherHour } from "../places/search/filter";
 import { fetchWeatherHours } from "../weather/fetchWeather";
-import { searchPools as realSearchPools } from "../places/search/searchPlaces";
+import { isLateNightAt, searchPools as realSearchPools } from "../places/search/searchPlaces";
 import {
   selectVenues as realSelectVenues,
   selectModelCall,
@@ -158,7 +158,12 @@ export interface SwapDeps {
   ) => Promise<SwapInterpretation>;
   searchPools: (
     parsed: ParsedPrompt,
-    categories: string[]
+    categories: string[],
+    /** `lateNight` broadens the search with each category's "late night"
+     *  sibling query, exactly as the initial plan's search does at a late hour
+     *  (`isLateNightAt`). The engine decides it from the instant it is searching
+     *  FOR, in the plan's zone. */
+    opts?: { lateNight?: boolean }
   ) => Promise<Record<string, Place[]>>;
   selectVenues: (
     parsed: ParsedPrompt,
@@ -642,8 +647,14 @@ export function realDeps(planMode: PlanTravelMode = "transit"): SwapDeps {
   return {
     interpret: (parsed, category, currentStartISO, refinement) =>
       interpretRefinement(process.env.OPENROUTER_API_KEY ?? "", parsed, category, currentStartISO, refinement),
-    searchPools: (parsed, categories) =>
-      realSearchPools(process.env.GOOGLE_PLACES_API_KEY ?? "", parsed, categories),
+    searchPools: (parsed, categories, opts) =>
+      realSearchPools(
+        process.env.GOOGLE_PLACES_API_KEY ?? "",
+        parsed,
+        categories,
+        undefined,
+        { lateNight: opts?.lateNight }
+      ),
     selectVenues: (parsed, pools) =>
       withModelFallback("select", (model) =>
         realSelectVenues(
@@ -1579,7 +1590,13 @@ async function venueSwap(
   );
 
   const tz = itinerary.timeZone ?? DEFAULT_ZONE;
-  const rawPools = await deps.searchPools(searchParsed, [poolKey]);
+  // The same late-night broadening the initial plan gets, judged at the instant
+  // this swap is searching FOR (the one `filterPools` below judges hours at),
+  // in the plan's zone. Without it a swap at 11 PM hunted its replacement in a
+  // thinner pool than the plan had been built from.
+  const rawPools = await deps.searchPools(searchParsed, [poolKey], {
+    lateNight: isLateNightAt(new Date(target.start_time!), tz),
+  });
   // a swap must not move an outdoor stop into the rain either (§7.6)
   const { pools: filtered } = filterPools(
     rawPools,
@@ -2281,7 +2298,11 @@ async function findReplacement(
   location?: string
 ): Promise<{ sel: Selection; pick: Place } | null> {
   const parsed = scoped(base, { location }, category);
-  const rawPools = await deps.searchPools(parsed, [category]);
+  // late-night broadening at the slot's own instant, in the plan's zone (see
+  // the venue-swap call site for why)
+  const rawPools = await deps.searchPools(parsed, [category], {
+    lateNight: isLateNightAt(when, timeZone),
+  });
   const { pools } = filterPools(rawPools, parsed, weather, now, when, timeZone);
   // A replacement always takes the category's default length (the convention
   // every caller applies on adapt), so that is the slot it has to stay open

@@ -10,6 +10,7 @@ import {
   parseTimeExpr,
   parseDurationExpr,
   usableByHours,
+  realDeps,
   REFINE_SYSTEM,
   TimeShift,
   DurationShift,
@@ -1243,6 +1244,117 @@ const cases: Array<[string, () => Promise<void>]> = [
       if (!res.swapped) assert.match(res.reason, /missing the details/i);
       // the stop is left exactly as it was
       assert.strictEqual(it.stops[1].id, "b1");
+    },
+  ],
+  // ── late-night search parity: a swap searches with the SAME broadening the
+  // initial plan gets at a late hour, judged at the slot's own instant in the
+  // PLAN's zone ──
+  [
+    "LATE-NIGHT PARITY: a venue swap on a late slot searches with the late-night broadening, an early slot does not",
+    async () => {
+      const seen: Array<{ cats: string[]; lateNight: boolean | undefined }> = [];
+      const recording = (deps: SwapDeps): SwapDeps => ({
+        ...deps,
+        searchPools: async (parsed, cats, searchOpts) => {
+          seen.push({ cats, lateNight: searchOpts?.lateNight });
+          return deps.searchPools(parsed, cats, searchOpts);
+        },
+      });
+      // the bar starts 21:00 Toronto: inside the late window
+      await swapStop(mkItinerary(), 1, "somewhere else", new Date(T(18, 0)), recording(mkDeps({ legMin: 10 })));
+      // the dinner starts 19:00: outside it
+      await swapStop(mkItinerary(), 0, "somewhere else", new Date(T(18, 0)), recording(mkDeps({ legMin: 10 })));
+      assert.deepStrictEqual(seen, [
+        { cats: ["bar"], lateNight: true },
+        { cats: ["dinner"], lateNight: false },
+      ]);
+    },
+  ],
+  [
+    "LATE-NIGHT PARITY is judged in the PLAN's zone: the same instant is late in one city and not another",
+    async () => {
+      const flags: Array<boolean | undefined> = [];
+      const recording = (): SwapDeps => {
+        const deps = mkDeps({ legMin: 10 });
+        return {
+          ...deps,
+          searchPools: async (parsed, cats, searchOpts) => {
+            flags.push(searchOpts?.lateNight);
+            return deps.searchPools(parsed, cats, searchOpts);
+          },
+        };
+      };
+      // the bar starts at 21:00-04:00, which is 18:00 in Vancouver
+      const vancouver = mkItinerary();
+      vancouver.timeZone = "America/Vancouver";
+      await swapStop(vancouver, 1, "somewhere else", new Date(T(18, 0)), recording());
+      const toronto = mkItinerary();
+      await swapStop(toronto, 1, "somewhere else", new Date(T(18, 0)), recording());
+      // and 21:00-04:00 is 02:00 in London, which IS late again (wraps past midnight)
+      const london = mkItinerary();
+      london.timeZone = "Europe/London";
+      await swapStop(london, 1, "somewhere else", new Date(T(18, 0)), recording());
+      assert.deepStrictEqual(flags, [false, true, true]);
+    },
+  ],
+  [
+    "LATE-NIGHT PARITY: the ADAPT search for a downstream stop is judged at THAT stop's new arrival",
+    async () => {
+      const seen: Array<{ cats: string[]; lateNight: boolean | undefined }> = [];
+      const deps = mkDeps({
+        time: { mode: "relative", deltaMinutes: 60 },
+        legMin: 10,
+        unusableIds: ["s1"],
+      });
+      // bar an hour later -> the dessert arrives ~23:20 and its venue is closed,
+      // so the tail reflow hunts a replacement AT that late instant
+      const res = await swapStop(mkItinerary(), 1, "an hour later", new Date(T(18, 0)), {
+        ...deps,
+        searchPools: async (parsed, cats, searchOpts) => {
+          seen.push({ cats, lateNight: searchOpts?.lateNight });
+          return deps.searchPools(parsed, cats, searchOpts);
+        },
+      });
+      assert.ok(res.swapped);
+      assert.deepStrictEqual(seen, [{ cats: ["dessert"], lateNight: true }]);
+    },
+  ],
+  [
+    "LATE-NIGHT PARITY: the REAL swap binding forwards the flag, so the late-night sibling query actually goes out",
+    async () => {
+      // every other case injects a fake searchPools, so nothing above proves the
+      // production binding hands `lateNight` on to the Places search
+      const queries: string[] = [];
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).includes("places.googleapis.com")) {
+          queries.push(JSON.parse(String(init?.body)).textQuery as string);
+          return new Response(JSON.stringify({ places: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const deps = realDeps();
+        const parsed = {
+          time_window: "unspecified", stop_count: null, aesthetic: "unspecified",
+          category_signals: ["bar"], group_context: "solo", budget: null,
+          constraints: [], location: "Ossington",
+        };
+        await deps.searchPools(parsed, ["bar"], { lateNight: true });
+        await deps.searchPools(parsed, ["bar"], { lateNight: false });
+        await deps.searchPools(parsed, ["bar"]);
+        assert.deepStrictEqual(queries, [
+          "bar Ossington Toronto",
+          "late night bar Ossington Toronto",
+          "bar Ossington Toronto",
+          "bar Ossington Toronto",
+        ]);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
     },
   ],
   // ── per-activity location (the compound-location fix): a swap re-searches
