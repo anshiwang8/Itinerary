@@ -435,6 +435,109 @@ downgraded persona's history checks would pass for the wrong reason.
 The saved file is a real credential for that account. It lives in the gitignored
 `output/` directory. Do not commit or share it.
 
+### When Google blocks the automated login: export from your everyday Chrome
+
+`npm run test:agents:login` drives a browser, and Google can refuse to sign in an
+automated one ("Couldn't sign you in"; a real Chrome channel and then
+fingerprint suppression were both tried and both refused). Signing in **by hand**
+in your everyday Chrome is not refused, and the app's session then sits in that
+browser's storage. `auth/export-chrome-session.ts` carries it across, writing the
+**same file, in the same shape**, that `test:agents:login` writes and the
+signed-in personas already read.
+
+> **Status: written and mechanics-tested on a throwaway synthetic profile only.
+> It has NOT been run against a real Chrome profile with a real login. That has to
+> be you, once.** The steps below are how.
+
+**Once, by hand**
+
+1. In your everyday Chrome, open <https://itinerary-six.vercel.app>, click
+   **Sign in**, and sign in with Google. Answer the taste survey if it appears.
+   Wait until your **name** shows in the corner (a guest sees "Sign in").
+2. **Close every Chrome window.** Then check the system tray and Task Manager:
+   Chrome keeps running in the background unless *Settings > System > Continue
+   running background apps when Google Chrome is closed* is off. The tool refuses
+   to run while Chrome still holds the profile (a copy taken from a running Chrome
+   is torn), so this step cannot be skipped by accident.
+
+**Then, from the repo root**
+
+```bash
+# 3. see which profile is which (reads Chrome's profile list only)
+npx tsx testing/agent-personas/auth/export-chrome-session.ts --list
+
+# 4. rehearse: does everything except write the file
+npx tsx testing/agent-personas/auth/export-chrome-session.ts --profile "Default" --dry-run
+
+# 5. for real
+npx tsx testing/agent-personas/auth/export-chrome-session.ts --profile "Default"
+```
+
+Use the profile name `--list` shows for the Chrome profile you signed in with. If
+you have more than one profile the tool will not guess (capturing the wrong account
+would make the run test the wrong user).
+
+**What a good run prints** (no tokens, only facts):
+
+```
+Captured a signed-in session:
+  account   y***@gmail.com
+  provider  google.com
+  the app recognised it as a real account: yes
+  cookies: 0
+  origin https://itinerary-six.vercel.app: localStorage 0, indexedDB firebase-heartbeat-database [...]; firebaseLocalStorageDb [firebaseLocalStorage: 1]
+
+Saved testing\agent-personas\output\signed-in-state.json (... bytes).
+It is gitignored. Treat it as a credential: do not commit or share it.
+```
+
+Check three things: the masked address is **your** account, `provider` is
+`google.com`, and `firebaseLocalStorage: 1` (or more) is present. Any existing
+`signed-in-state.json` is kept beside it as `signed-in-state.json.previous`.
+The tool's own output above is the check: it only writes the file after the app
+itself has recognised the account. The signed-in persona (`signed-in-regular`)
+reports "skipped" at *run time* when this file is missing, so once it exists it is
+picked up. The dry run (`npm run test:agents`) does not look at the file. The only
+full confirmation is a real `npm run test:agents -- --only signed-in-regular
+--confirm`, which spends real money, so that call is yours.
+
+**What it does, and never does**
+
+- It copies **only the app origin's IndexedDB folder** out of the chosen profile
+  into a throwaway profile, opens the app in a browser on that copy so Firebase
+  restores the session exactly as it would in your everyday browser, and lets
+  Playwright write it with `storageState({ indexedDB: true })`.
+- It **never copies cookies** (so your Google account session cannot end up in
+  the file), saved passwords, history, extensions, or any other site's storage.
+  The result is filtered to the app's own origin a second time before writing.
+- It refuses, with a message saying what to do, when: Chrome still has the
+  profile open; the profile has no saved session for the app; the session is an
+  anonymous **guest** one (which would make a "signed-in" persona a guest); or the
+  app does not recognise the account when loaded (an expired or revoked login).
+- The throwaway profile is deleted on every exit path, including failures.
+- Nothing is sent anywhere. It talks to the app you point it at (to let Firebase
+  restore the session) and writes one local file.
+
+**If it does not work**
+
+| Symptom | Likely cause |
+|---|---|
+| "Chrome is still using this profile" | A Chrome process is still alive: tray icon, Task Manager, or "continue running background apps". `--ignore-lock` only for a stale lock. |
+| "no saved data for <origin>" | You signed in in a different Chrome profile, or on a different URL. Use `--list` and `--origin`. |
+| "holds only a GUEST session" | You never completed the Google sign-in in that profile. |
+| "did not recognise it when loaded" | The login expired or was revoked. Sign in again in Chrome and retry. |
+| Chrome will not launch for the copy | Try `--channel chromium` (Playwright's bundled browser) or `--headed` to watch it. |
+
+The session file is a real credential (a refresh token for your account). It lives
+in the gitignored `output/` directory; delete it when you are done with it. To
+invalidate it at the source, remove the app's access in your Google Account
+(Security > Third-party access), or have whoever administers the Firebase project
+revoke that user's refresh tokens.
+
+The pure helpers behind this (folder naming, profile list, session facts, output
+filtering) have unit tests: `npx tsx testing/agent-personas/auth/chromeSession.test.ts`
+(11 cases; not part of `npm run check`, like the rest of this harness).
+
 ---
 
 ## Natural completion
@@ -544,3 +647,6 @@ be done with the same arithmetic in mind.
 | `lib/recorder.ts` | the expected-vs-actual ledger, screenshots, console/network |
 | `lib/report.ts` | markdown report, deviations only (both sets) |
 | `auth/save-storage-state.ts` | one-time interactive sign-in capture (ordinary set only) |
+| `auth/export-chrome-session.ts` | the fallback when Google blocks that capture: copies the app origin's session out of your everyday Chrome profile (needs you to run it once) |
+| `auth/chromeSession.ts` | its pure helpers (folder naming, profile list, session facts, output filtering) |
+| `auth/chromeSession.test.ts` | unit tests for those helpers (11 cases, run by hand) |
